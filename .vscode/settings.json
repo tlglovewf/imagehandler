@@ -1,0 +1,10 @@
+{
+  "cmake.useCMakePresets": "always",
+  "cmake.configureOnOpen": true,
+  "cmake.defaultConfigurePreset": "vs2022-x64",
+  "cmake.defaultBuildPreset": "debug",
+  "cmake.defaultTestPreset": "test-debug",
+  "cmake.configureOnEdit": false,
+  "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+  "C_Cpp.intelliSenseEngine": "default"
+}

@@ -1,0 +1,17 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "ImageHandler (Debug)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/vs2022-x64/Debug/ImageHandler.exe",
+      "args": [],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}/build/vs2022-x64/Debug",
+      "environment": [],
+      "console": "internalConsole",
+      "preLaunchTask": "CMake: build Debug"
+    }
+  ]
+}

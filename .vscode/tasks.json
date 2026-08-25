@@ -1,0 +1,55 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "CMake: configure",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--preset", "vs2022-x64"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "group": "build"
+    },
+    {
+      "label": "CMake: build Debug",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--build", "--preset", "debug", "--parallel"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": "CMake: configure",
+      "problemMatcher": "$msCompile",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "CMake: build Release",
+      "type": "process",
+      "command": "cmake",
+      "args": ["--build", "--preset", "release", "--parallel"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": "CMake: configure",
+      "problemMatcher": "$msCompile",
+      "group": "build"
+    },
+    {
+      "label": "CTest: Debug",
+      "type": "process",
+      "command": "ctest",
+      "args": ["--preset", "test-debug"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": "CMake: build Debug",
+      "problemMatcher": [],
+      "group": "test"
+    }
+  ]
+}
