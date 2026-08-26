@@ -65,7 +65,7 @@ bool BmpStreamWriter::write(const QString& path, const ImageDocumentPtr& documen
             memcpy(row.data(), src, static_cast<size_t>(width));
         } else {
             for (int ix = 0; ix < width; ++ix) {
-                const bool white = src[ix] >= settings.threshold;
+                const bool white = src[ix] > settings.threshold;
                 if (white) row[ix / 8] = char(uchar(row[ix / 8]) | uchar(0x80u >> (ix % 8)));
             }
         }
@@ -79,4 +79,3 @@ bool BmpStreamWriter::write(const QString& path, const ImageDocumentPtr& documen
     if (!file.flush()) { if (error) *error = file.errorString(); return false; }
     return true;
 }
-

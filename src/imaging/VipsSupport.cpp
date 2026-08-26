@@ -10,6 +10,13 @@ void VipsImageDeleter::operator()(VipsImage* image) const noexcept {
 }
 
 namespace VipsSupport {
+namespace {
+void cancelEvaluation(VipsImage* image, VipsProgress*, gpointer opaque) {
+    const auto* token = static_cast<const CancellationTokenPtr*>(opaque);
+    if (*token && (*token)->isCancelled()) vips_image_set_kill(image, TRUE);
+}
+}
+
 bool initialize(const char* argv0, QString* error) {
     if (VIPS_INIT(argv0) != 0) {
         if (error) *error = lastError();
@@ -37,8 +44,10 @@ VipsImagePtr ref(VipsImage* image) {
 }
 
 QImage renderRegion(const ImageDocumentPtr& document, qint64 x, qint64 y,
-                    qint64 width, qint64 height, double scale, QString* error) {
+                    qint64 width, qint64 height, double scale, QString* error,
+                    const CancellationTokenPtr& token) {
     if (!document || !document->image || width <= 0 || height <= 0 || scale <= 0.0) return {};
+    if (token && token->isCancelled()) return {};
     VipsImage* cropped = nullptr;
     VipsImage* resized = nullptr;
     VipsImage* prepared = nullptr;
@@ -82,8 +91,15 @@ QImage renderRegion(const ImageDocumentPtr& document, qint64 x, qint64 y,
     }
 
     {
+        CancellationTokenPtr evaluationToken = token;
+        gulong cancellationHandler = 0;
+        if (evaluationToken) {
+            vips_image_set_progress(prepared, TRUE);
+            cancellationHandler = g_signal_connect(prepared, "eval", G_CALLBACK(cancelEvaluation), &evaluationToken);
+        }
         size_t bytes = 0;
         void* memory = vips_image_write_to_memory(prepared, &bytes);
+        if (cancellationHandler) g_signal_handler_disconnect(prepared, cancellationHandler);
         if (!memory) goto fail;
         const int w = prepared->Xsize;
         const int h = prepared->Ysize;
@@ -102,7 +118,11 @@ fail:
     if (prepared) g_object_unref(prepared);
     if (resized) g_object_unref(resized);
     if (cropped) g_object_unref(cropped);
-    if (error) *error = lastError();
+    if (token && token->isCancelled()) {
+        lastError();
+    } else if (error) {
+        *error = lastError();
+    }
     return {};
 }
 }

@@ -14,12 +14,15 @@ qt_standard_project_setup()
 
 add_library(image_handler_core
     src/domain/Models.h
+    src/domain/MergeInputSelector.h src/domain/MergeInputSelector.cpp
     src/imaging/VipsSupport.h src/imaging/VipsSupport.cpp
+    src/imaging/BmpRegionLoader.h src/imaging/BmpRegionLoader.cpp
     src/imaging/ImageLoader.h src/imaging/ImageLoader.cpp
     src/imaging/MosaicBuilder.h src/imaging/MosaicBuilder.cpp
     src/imaging/PatternDetector.h src/imaging/PatternDetector.cpp
     src/io/DirectoryScanner.h src/io/DirectoryScanner.cpp
     src/io/BmpStreamWriter.h src/io/BmpStreamWriter.cpp
+    src/io/MergedImageExporter.h src/io/MergedImageExporter.cpp
     src/io/SplitExporter.h src/io/SplitExporter.cpp
     src/tasks/TaskManager.h src/tasks/TaskManager.cpp
 )
@@ -79,3 +82,37 @@ qt_add_executable(ImageHandlerTests
 )
 target_link_libraries(ImageHandlerTests PRIVATE image_handler_core Qt6::Test)
 add_test(NAME ImageHandlerTests COMMAND ImageHandlerTests)
+set_property(TEST ImageHandlerTests PROPERTY ENVIRONMENT_MODIFICATION
+    "PATH=path_list_prepend:${QT_ROOT}/bin"
+    "PATH=path_list_prepend:${VIPS_ROOT}/bin")
+
+qt_add_executable(LargeImageViewTests
+    tests/TestLargeImageView.cpp
+    src/ui/LargeImageView.h src/ui/LargeImageView.cpp
+)
+target_include_directories(LargeImageViewTests PRIVATE
+    "${VIPS_ROOT}/include"
+    "${VIPS_ROOT}/include/glib-2.0"
+    "${VIPS_ROOT}/lib/glib-2.0/include"
+)
+target_link_libraries(LargeImageViewTests PRIVATE image_handler_core Qt6::Widgets Qt6::Test)
+add_test(NAME LargeImageViewTests COMMAND LargeImageViewTests)
+set_property(TEST LargeImageViewTests PROPERTY ENVIRONMENT_MODIFICATION
+    "PATH=path_list_prepend:${QT_ROOT}/bin"
+    "PATH=path_list_prepend:${VIPS_ROOT}/bin")
+
+qt_add_executable(MainWindowTests
+    tests/TestMainWindow.cpp
+    src/ui/MainWindow.h src/ui/MainWindow.cpp
+    src/ui/LargeImageView.h src/ui/LargeImageView.cpp
+)
+target_include_directories(MainWindowTests PRIVATE
+    "${VIPS_ROOT}/include"
+    "${VIPS_ROOT}/include/glib-2.0"
+    "${VIPS_ROOT}/lib/glib-2.0/include"
+)
+target_link_libraries(MainWindowTests PRIVATE image_handler_core Qt6::Widgets Qt6::Test)
+add_test(NAME MainWindowTests COMMAND MainWindowTests)
+set_property(TEST MainWindowTests PROPERTY ENVIRONMENT_MODIFICATION
+    "PATH=path_list_prepend:${QT_ROOT}/bin"
+    "PATH=path_list_prepend:${VIPS_ROOT}/bin")

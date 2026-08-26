@@ -1,6 +1,8 @@
 #include "ui/LargeImageView.h"
 #include "imaging/VipsSupport.h"
+#include "io/SplitExporter.h"
 
+#include <QApplication>
 #include <QFutureWatcher>
 #include <QMouseEvent>
 #include <QPainter>
@@ -19,15 +21,33 @@ LargeImageView::LargeImageView(QWidget* parent) : QWidget(parent) {
 }
 
 void LargeImageView::setDocument(const ImageDocumentPtr& document) {
-    document_ = document; cache_.clear(); pending_.clear(); showGrid_ = false;
+    document_ = document; cache_.clear(); pending_.clear(); failedTiles_.clear(); showGrid_ = false;
+    showTraversalPath_ = false; clearSelectedCell();
     fitToWindow(); update();
 }
 
 void LargeImageView::setSegmentation(const SegmentationResult& segmentation) {
-    segmentation_ = segmentation; showGrid_ = segmentation.rows > 0 && segmentation.columns > 0; update();
+    segmentation_ = segmentation; showGrid_ = segmentation.rows > 0 && segmentation.columns > 0;
+    if (!showGrid_) showTraversalPath_ = false;
+    clearSelectedCell(); update();
 }
 
-void LargeImageView::clearSegmentation() { showGrid_ = false; update(); }
+void LargeImageView::clearSegmentation() {
+    showGrid_ = false; showTraversalPath_ = false; clearSelectedCell(); update();
+}
+
+void LargeImageView::setTraversalMode(TraversalMode mode) {
+    if (traversalMode_ == mode) return;
+    traversalMode_ = mode;
+    if (showTraversalPath_) update();
+}
+
+void LargeImageView::setTraversalPathVisible(bool visible) {
+    const bool nextVisible = visible && showGrid_;
+    if (showTraversalPath_ == nextVisible) return;
+    showTraversalPath_ = nextVisible;
+    update();
+}
 
 void LargeImageView::fitToWindow() {
     if (!document_ || width() <= 0 || height() <= 0) return;
@@ -53,7 +73,7 @@ QString LargeImageView::tileKey(int level, int tx, int ty) const {
 }
 
 void LargeImageView::requestTile(const QString& key, int level, int tx, int ty, int sourceTile) {
-    if (!document_ || pending_.contains(key)) return;
+    if (!document_ || pending_.contains(key) || failedTiles_.contains(key)) return;
     pending_.insert(key);
     const auto doc = document_; const quint64 generation = doc->generation;
     const double scale = std::pow(2.0, -level);
@@ -63,6 +83,11 @@ void LargeImageView::requestTile(const QString& key, int level, int tx, int ty, 
         if (document_ && document_->generation == generation && !result.first.isNull()) {
             auto* image = new QImage(result.first);
             cache_.insert(key, image, std::max(1, int(image->sizeInBytes()/1024)));
+        } else if (document_ && document_->generation == generation) {
+            const QString message = result.second.isEmpty()
+                                        ? QStringLiteral("图块渲染返回了空图像。") : result.second;
+            failedTiles_.insert(key, message);
+            Q_EMIT tileError(message);
         }
         update();
     });
@@ -91,7 +116,7 @@ void LargeImageView::paintEvent(QPaintEvent*) {
     const double bottomImage = std::min(double(document_->metadata.height), (height()-offset_.y())/zoom_);
     const int tx0=std::max(0,int(std::floor(leftImage/sourceTile))), ty0=std::max(0,int(std::floor(topImage/sourceTile)));
     const int tx1=std::max(tx0,int(std::ceil(rightImage/sourceTile))), ty1=std::max(ty0,int(std::ceil(bottomImage/sourceTile)));
-    qint64 total=0,ready=0;
+    qint64 total=0,completed=0;
     for(int ty=ty0;ty<ty1;++ty) for(int tx=tx0;tx<tx1;++tx) {
         ++total; const QString key=tileKey(level,tx,ty);
         const qint64 sourceX = qint64(tx) * sourceTile;
@@ -101,46 +126,124 @@ void LargeImageView::paintEvent(QPaintEvent*) {
         if (actualSourceWidth <= 0 || actualSourceHeight <= 0) continue;
         const QRectF target(offset_.x()+tx*targetTile, offset_.y()+ty*targetTile,
                             actualSourceWidth*zoom_, actualSourceHeight*zoom_);
-        if(QImage* image=cache_.object(key)) { p.drawImage(target,*image); ++ready; }
-        else { p.fillRect(target,QColor(55,58,61)); requestTile(key,level,tx,ty,sourceTile); }
+        if(QImage* image=cache_.object(key)) { p.drawImage(target,*image); ++completed; }
+        else if (failedTiles_.contains(key)) {
+            p.fillRect(target, QColor(70, 42, 42));
+            p.setPen(QPen(QColor(220, 110, 110), 1));
+            p.drawLine(target.topLeft(), target.bottomRight());
+            p.drawLine(target.topRight(), target.bottomLeft());
+            ++completed;
+        } else { p.fillRect(target,QColor(55,58,61)); requestTile(key,level,tx,ty,sourceTile); }
     }
-    Q_EMIT tileProgress(QStringLiteral("加载可视图块"),ready,total);
+    Q_EMIT tileProgress(QStringLiteral("加载可视图块"),completed,total);
 
     if(showGrid_) {
         p.save();
-        const double sx=segmentation_.settings.cellWidth*zoom_, sy=segmentation_.settings.cellHeight*zoom_;
-        const double usedW=segmentation_.columns*sx, usedH=segmentation_.rows*sy;
-        const QRectF gridRect(offset_.x(), offset_.y(), usedW, usedH);
-        const QRectF visibleGridRect = gridRect.intersected(QRectF(rect()));
+        const double patternW=segmentation_.settings.cellWidth*zoom_;
+        const double patternH=segmentation_.settings.cellHeight*zoom_;
+        const double pitchX=patternW;
+        const double pitchY=patternH;
+        const double baseX=offset_.x();
+        const double baseY=offset_.y();
         p.setClipRect(visibleImageRect);
 
-        // Dense grids remain visible without obscuring the image. Only iterate lines
-        // which can actually appear in the current viewport.
-        const double minimumSpacing = std::min(sx, sy);
+        // Fixed Rect2D cells tile continuously from image coordinate (0,0).
+        const double minimumSpacing = std::min(pitchX, pitchY);
         const int alpha = minimumSpacing >= 16.0 ? 190 : minimumSpacing >= 8.0 ? 115 : 70;
         p.setPen(QPen(QColor(255,70,70,alpha),1));
-        if(!visibleGridRect.isEmpty() && sx>=4) {
-            const int first=std::max(0,int(std::ceil((visibleGridRect.left()-offset_.x())/sx)));
-            const int last=std::min(segmentation_.columns,int(std::floor((visibleGridRect.right()-offset_.x())/sx)));
-            for(int c=first;c<=last;++c) { const double x=offset_.x()+c*sx; p.drawLine(QPointF(x,gridRect.top()),QPointF(x,gridRect.bottom())); }
-        }
-        if(!visibleGridRect.isEmpty() && sy>=4) {
-            const int first=std::max(0,int(std::ceil((visibleGridRect.top()-offset_.y())/sy)));
-            const int last=std::min(segmentation_.rows,int(std::floor((visibleGridRect.bottom()-offset_.y())/sy)));
-            for(int r=first;r<=last;++r) { const double y=offset_.y()+r*sy; p.drawLine(QPointF(gridRect.left(),y),QPointF(gridRect.right(),y)); }
+        if(minimumSpacing>=4.0) {
+            const int firstColumn=std::max(0,int(std::ceil((visibleImageRect.left()-baseX-patternW)/pitchX)));
+            const int lastColumn=std::min(segmentation_.columns-1,int(std::floor((visibleImageRect.right()-baseX)/pitchX)));
+            const int firstRow=std::max(0,int(std::ceil((visibleImageRect.top()-baseY-patternH)/pitchY)));
+            const int lastRow=std::min(segmentation_.rows-1,int(std::floor((visibleImageRect.bottom()-baseY)/pitchY)));
+            for(int r=firstRow;r<=lastRow;++r) {
+                for(int c=firstColumn;c<=lastColumn;++c) {
+                    const ImageRegion cell = segmentationCellRegion(
+                        segmentation_, document_->metadata.width, document_->metadata.height, r, c);
+                    if (!cell.isValid()) continue;
+                    p.drawRect(QRectF(baseX + cell.x * zoom_, baseY + cell.y * zoom_,
+                                      cell.width * zoom_, cell.height * zoom_));
+                }
+            }
         }
 
-        p.setBrush(QColor(255,180,0,65)); p.setPen(Qt::NoPen);
-        if(segmentation_.remainderWidth) p.drawRect(QRectF(offset_.x()+usedW,offset_.y(),segmentation_.remainderWidth*zoom_,document_->metadata.height*zoom_));
-        if(segmentation_.remainderHeight) p.drawRect(QRectF(offset_.x(),offset_.y()+usedH,usedW,segmentation_.remainderHeight*zoom_));
+        if(showTraversalPath_ && minimumSpacing>=2.0) {
+            p.setPen(QPen(QColor(0,190,255,220),2,Qt::SolidLine,Qt::RoundCap,Qt::RoundJoin));
+            const int firstColumn=std::max(0,int(std::floor(leftImage/segmentation_.settings.cellWidth))-1);
+            const int lastColumn=std::min(segmentation_.columns-1,int(std::floor(rightImage/segmentation_.settings.cellWidth))+1);
+            const int firstRow=std::max(0,int(std::floor(topImage/segmentation_.settings.cellHeight))-1);
+            const int lastRow=std::min(segmentation_.rows-1,int(std::floor(bottomImage/segmentation_.settings.cellHeight))+1);
+            for(int r=firstRow;r<=lastRow;++r)for(int c=firstColumn;c<=lastColumn;++c) {
+                const QPoint next=SplitExporter::nextTraversalCell(
+                    segmentation_.rows,segmentation_.columns,traversalMode_,r,c);
+                if(next.x()<0||next.y()<0)continue;
+                const ImageRegion currentRegion=segmentationCellRegion(
+                    segmentation_,document_->metadata.width,document_->metadata.height,r,c);
+                const ImageRegion nextRegion=segmentationCellRegion(
+                    segmentation_,document_->metadata.width,document_->metadata.height,next.y(),next.x());
+                if(!currentRegion.isValid()||!nextRegion.isValid())continue;
+                const QPointF currentCenter(baseX+(currentRegion.x+currentRegion.width/2.0)*zoom_,
+                                            baseY+(currentRegion.y+currentRegion.height/2.0)*zoom_);
+                const QPointF nextCenter(baseX+(nextRegion.x+nextRegion.width/2.0)*zoom_,
+                                         baseY+(nextRegion.y+nextRegion.height/2.0)*zoom_);
+                p.drawLine(currentCenter,nextCenter);
+            }
+        }
+
+        if(selectedCell_.x()>=0&&selectedCell_.y()>=0) {
+            const ImageRegion selectedRegion=segmentationCellRegion(
+                segmentation_,document_->metadata.width,document_->metadata.height,
+                selectedCell_.y(),selectedCell_.x());
+            if(selectedRegion.isValid()) {
+                const QRectF selectedRect(baseX+selectedRegion.x*zoom_,baseY+selectedRegion.y*zoom_,
+                                          selectedRegion.width*zoom_,selectedRegion.height*zoom_);
+                p.fillRect(selectedRect,QColor(255,200,0,80));
+                p.setPen(QPen(QColor(255,215,0,240),2));
+                p.drawRect(selectedRect);
+            }
+        }
         p.restore();
     }
 }
 
 void LargeImageView::resizeEvent(QResizeEvent*) { update(); }
-void LargeImageView::mousePressEvent(QMouseEvent* e) { if(e->button()==Qt::LeftButton){dragging_=true;lastMouse_=e->pos();setCursor(Qt::ClosedHandCursor);} }
-void LargeImageView::mouseMoveEvent(QMouseEvent* e) { if(dragging_){offset_+=e->pos()-lastMouse_;lastMouse_=e->pos();update();} }
-void LargeImageView::mouseReleaseEvent(QMouseEvent* e) { if(e->button()==Qt::LeftButton){dragging_=false;unsetCursor();} }
+void LargeImageView::mousePressEvent(QMouseEvent* e) {
+    if(e->button()!=Qt::LeftButton)return;
+    leftPressed_=true;dragging_=false;pressPosition_=lastMouse_=e->pos();e->accept();
+}
+void LargeImageView::mouseMoveEvent(QMouseEvent* e) {
+    if(!leftPressed_)return;
+    if(!dragging_&&(e->pos()-pressPosition_).manhattanLength()<QApplication::startDragDistance())return;
+    if(!dragging_){dragging_=true;setCursor(Qt::ClosedHandCursor);}
+    offset_+=e->pos()-lastMouse_;lastMouse_=e->pos();update();e->accept();
+}
+void LargeImageView::mouseReleaseEvent(QMouseEvent* e) {
+    if(e->button()!=Qt::LeftButton||!leftPressed_)return;
+    leftPressed_=false;
+    if(dragging_){dragging_=false;unsetCursor();}
+    else selectCellAt(e->pos());
+    e->accept();
+}
+
+void LargeImageView::selectCellAt(const QPoint& viewportPosition) {
+    if(!document_||!showGrid_||zoom_<=0.0){clearSelectedCell();update();return;}
+    const QPointF imagePosition=(QPointF(viewportPosition)-offset_)/zoom_;
+    if(imagePosition.x()<0.0||imagePosition.y()<0.0||
+       imagePosition.x()>=document_->metadata.width||imagePosition.y()>=document_->metadata.height){
+        clearSelectedCell();update();return;
+    }
+    const int column=int(std::floor(imagePosition.x()/segmentation_.settings.cellWidth));
+    const int row=int(std::floor(imagePosition.y()/segmentation_.settings.cellHeight));
+    const ImageRegion region=segmentationCellRegion(
+        segmentation_,document_->metadata.width,document_->metadata.height,row,column);
+    if(!region.isValid()){clearSelectedCell();update();return;}
+    selectedCell_={column,row};Q_EMIT segmentationCellSelected(row,column);update();
+}
+
+void LargeImageView::clearSelectedCell() {
+    if(selectedCell_.x()<0&&selectedCell_.y()<0)return;
+    selectedCell_={-1,-1};Q_EMIT segmentationCellSelected(-1,-1);
+}
 void LargeImageView::wheelEvent(QWheelEvent* e) {
     if(!document_)return; const QPointF pos=e->position(); const QPointF imagePos=(pos-offset_)/zoom_;
     zoom_=std::clamp(zoom_*std::pow(1.0015,e->angleDelta().y()),0.00001,64.0);

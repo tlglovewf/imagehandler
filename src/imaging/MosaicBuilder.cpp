@@ -6,7 +6,49 @@
 #include <QMap>
 #include <QRegularExpression>
 #include <algorithm>
+#include <limits>
 #include <vips/vips.h>
+
+namespace {
+VipsImagePtr normalizeTile(VipsImage* input, bool colorOutput, QString* error) {
+    VipsImage* prepared = nullptr;
+    if (colorOutput) {
+        VipsImage* srgb = nullptr;
+        if (vips_colourspace(input, &srgb, VIPS_INTERPRETATION_sRGB, nullptr) != 0) {
+            if (error) *error = VipsSupport::lastError();
+            return {};
+        }
+        if (srgb->Bands > 3) {
+            if (vips_extract_band(srgb, &prepared, 0, "n", 3, nullptr) != 0) {
+                g_object_unref(srgb);
+                if (error) *error = VipsSupport::lastError();
+                return {};
+            }
+            g_object_unref(srgb);
+        } else {
+            prepared = srgb;
+        }
+    } else if (input->Bands == 1) {
+        prepared = input;
+        g_object_ref(prepared);
+    } else if (vips_extract_band(input, &prepared, 0, nullptr) != 0) {
+        if (error) *error = VipsSupport::lastError();
+        return {};
+    }
+
+    if (prepared->BandFmt != VIPS_FORMAT_UCHAR) {
+        VipsImage* casted = nullptr;
+        if (vips_cast(prepared, &casted, VIPS_FORMAT_UCHAR, nullptr) != 0) {
+            g_object_unref(prepared);
+            if (error) *error = VipsSupport::lastError();
+            return {};
+        }
+        g_object_unref(prepared);
+        prepared = casted;
+    }
+    return VipsSupport::adopt(prepared);
+}
+}
 
 bool MosaicBuilder::parseName(const QString& path, MergeTile* tile) {
     if (!tile || QFileInfo(path).suffix().compare("bmp", Qt::CaseInsensitive) != 0) return false;
@@ -24,81 +66,191 @@ bool MosaicBuilder::parseName(const QString& path, MergeTile* tile) {
     return true;
 }
 
-ImageDocumentPtr MosaicBuilder::build(const QStringList& paths, quint64 generation,
-                                      const CancellationTokenPtr& token, const Progress& progress,
-                                      QString* error) {
-    if (paths.isEmpty()) { if (error) *error = QStringLiteral("当前列表中没有图片。"); return {}; }
+MosaicBuildResult MosaicBuilder::build(const QStringList& paths, quint64 generation,
+                                       const MosaicBuildOptions& options,
+                                       const CancellationTokenPtr& token, const Progress& progress,
+                                       QString* error) {
+    MosaicBuildResult buildResult;
+    buildResult.sourceCount = static_cast<int>(paths.size());
+    if (paths.isEmpty()) { if (error) *error = QStringLiteral("当前列表中没有图片。"); return buildResult; }
     std::vector<MergeTile> tiles;
     QStringList problems;
     tiles.reserve(paths.size());
     for (qsizetype i = 0; i < paths.size(); ++i) {
-        if (token->isCancelled()) return {};
+        if (token->isCancelled()) return buildResult;
         MergeTile tile;
         if (!parseName(paths[i], &tile)) problems << QStringLiteral("名称不符合规则：%1").arg(QFileInfo(paths[i]).fileName());
         else tiles.push_back(tile);
         if (progress) progress({QStringLiteral("验证文件名"), i + 1, paths.size()});
     }
-    if (!problems.isEmpty()) { if (error) *error = problems.join('\n'); return {}; }
+    if (!problems.isEmpty()) { if (error) *error = problems.join('\n'); return buildResult; }
 
-    const QString prefix = tiles.front().prefix;
     int minRow = INT_MAX, maxRow = 0, minCol = INT_MAX, maxCol = 0;
     QMap<QPair<int,int>, qsizetype> positions;
     for (qsizetype i = 0; i < static_cast<qsizetype>(tiles.size()); ++i) {
         const auto& t = tiles[i];
-        if (t.prefix != prefix) problems << QStringLiteral("文件前缀不一致：%1").arg(QFileInfo(t.path).fileName());
         const auto key = qMakePair(t.row, t.column);
         if (positions.contains(key)) problems << QStringLiteral("坐标重复：%1,%2").arg(t.row).arg(t.column);
         else positions.insert(key, i);
         minRow = std::min(minRow, t.row); maxRow = std::max(maxRow, t.row);
         minCol = std::min(minCol, t.column); maxCol = std::max(maxCol, t.column);
     }
-    const qint64 expected = qint64(maxRow - minRow + 1) * qint64(maxCol - minCol + 1);
+    const qint64 rowSpan = qint64(maxRow) - minRow + 1;
+    const qint64 columnSpan = qint64(maxCol) - minCol + 1;
+    const qint64 expected = rowSpan * columnSpan;
     if (expected > 1000000) {
         problems << QStringLiteral("行列范围过大且明显存在大量缺块。");
     } else if (expected != static_cast<qint64>(tiles.size())) {
-        for (int r = minRow; r <= maxRow; ++r)
-            for (int c = minCol; c <= maxCol; ++c)
-                if (!positions.contains({r,c})) problems << QStringLiteral("缺少坐标：%1,%2").arg(r).arg(c);
+        for (int r = minRow; r <= maxRow; ++r) {
+            for (int c = minCol; c <= maxCol; ++c) {
+                if (!positions.contains({r,c})) {
+                    ++buildResult.missingCount;
+                    if (buildResult.missingCoordinateSamples.size() < 20)
+                        buildResult.missingCoordinateSamples << QStringLiteral("%1,%2").arg(r).arg(c);
+                }
+            }
+        }
     }
-    if (!problems.isEmpty()) { if (error) *error = problems.join('\n'); return {}; }
+    if (!problems.isEmpty()) { if (error) *error = problems.join('\n'); return buildResult; }
+
+    buildResult.rows = static_cast<int>(rowSpan);
+    buildResult.columns = static_cast<int>(columnSpan);
+    if (buildResult.missingCount > 0 && !options.allowMissingTiles) {
+        buildResult.status = MosaicBuildStatus::MissingTiles;
+        return buildResult;
+    }
 
     std::vector<ImageDocumentPtr> docs(tiles.size());
     ImageMetadata reference;
+    int referenceBits = 0;
+    bool colorOutput = false;
     for (qsizetype i = 0; i < static_cast<qsizetype>(tiles.size()); ++i) {
-        if (token->isCancelled()) return {};
+        if (token->isCancelled()) return buildResult;
         QString loadError;
         docs[i] = ImageLoader::load(tiles[i].path, generation, &loadError);
         if (!docs[i]) problems << QStringLiteral("无法读取 %1：%2").arg(QFileInfo(tiles[i].path).fileName(), loadError);
-        else if (!ImageLoader::isProcessable(docs[i]->metadata)) problems << QStringLiteral("不支持合并的位深：%1").arg(QFileInfo(tiles[i].path).fileName());
-        else if (i == 0) reference = docs[i]->metadata;
-        else if (docs[i]->metadata.width != reference.width || docs[i]->metadata.height != reference.height ||
-                 docs[i]->metadata.kind != reference.kind || docs[i]->metadata.bands != reference.bands ||
-                 docs[i]->metadata.sourceBitsPerPixel != reference.sourceBitsPerPixel)
-            problems << QStringLiteral("尺寸或位深不一致：%1").arg(QFileInfo(tiles[i].path).fileName());
+        else if (docs[i]->metadata.sourceBitsPerPixel != 1 && docs[i]->metadata.sourceBitsPerPixel != 8)
+            problems << QStringLiteral("只支持 1-bit 或 8-bit BMP：%1").arg(QFileInfo(tiles[i].path).fileName());
+        else if (referenceBits == 0) {
+            reference = docs[i]->metadata;
+            referenceBits = docs[i]->metadata.sourceBitsPerPixel;
+            colorOutput = docs[i]->metadata.kind == PixelKind::Color;
+        } else if (docs[i]->metadata.sourceBitsPerPixel != referenceBits) {
+            problems << QStringLiteral("位深不一致：%1（%2-bit，要求 %3-bit）")
+                            .arg(QFileInfo(tiles[i].path).fileName())
+                            .arg(docs[i]->metadata.sourceBitsPerPixel)
+                            .arg(referenceBits);
+        } else {
+            colorOutput = colorOutput || docs[i]->metadata.kind == PixelKind::Color;
+        }
         if (progress) progress({QStringLiteral("读取并验证图块"), i + 1, static_cast<qint64>(tiles.size())});
     }
-    if (!problems.isEmpty()) { if (error) *error = problems.join('\n'); return {}; }
+    if (!problems.isEmpty()) { if (error) *error = problems.join('\n'); return buildResult; }
 
-    const int rows = maxRow - minRow + 1, cols = maxCol - minCol + 1;
-    std::vector<VipsImage*> ordered(static_cast<size_t>(rows * cols));
+    const int rows = buildResult.rows, cols = buildResult.columns;
+    std::vector<qint64> columnWidths(static_cast<size_t>(cols));
+    std::vector<qint64> rowHeights(static_cast<size_t>(rows));
+    qint64 globalMaximumWidth = 0;
+    qint64 globalMaximumHeight = 0;
     for (qsizetype i = 0; i < static_cast<qsizetype>(tiles.size()); ++i) {
-        const int index = (tiles[i].row - minRow) * cols + tiles[i].column - minCol;
-        ordered[static_cast<size_t>(index)] = docs[i]->image.get();
+        const int row = tiles[i].row - minRow;
+        const int column = tiles[i].column - minCol;
+        columnWidths[static_cast<size_t>(column)] =
+            std::max(columnWidths[static_cast<size_t>(column)], docs[i]->metadata.width);
+        rowHeights[static_cast<size_t>(row)] =
+            std::max(rowHeights[static_cast<size_t>(row)], docs[i]->metadata.height);
+        globalMaximumWidth = std::max(globalMaximumWidth, docs[i]->metadata.width);
+        globalMaximumHeight = std::max(globalMaximumHeight, docs[i]->metadata.height);
     }
+    for (auto& width : columnWidths) if (width == 0) width = globalMaximumWidth;
+    for (auto& height : rowHeights) if (height == 0) height = globalMaximumHeight;
+
+    std::vector<qint64> columnOffsets(static_cast<size_t>(cols));
+    std::vector<qint64> rowOffsets(static_cast<size_t>(rows));
+    qint64 mosaicWidth = 0, mosaicHeight = 0;
+    for (int column = 0; column < cols; ++column) {
+        columnOffsets[static_cast<size_t>(column)] = mosaicWidth;
+        mosaicWidth += columnWidths[static_cast<size_t>(column)];
+    }
+    for (int row = 0; row < rows; ++row) {
+        rowOffsets[static_cast<size_t>(row)] = mosaicHeight;
+        mosaicHeight += rowHeights[static_cast<size_t>(row)];
+    }
+    if (mosaicWidth <= 0 || mosaicHeight <= 0 ||
+        mosaicWidth > std::numeric_limits<int>::max() ||
+        mosaicHeight > std::numeric_limits<int>::max()) {
+        if (error) *error = QStringLiteral("合并结果尺寸超出 libvips 支持范围：%1 × %2")
+                                .arg(mosaicWidth).arg(mosaicHeight);
+        return buildResult;
+    }
+
+    std::vector<VipsImagePtr> normalized;
+    normalized.reserve(docs.size());
+    for (qsizetype i = 0; i < static_cast<qsizetype>(docs.size()); ++i) {
+        if (token->isCancelled()) return buildResult;
+        QString normalizationError;
+        auto image = normalizeTile(docs[i]->image.get(), colorOutput, &normalizationError);
+        if (!image) {
+            if (error) *error = QStringLiteral("无法统一图块格式 %1：%2")
+                                    .arg(QFileInfo(tiles[i].path).fileName(), normalizationError);
+            return buildResult;
+        }
+        normalized.push_back(std::move(image));
+    }
+
+    VipsImage* black = nullptr;
+    VipsImage* white = nullptr;
     VipsImage* mosaic = nullptr;
-    if (vips_arrayjoin(ordered.data(), &mosaic, static_cast<int>(ordered.size()), "across", cols,
-                       "shim", 0, nullptr) != 0) {
+    const int outputBands = colorOutput ? 3 : 1;
+    const VipsInterpretation interpretation = colorOutput ? VIPS_INTERPRETATION_sRGB
+                                                           : VIPS_INTERPRETATION_B_W;
+    if (vips_black(&black, static_cast<int>(mosaicWidth), static_cast<int>(mosaicHeight),
+                   "bands", outputBands, nullptr) != 0 ||
+        vips_linear1(black, &white, 1.0, 255.0, "uchar", TRUE, nullptr) != 0 ||
+        vips_copy(white, &mosaic, "interpretation", interpretation, nullptr) != 0) {
+        if (black) g_object_unref(black);
+        if (white) g_object_unref(white);
         if (error) *error = VipsSupport::lastError();
-        return {};
+        return buildResult;
     }
-    if (progress) progress({QStringLiteral("构建虚拟拼图"), rows, rows});
+    g_object_unref(black);
+    g_object_unref(white);
+
+    for (qsizetype i = 0; i < static_cast<qsizetype>(tiles.size()); ++i) {
+        if (token->isCancelled()) {
+            g_object_unref(mosaic);
+            return buildResult;
+        }
+        const int row = tiles[i].row - minRow;
+        const int column = tiles[i].column - minCol;
+        VipsImage* next = nullptr;
+        if (vips_insert(mosaic, normalized[static_cast<size_t>(i)].get(), &next,
+                        static_cast<int>(columnOffsets[static_cast<size_t>(column)]),
+                        static_cast<int>(rowOffsets[static_cast<size_t>(row)]),
+                        "expand", FALSE, nullptr) != 0) {
+            g_object_unref(mosaic);
+            if (error) *error = VipsSupport::lastError();
+            return buildResult;
+        }
+        g_object_unref(mosaic);
+        mosaic = next;
+        if (progress) progress({QStringLiteral("构建虚拟拼图"), i + 1,
+                                static_cast<qint64>(tiles.size())});
+    }
+
     auto result = std::make_shared<ImageDocument>();
     result->displayName = QStringLiteral("合并结果 (%1×%2)").arg(rows).arg(cols);
     result->metadata = reference;
-    result->metadata.width *= cols;
-    result->metadata.height *= rows;
+    result->metadata.width = mosaicWidth;
+    result->metadata.height = mosaicHeight;
+    result->metadata.bands = outputBands;
+    result->metadata.kind = colorOutput ? PixelKind::Color
+                                        : (referenceBits == 1 ? PixelKind::Binary1 : PixelKind::Gray8);
+    result->metadata.sourceBitsPerPixel = referenceBits;
     result->image = VipsSupport::adopt(mosaic);
     result->generation = generation;
     result->virtualMosaic = true;
-    return result;
+    buildResult.status = MosaicBuildStatus::Success;
+    buildResult.document = result;
+    return buildResult;
 }

@@ -5,6 +5,7 @@
 #include <QPoint>
 #include <QString>
 #include <QStringList>
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -16,6 +17,17 @@ using VipsImage = _VipsImage;
 enum class PixelKind { Binary1, Gray8, Color, Unsupported };
 enum class ForegroundPolarity { Dark, Light };
 enum class TraversalMode { SnakeZ, ClockwiseSpiral };
+
+inline constexpr qint64 kMaximumSegmentationCells = 1'000'000;
+
+struct ImageRegion {
+    qint64 x = 0;
+    qint64 y = 0;
+    qint64 width = 0;
+    qint64 height = 0;
+
+    [[nodiscard]] bool isValid() const noexcept { return width > 0 && height > 0; }
+};
 
 struct VipsImageDeleter {
     void operator()(VipsImage* image) const noexcept;
@@ -57,6 +69,22 @@ struct SegmentationResult {
     QString warning;
 };
 
+inline ImageRegion segmentationCellRegion(const SegmentationResult& segmentation,
+                                          qint64 imageWidth, qint64 imageHeight,
+                                          int row, int column) {
+    if (row < 0 || column < 0 || row >= segmentation.rows ||
+        column >= segmentation.columns || segmentation.settings.cellWidth <= 0 ||
+        segmentation.settings.cellHeight <= 0 || imageWidth <= 0 || imageHeight <= 0) {
+        return {};
+    }
+    const qint64 x = qint64(column) * segmentation.settings.cellWidth;
+    const qint64 y = qint64(row) * segmentation.settings.cellHeight;
+    if (x >= imageWidth || y >= imageHeight) return {};
+    return {x, y,
+            std::min<qint64>(segmentation.settings.cellWidth, imageWidth - x),
+            std::min<qint64>(segmentation.settings.cellHeight, imageHeight - y)};
+}
+
 struct MergeTile {
     QString path;
     QString prefix;
@@ -81,4 +109,3 @@ using CancellationTokenPtr = std::shared_ptr<CancellationToken>;
 
 Q_DECLARE_METATYPE(ImageDocumentPtr)
 Q_DECLARE_METATYPE(SegmentationResult)
-

@@ -11,5 +11,6 @@ public:
                                      const Progress& progress, QString* error);
     static SegmentationResult makeGrid(const ImageDocumentPtr& document,
                                        const SegmentationSettings& settings);
+    static SegmentationResult makeManualGrid(const ImageDocumentPtr& document,
+                                             const SegmentationSettings& settings);
 };
-
