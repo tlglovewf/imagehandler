@@ -16,6 +16,9 @@ public:
     void clearSegmentation();
     void setTraversalMode(TraversalMode mode);
     void setTraversalPathVisible(bool visible);
+    void setSelectedCell(int row, int column, bool centerOnSelection = false);
+    void centerOnCell(int row, int column);
+    [[nodiscard]] QPoint selectedCell() const { return selectedCell_; }
     double zoom() const { return zoom_; }
 
 public Q_SLOTS:

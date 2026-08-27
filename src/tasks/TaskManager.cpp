@@ -1,4 +1,5 @@
 #include "tasks/TaskManager.h"
+#include "domain/JobModels.h"
 #include "imaging/MosaicBuilder.h"
 
 #include <QFutureWatcher>
@@ -24,6 +25,7 @@ TaskManager::TaskManager(QObject* parent) : QObject(parent) {
     qRegisterMetaType<ImageDocumentPtr>();
     qRegisterMetaType<SegmentationResult>();
     qRegisterMetaType<MosaicBuildResult>();
+    qRegisterMetaType<JobDocumentPtr>();
 }
 
 TaskManager::~TaskManager() {

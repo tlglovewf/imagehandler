@@ -49,6 +49,26 @@ void LargeImageView::setTraversalPathVisible(bool visible) {
     update();
 }
 
+void LargeImageView::setSelectedCell(int row, int column, bool centerOnSelection) {
+    if (!document_ || !showGrid_) { clearSelectedCell(); update(); return; }
+    const ImageRegion region = segmentationCellRegion(
+        segmentation_, document_->metadata.width, document_->metadata.height, row, column);
+    if (!region.isValid()) { clearSelectedCell(); update(); return; }
+    selectedCell_ = {column, row};
+    if (centerOnSelection) centerOnCell(row, column);
+    update();
+}
+
+void LargeImageView::centerOnCell(int row, int column) {
+    if (!document_ || zoom_ <= 0.0) return;
+    const ImageRegion region = segmentationCellRegion(
+        segmentation_, document_->metadata.width, document_->metadata.height, row, column);
+    if (!region.isValid()) return;
+    const QPointF center(region.x + region.width / 2.0, region.y + region.height / 2.0);
+    offset_ = QPointF(width() / 2.0, height() / 2.0) - center * zoom_;
+    update();
+}
+
 void LargeImageView::fitToWindow() {
     if (!document_ || width() <= 0 || height() <= 0) return;
     zoom_ = std::clamp(std::min(double(width()-20) / document_->metadata.width,

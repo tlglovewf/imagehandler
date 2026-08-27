@@ -10,20 +10,31 @@ set(VIPS_ROOT "D:/3rd/vips-dev-8.18" CACHE PATH "libvips installation root")
 list(PREPEND CMAKE_PREFIX_PATH "${QT_ROOT}")
 
 find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Widgets Concurrent Test)
+option(IMAGE_HANDLER_ENABLE_VULKAN_JOB_PREVIEW "Build the Vulkan Job preview" ON)
+if(IMAGE_HANDLER_ENABLE_VULKAN_JOB_PREVIEW)
+    find_package(Vulkan QUIET)
+    find_package(Qt6 6.8 QUIET COMPONENTS ShaderTools)
+endif()
 qt_standard_project_setup()
 
 add_library(image_handler_core
     src/domain/Models.h
+    src/domain/JobModels.h
     src/domain/MergeInputSelector.h src/domain/MergeInputSelector.cpp
     src/imaging/VipsSupport.h src/imaging/VipsSupport.cpp
     src/imaging/BmpRegionLoader.h src/imaging/BmpRegionLoader.cpp
     src/imaging/ImageLoader.h src/imaging/ImageLoader.cpp
     src/imaging/MosaicBuilder.h src/imaging/MosaicBuilder.cpp
     src/imaging/PatternDetector.h src/imaging/PatternDetector.cpp
+    src/imaging/JobPreviewBuilder.h src/imaging/JobPreviewBuilder.cpp
+    src/imaging/JobLabelLod.h src/imaging/JobLabelLod.cpp
+    src/imaging/JobPreviewMath.h src/imaging/JobPreviewMath.cpp
+    src/imaging/JobSpatialIndex.h src/imaging/JobSpatialIndex.cpp
     src/io/DirectoryScanner.h src/io/DirectoryScanner.cpp
     src/io/BmpStreamWriter.h src/io/BmpStreamWriter.cpp
     src/io/MergedImageExporter.h src/io/MergedImageExporter.cpp
     src/io/SplitExporter.h src/io/SplitExporter.cpp
+    src/io/JobFileLoader.h src/io/JobFileLoader.cpp
     src/tasks/TaskManager.h src/tasks/TaskManager.cpp
 )
 target_include_directories(image_handler_core
@@ -46,6 +57,41 @@ if(MSVC)
     target_compile_options(image_handler_core PUBLIC /utf-8)
 endif()
 
+set(JOB_PREVIEW_HAS_VULKAN OFF)
+if(IMAGE_HANDLER_ENABLE_VULKAN_JOB_PREVIEW AND Vulkan_FOUND AND TARGET Qt6::qsb)
+    set(JOB_PREVIEW_HAS_VULKAN ON)
+endif()
+
+add_library(job_preview_ui STATIC
+    src/ui/JobPreviewWidget.h src/ui/JobPreviewWidget.cpp
+)
+target_include_directories(job_preview_ui PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(job_preview_ui PUBLIC image_handler_core Qt6::Widgets)
+target_compile_definitions(job_preview_ui PUBLIC
+    IMAGE_HANDLER_HAS_VULKAN_PREVIEW=$<BOOL:${JOB_PREVIEW_HAS_VULKAN}>)
+if(JOB_PREVIEW_HAS_VULKAN)
+    target_include_directories(job_preview_ui PRIVATE ${Vulkan_INCLUDE_DIRS})
+    set(JOB_SHADER_OUTPUTS)
+    foreach(JOB_SHADER IN ITEMS job_points.vert job_points.frag job_lines.vert job_lines.frag)
+        set(JOB_SHADER_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/shaders/${JOB_SHADER}")
+        set(JOB_SHADER_PACK "${CMAKE_CURRENT_BINARY_DIR}/job_shaders/${JOB_SHADER}.qsb")
+        set(JOB_SHADER_SPV "${CMAKE_CURRENT_BINARY_DIR}/job_shaders/${JOB_SHADER}.spv")
+        add_custom_command(OUTPUT "${JOB_SHADER_SPV}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/job_shaders"
+            COMMAND $<TARGET_FILE:Qt6::qsb> -o "${JOB_SHADER_PACK}" "${JOB_SHADER_SOURCE}"
+            COMMAND $<TARGET_FILE:Qt6::qsb> -x spirv,100 -o "${JOB_SHADER_SPV}" "${JOB_SHADER_PACK}"
+            DEPENDS "${JOB_SHADER_SOURCE}" Qt6::qsb
+            VERBATIM)
+        set_source_files_properties("${JOB_SHADER_SPV}" PROPERTIES
+            GENERATED TRUE QT_RESOURCE_ALIAS "${JOB_SHADER}.spv")
+        list(APPEND JOB_SHADER_OUTPUTS "${JOB_SHADER_SPV}")
+    endforeach()
+    qt_add_resources(job_preview_ui job_preview_shaders
+        PREFIX "/job_shaders" FILES ${JOB_SHADER_OUTPUTS})
+else()
+    message(WARNING "Vulkan SDK headers or Qt ShaderTools were not found; Job preview will use the disabled placeholder.")
+endif()
+
 qt_add_executable(ImageHandler WIN32
     src/app/main.cpp
     src/ui/LargeImageView.h src/ui/LargeImageView.cpp
@@ -57,6 +103,7 @@ target_include_directories(ImageHandler PRIVATE
     "${VIPS_ROOT}/lib/glib-2.0/include"
 )
 target_link_libraries(ImageHandler PRIVATE image_handler_core Qt6::Widgets)
+target_link_libraries(ImageHandler PRIVATE job_preview_ui)
 
 if(WIN32)
     file(GLOB VIPS_RUNTIME_DLLS CONFIGURE_DEPENDS "${VIPS_ROOT}/bin/*.dll")
@@ -86,6 +133,13 @@ set_property(TEST ImageHandlerTests PROPERTY ENVIRONMENT_MODIFICATION
     "PATH=path_list_prepend:${QT_ROOT}/bin"
     "PATH=path_list_prepend:${VIPS_ROOT}/bin")
 
+qt_add_executable(JobDataTests tests/TestJob.cpp)
+target_link_libraries(JobDataTests PRIVATE image_handler_core Qt6::Test)
+add_test(NAME JobDataTests COMMAND JobDataTests)
+set_property(TEST JobDataTests PROPERTY ENVIRONMENT_MODIFICATION
+    "PATH=path_list_prepend:${QT_ROOT}/bin"
+    "PATH=path_list_prepend:${VIPS_ROOT}/bin")
+
 qt_add_executable(LargeImageViewTests
     tests/TestLargeImageView.cpp
     src/ui/LargeImageView.h src/ui/LargeImageView.cpp
@@ -112,6 +166,7 @@ target_include_directories(MainWindowTests PRIVATE
     "${VIPS_ROOT}/lib/glib-2.0/include"
 )
 target_link_libraries(MainWindowTests PRIVATE image_handler_core Qt6::Widgets Qt6::Test)
+target_link_libraries(MainWindowTests PRIVATE job_preview_ui)
 add_test(NAME MainWindowTests COMMAND MainWindowTests)
 set_property(TEST MainWindowTests PROPERTY ENVIRONMENT_MODIFICATION
     "PATH=path_list_prepend:${QT_ROOT}/bin"

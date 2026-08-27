@@ -8,6 +8,9 @@
 #include "imaging/PatternDetector.h"
 #include "imaging/VipsSupport.h"
 #include <QFile>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QTemporaryDir>
 #include <QtTest>
 #include <algorithm>
@@ -46,6 +49,8 @@ private Q_SLOTS:
     void partialEdgeTilesAreExportedAtRemainingSize();
     void splitExportProgressIsBoundedAndMonotonic();
     void exportRollbackRestoresOriginal();
+    void printCanvasCoordinates();
+    void printPackageExportAndReplacement();
     void realPatternImageFromEnvironment();
 };
 
@@ -310,6 +315,69 @@ void TestCore::exportRollbackRestoresOriginal() {
     QFile restored(originalPath);QVERIFY(restored.open(QIODevice::ReadOnly));QCOMPARE(restored.readAll(),originalBytes);
     const QStringList leftovers=QDir(dir.path()).entryList({QStringLiteral(".image_handler_*")},QDir::Dirs|QDir::Hidden|QDir::NoDotAndDotDot);
     QVERIFY2(leftovers.isEmpty(),qPrintable(leftovers.join(',')));
+}
+void TestCore::printCanvasCoordinates() {
+    ImageMetadata metadata;metadata.width=1000;metadata.height=500;
+    SegmentationResult segmentation;segmentation.settings={500,250,128,ForegroundPolarity::Dark};segmentation.rows=2;segmentation.columns=2;
+    PrintExportOptions options{20,10,3,false};
+    QCOMPARE(SplitExporter::canvasPosition(metadata,segmentation,QPoint(0,0),options),QPointF(0.0,0.0));
+    QCOMPARE(SplitExporter::canvasPosition(metadata,segmentation,QPoint(1,0),options),QPointF(10.0,0.0));
+    QCOMPARE(SplitExporter::canvasPosition(metadata,segmentation,QPoint(1,1),options),QPointF(10.0,5.0));
+    options.reverseY=true;
+    QCOMPARE(SplitExporter::canvasPosition(metadata,segmentation,QPoint(1,1),options),QPointF(10.0,-5.0));
+    metadata.width=3;metadata.height=3;segmentation.settings.cellWidth=1;segmentation.settings.cellHeight=1;options={10,10,1,false};
+    const QPointF fractional=SplitExporter::canvasPosition(metadata,segmentation,QPoint(1,2),options);
+    QVERIFY(std::abs(fractional.x()-10.0/3.0)<1e-12);QVERIFY(std::abs(fractional.y()-20.0/3.0)<1e-12);
+}
+void TestCore::printPackageExportAndReplacement() {
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QImage source(4,4,QImage::Format_Grayscale8);
+    for(int y=0;y<4;++y){auto* row=source.scanLine(y);for(int x=0;x<4;++x)row[x]=uchar(y<2?(x<2?10:20):(x<2?30:40));}
+    const QString sourcePath=directory.filePath("source.bmp");QVERIFY(source.save(sourcePath,"BMP"));
+    QString error;const auto document=ImageLoader::load(sourcePath,40,&error);QVERIFY2(document,qPrintable(error));
+    const auto grid=PatternDetector::makeManualGrid(document,{2,2,128,ForegroundPolarity::Dark});
+    const QString outputPath=directory.filePath("print");
+    PrintExportOptions options{20,10,3,false};
+    std::vector<TaskProgress> progress;
+    QVERIFY2(SplitExporter::exportPrintPackage(outputPath,document,grid,TraversalMode::SnakeZ,
+                                               options,false,std::make_shared<CancellationToken>(),
+                                               [&](const TaskProgress& value){progress.push_back(value);},&error),qPrintable(error));
+    QVERIFY(!progress.empty());QCOMPARE(progress.back().completed,progress.back().total);
+    for(size_t i=1;i<progress.size();++i)QVERIFY(progress[i].completed>=progress[i-1].completed);
+    const QList<int> expectedValues={10,20,40,30};
+    for(int model=0;model<4;++model){
+        const QDir modelDir(QDir(outputPath).filePath(QString::number(model)));
+        QCOMPARE(modelDir.entryList({QStringLiteral("*.bmp")},QDir::Files,QDir::Name).size(),3);
+        QFile first(modelDir.filePath("1.bmp"));QFile second(modelDir.filePath("2.bmp"));QFile third(modelDir.filePath("3.bmp"));
+        QVERIFY(first.open(QIODevice::ReadOnly));QVERIFY(second.open(QIODevice::ReadOnly));QVERIFY(third.open(QIODevice::ReadOnly));
+        const QByteArray bytes=first.readAll();QCOMPARE(second.readAll(),bytes);QCOMPARE(third.readAll(),bytes);
+        const auto tile=ImageLoader::load(modelDir.filePath("1.bmp"),41+model,&error);QVERIFY2(tile,qPrintable(error));
+        const QImage pixels=VipsSupport::renderRegion(tile,0,0,1,1,1.0,&error);QVERIFY2(!pixels.isNull(),qPrintable(error));
+        QCOMPARE(qGray(pixels.pixel(0,0)),expectedValues[model]);
+    }
+    QFile job(QDir(outputPath).filePath("job.json"));QVERIFY(job.open(QIODevice::ReadOnly));const QByteArray firstJob=job.readAll();job.close();
+    QVERIFY(firstJob.contains("\"by\": [0.0, 0.0, 0.0]"));
+    QVERIFY(firstJob.contains("\"by\": [10.0, 5.0, 0.0]"));
+    QJsonParseError parseError;const QJsonDocument json=QJsonDocument::fromJson(firstJob,&parseError);QCOMPARE(parseError.error,QJsonParseError::NoError);
+    const QJsonArray models=json.object().value("models").toArray();const QJsonArray commands=json.object().value("commands").toArray();
+    QCOMPARE(models.size(),4);QCOMPARE(commands.size(),8);QCOMPARE(models[2].toObject().value("label").toString(),QString("2"));QCOMPARE(models[2].toObject().value("path").toString(),QString("2"));
+    QCOMPARE(commands[4].toObject().value("by").toArray()[0].toDouble(),10.0);QCOMPARE(commands[4].toObject().value("by").toArray()[1].toDouble(),5.0);QCOMPARE(commands[5].toObject().value("id").toInt(),2);
+
+    QDir output(outputPath);QVERIFY(output.mkdir("9"));QFile stale(output.filePath("9/old.txt"));QVERIFY(stale.open(QIODevice::WriteOnly));stale.write("old");stale.close();
+    QFile unrelated(output.filePath("keep.txt"));QVERIFY(unrelated.open(QIODevice::WriteOnly));unrelated.write("keep");unrelated.close();
+    QVERIFY(!SplitExporter::exportPrintPackage(outputPath,document,grid,TraversalMode::SnakeZ,
+                                               options,false,std::make_shared<CancellationToken>(),{},&error));
+    QVERIFY(error.startsWith("PRINT_TARGETS_EXIST:"));QVERIFY(QDir(output.filePath("9")).exists());
+    options.repeatTimes=2;options.reverseY=true;error.clear();
+    QVERIFY2(SplitExporter::exportPrintPackage(outputPath,document,grid,TraversalMode::SnakeZ,
+                                               options,true,std::make_shared<CancellationToken>(),{},&error),qPrintable(error));
+    QVERIFY(!QDir(output.filePath("9")).exists());QVERIFY(QFileInfo::exists(output.filePath("keep.txt")));
+    for(int model=0;model<4;++model)QCOMPARE(QDir(output.filePath(QString::number(model))).entryList({QStringLiteral("*.bmp")},QDir::Files).size(),2);
+    QVERIFY(job.open(QIODevice::ReadOnly));const QByteArray replacedJob=job.readAll();job.close();QVERIFY(replacedJob.contains("\"by\": [10.0, -5.0, 0.0]"));
+    auto cancelled=std::make_shared<CancellationToken>();cancelled->cancel();
+    QVERIFY(!SplitExporter::exportPrintPackage(outputPath,document,grid,TraversalMode::SnakeZ,
+                                               options,true,cancelled,{},&error));
+    QVERIFY(job.open(QIODevice::ReadOnly));QCOMPARE(job.readAll(),replacedJob);
 }
 void TestCore::realPatternImageFromEnvironment() {
     const QString path=qEnvironmentVariable("IMAGE_HANDLER_REAL_TEST_IMAGE");

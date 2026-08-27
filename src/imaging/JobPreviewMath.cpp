@@ -1,0 +1,191 @@
+#include "imaging/JobPreviewMath.h"
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+
+namespace {
+constexpr float kPi = 3.14159265358979323846F;
+constexpr float kFieldOfViewRadians = 45.0F * kPi / 180.0F;
+}
+
+QPointF JobPreviewMath::vulkanNdcToScreen(const QVector2D& ndc, const QSizeF& viewport) {
+    return {(ndc.x() + 1.0F) * viewport.width() * 0.5,
+            (ndc.y() + 1.0F) * viewport.height() * 0.5};
+}
+
+QVector2D JobPreviewMath::screenToVulkanNdc(const QPointF& screen, const QSizeF& viewport) {
+    const double width = std::max(1.0, viewport.width());
+    const double height = std::max(1.0, viewport.height());
+    return {static_cast<float>(screen.x() * 2.0 / width - 1.0),
+            static_cast<float>(screen.y() * 2.0 / height - 1.0)};
+}
+
+bool JobPreviewMath::project(const QVector3D& point, const QMatrix4x4& viewProjection,
+                             const QSizeF& viewport, QPointF* screen, QVector2D* ndc,
+                             float* depth) {
+    const QVector4D clip = viewProjection * QVector4D(point, 1.0F);
+    if (clip.w() <= 0.00001F) return false;
+    const QVector3D value = clip.toVector3DAffine();
+    if (depth) *depth = value.z();
+    if (ndc) *ndc = QVector2D(value.x(), value.y());
+    if (screen) *screen = vulkanNdcToScreen(QVector2D(value.x(), value.y()), viewport);
+    return value.z() >= 0.0F && value.z() <= 1.0F;
+}
+
+bool JobPreviewMath::screenRay(const QPointF& screen, const QSizeF& viewport,
+                               const QMatrix4x4& viewProjection, QVector3D* origin,
+                               QVector3D* direction) {
+    if (!origin || !direction) return false;
+    bool invertible = false;
+    const QMatrix4x4 inverse = viewProjection.inverted(&invertible);
+    if (!invertible) return false;
+    const QVector2D ndc = screenToVulkanNdc(screen, viewport);
+    QVector4D nearPoint = inverse * QVector4D(ndc.x(), ndc.y(), 0.0F, 1.0F);
+    QVector4D farPoint = inverse * QVector4D(ndc.x(), ndc.y(), 1.0F, 1.0F);
+    if (std::abs(nearPoint.w()) <= 0.00001F || std::abs(farPoint.w()) <= 0.00001F) return false;
+    nearPoint /= nearPoint.w();
+    farPoint /= farPoint.w();
+    const QVector3D rayDirection = (farPoint - nearPoint).toVector3D();
+    if (rayDirection.lengthSquared() <= 1.0e-12F) return false;
+    *origin = nearPoint.toVector3D();
+    *direction = rayDirection.normalized();
+    return true;
+}
+
+bool JobPreviewMath::intersectHorizontalPlane(const QVector3D& rayOrigin,
+                                              const QVector3D& rayDirection, float planeZ,
+                                              QVector3D* intersection) {
+    if (!intersection || std::abs(rayDirection.z()) <= 1.0e-6F) return false;
+    const float distance = (planeZ - rayOrigin.z()) / rayDirection.z();
+    if (distance < 0.0F) return false;
+    *intersection = rayOrigin + rayDirection * distance;
+    return true;
+}
+
+double JobPreviewMath::projectedPointSpacing(std::span<const QPointF> projectedPoints,
+                                             size_t pointCount) {
+    if (projectedPoints.empty() || pointCount == 0) return 0.0;
+
+    double minimumX = std::numeric_limits<double>::max();
+    double minimumY = std::numeric_limits<double>::max();
+    double maximumX = std::numeric_limits<double>::lowest();
+    double maximumY = std::numeric_limits<double>::lowest();
+    size_t validCornerCount = 0;
+    for (const QPointF& point : projectedPoints) {
+        if (!std::isfinite(point.x()) || !std::isfinite(point.y())) continue;
+        minimumX = std::min(minimumX, point.x());
+        minimumY = std::min(minimumY, point.y());
+        maximumX = std::max(maximumX, point.x());
+        maximumY = std::max(maximumY, point.y());
+        ++validCornerCount;
+    }
+    if (validCornerCount == 0) return 0.0;
+    if (validCornerCount == 1 || pointCount == 1)
+        return std::numeric_limits<double>::max();
+
+    const double width = std::max(0.0, maximumX - minimumX);
+    const double height = std::max(0.0, maximumY - minimumY);
+    if (width > 0.0 && height > 0.0)
+        return std::sqrt((width * height) / static_cast<double>(pointCount));
+    const double extent = std::max(width, height);
+    return extent > 0.0 ? extent / static_cast<double>(validCornerCount - 1) : 0.0;
+}
+
+JobGuideGeometry JobPreviewMath::guideGeometry(const JobDocument& document,
+                                               const JobCoordinate& floatingOrigin) {
+    JobGuideGeometry geometry;
+    if (!document.bounds.valid || document.points.empty()) return geometry;
+    const auto zero = std::find_if(document.points.begin(), document.points.end(),
+                                   [](const JobPoint& point) { return point.placeId == 0; });
+    if (zero == document.points.end()) return geometry;
+    geometry.pointZero = zero->position.relativeTo(floatingOrigin);
+    geometry.minimum = document.bounds.minimum.relativeTo(floatingOrigin);
+    geometry.maximum = document.bounds.maximum.relativeTo(floatingOrigin);
+    geometry.xStart = {geometry.minimum.x(), geometry.pointZero.y(), geometry.pointZero.z()};
+    geometry.xEnd = {geometry.maximum.x(), geometry.pointZero.y(), geometry.pointZero.z()};
+    geometry.yStart = {geometry.pointZero.x(), geometry.minimum.y(), geometry.pointZero.z()};
+    geometry.yEnd = {geometry.pointZero.x(), geometry.maximum.y(), geometry.pointZero.z()};
+    const JobCoordinate size = document.bounds.size();
+    geometry.xDimension = std::abs(size.x);
+    geometry.yDimension = std::abs(size.y);
+    geometry.valid = true;
+    return geometry;
+}
+
+void JobTerrainCamera::setSceneBounds(const QVector3D& minimum, const QVector3D& maximum) {
+    sceneMinimum_ = minimum;
+    sceneMaximum_ = maximum;
+    sceneRadius_ = std::max(0.5F, (maximum - minimum).length() * 0.5F);
+    setPose(fittedPose());
+}
+
+JobCameraPose JobTerrainCamera::fittedPose() const {
+    JobCameraPose result;
+    result.pivot = (sceneMinimum_ + sceneMaximum_) * 0.5F;
+    result.distance = std::max(2.0F, sceneRadius_ / std::sin(kFieldOfViewRadians * 0.5F) * 1.1F);
+    result.azimuth = -45.0F;
+    result.elevation = 48.0F;
+    return result;
+}
+
+JobCameraPose JobTerrainCamera::focusPose(const QVector3D& point, bool preserveDistance) const {
+    JobCameraPose result = pose_;
+    result.pivot = point;
+    if (!preserveDistance)
+        result.distance = std::max(sceneRadius_ * 0.03F, minimumDistance() * 10.0F);
+    return result;
+}
+
+void JobTerrainCamera::setPose(const JobCameraPose& pose) {
+    pose_ = pose;
+    pose_.elevation = std::clamp(pose_.elevation, 5.0F, 89.0F);
+    pose_.distance = std::clamp(pose_.distance, minimumDistance(), maximumDistance());
+}
+
+float JobTerrainCamera::minimumDistance() const noexcept {
+    return std::max(0.0001F, sceneRadius_ * 0.001F);
+}
+
+float JobTerrainCamera::maximumDistance() const noexcept {
+    return std::max(100.0F, sceneRadius_ * 1000.0F);
+}
+
+void JobTerrainCamera::orbit(const QPointF& pixelDelta) {
+    pose_.azimuth -= static_cast<float>(pixelDelta.x()) * 0.25F;
+    pose_.elevation = std::clamp(pose_.elevation + static_cast<float>(pixelDelta.y()) * 0.25F,
+                                 5.0F, 89.0F);
+    pose_.azimuth = std::remainder(pose_.azimuth, 360.0F);
+}
+
+void JobTerrainCamera::translate(const QVector3D& delta) { pose_.pivot += delta; }
+
+void JobTerrainCamera::zoomBy(float factor) {
+    if (!std::isfinite(factor) || factor <= 0.0F) return;
+    pose_.distance = std::clamp(pose_.distance * factor, minimumDistance(), maximumDistance());
+}
+
+QVector3D JobTerrainCamera::eye() const {
+    const float azimuth = pose_.azimuth * kPi / 180.0F;
+    const float elevation = pose_.elevation * kPi / 180.0F;
+    const QVector3D direction(std::cos(elevation) * std::cos(azimuth),
+                              std::cos(elevation) * std::sin(azimuth),
+                              std::sin(elevation));
+    return pose_.pivot + direction * pose_.distance;
+}
+
+QVector3D JobTerrainCamera::groundForward() const {
+    const float azimuth = pose_.azimuth * kPi / 180.0F;
+    return QVector3D(-std::cos(azimuth), -std::sin(azimuth), 0.0F).normalized();
+}
+
+QVector3D JobTerrainCamera::right() const {
+    const QVector3D forward = groundForward();
+    return {forward.y(), -forward.x(), 0.0F};
+}
+
+QMatrix4x4 JobTerrainCamera::viewMatrix() const {
+    QMatrix4x4 view;
+    view.lookAt(eye(), pose_.pivot, QVector3D(0.0F, 0.0F, 1.0F));
+    return view;
+}
