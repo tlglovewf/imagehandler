@@ -1,6 +1,7 @@
 #include "tasks/TaskManager.h"
 #include "domain/JobModels.h"
 #include "imaging/MosaicBuilder.h"
+#include "io/ExportTypes.h"
 
 #include <QFutureWatcher>
 #include <QMutex>
@@ -26,6 +27,7 @@ TaskManager::TaskManager(QObject* parent) : QObject(parent) {
     qRegisterMetaType<SegmentationResult>();
     qRegisterMetaType<MosaicBuildResult>();
     qRegisterMetaType<JobDocumentPtr>();
+    qRegisterMetaType<ExportPreflightResult>();
 }
 
 TaskManager::~TaskManager() {

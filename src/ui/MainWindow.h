@@ -2,6 +2,7 @@
 
 #include "domain/Models.h"
 #include "domain/JobModels.h"
+#include "io/ExportTypes.h"
 #include <QMainWindow>
 #include <QVector>
 
@@ -18,6 +19,9 @@ class QComboBox;
 class QCheckBox;
 class QTimer;
 class QEvent;
+class QCloseEvent;
+class QDragEnterEvent;
+class QDropEvent;
 class QTabBar;
 class QSplitter;
 
@@ -28,14 +32,19 @@ public:
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
+    void closeEvent(QCloseEvent* event) override;
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dropEvent(QDropEvent* event) override;
 
 private:
-    enum class PendingAction { None, Scan, Load, Merge, Detect, Grid, SplitExport, MosaicExport,
+    enum class PendingAction { None, Scan, Load, Merge, Detect, Grid, ExportPreflight,
+                               SplitExport, MosaicExport,
                                JobLoad, JobLoadExport, JobPreviewBuild };
     void buildUi();
     void connectUi();
     void openImage();
     void openDirectory();
+    void scanDirectory(const QString& directory);
     void loadPath(const QString& path);
     void loadCurrentListItem();
     void navigate(int delta);
@@ -47,7 +56,7 @@ private:
     void detectSegmentation();
     void applyManualSegmentation();
     void chooseExportDirectory();
-    void startExport(bool overwrite);
+    void startExport(const ExportExecutionOptions& execution);
     void chooseJobFile();
     void loadJobFile(const QString& path, bool exported);
     void scheduleJobPreview(bool switchToJob);
@@ -57,13 +66,19 @@ private:
     void showPreviewTab(int index);
     void selectJobFromImage(int row, int column);
     void selectImageFromJob(qint64 placeId);
+    void restoreSettings();
+    void saveSettings() const;
+    void resetParameters();
+    void populateDroppedImages(const QStringList& paths);
 
 private Q_SLOTS:
     void acceptDocument(const ImageDocumentPtr& document);
+    void showExportPreflight(const ExportPreflightResult& result);
 
 private:
     void setBusyUi(bool busy);
     void updateGridCountLabel();
+    void updateSegmentationStatistics();
     void setTaskDisplay(const QString& title, const QString& phase,
                         qint64 completed, qint64 total);
     void setIdleTaskDisplay();
@@ -85,7 +100,7 @@ private:
     QPushButton *openButton_=nullptr,*directoryButton_=nullptr,*mergeButton_=nullptr;
     QPushButton *detectButton_=nullptr,*exportButton_=nullptr,*previousButton_=nullptr,*nextButton_=nullptr;
     QPushButton *manualPreviewButton_=nullptr,*pathButton_=nullptr,*cancelButton_=nullptr;
-    QPushButton *mergedExportButton_=nullptr,*jobImportButton_=nullptr;
+    QPushButton *mergedExportButton_=nullptr,*jobImportButton_=nullptr,*resetParametersButton_=nullptr;
     QSpinBox *cellWidth_=nullptr,*cellHeight_=nullptr,*threshold_=nullptr;
     QSpinBox *canvasX_=nullptr,*canvasY_=nullptr,*repeatTimes_=nullptr;
     QCheckBox *printModeCheck_=nullptr,*canvasLockCheck_=nullptr,*reverseYCheck_=nullptr;
@@ -93,9 +108,12 @@ private:
     QWidget* printOptionsContainer_=nullptr;
     QComboBox *polarity_=nullptr,*traversal_=nullptr,*previewLayoutMode_=nullptr;
     QLabel *gridCountLabel_=nullptr,*selectedCellLabel_=nullptr,*taskTitle_=nullptr,*taskPhase_=nullptr,*progressPercent_=nullptr,*imageInfo_=nullptr,*zoomInfo_=nullptr;
+    QLabel *statisticsStatus_=nullptr,*statisticsMode_=nullptr,*statisticsGrid_=nullptr;
+    QLabel *statisticsFileCount_=nullptr,*statisticsOutputSize_=nullptr,*statisticsRequiredSpace_=nullptr;
     QProgressBar* progress_=nullptr;
     QTimer* taskResetTimer_=nullptr;
     QTimer* jobPreviewTimer_=nullptr;
+    QSplitter* mainSplitter_=nullptr;
     ImageDocumentPtr document_;
     JobDocumentPtr jobDocument_;
     SegmentationResult segmentation_;
@@ -103,6 +121,12 @@ private:
     QStringList pendingMergePaths_;
     QVector<ImageDocumentPtr> mergedDocuments_;
     QString exportDirectory_;
+    QString lastImageDirectory_;
+    QString lastDirectoryDirectory_;
+    QString lastJobDirectory_;
+    QString lastMergedExportDirectory_;
+    QString lastSplitExportDirectory_;
+    ExportRequest pendingExportRequest_;
     PendingAction pendingAction_ = PendingAction::None;
     quint64 generation_ = 1;
     QString lastTilePhase_;

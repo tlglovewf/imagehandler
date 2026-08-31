@@ -1,11 +1,17 @@
 #include "io/SplitExporter.h"
 #include "io/BmpStreamWriter.h"
+#include "io/ExportPreflight.h"
 
+#include <QCoreApplication>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLocale>
 #include <QRegularExpression>
+#include <QSaveFile>
 #include <QUuid>
 #include <algorithm>
 #include <climits>
@@ -13,6 +19,100 @@
 #include <new>
 
 namespace {
+
+constexpr auto kExportReportName = "export-report.json";
+
+QString pixelKindName(PixelKind kind) {
+    switch (kind) {
+    case PixelKind::Binary1: return QStringLiteral("binary1");
+    case PixelKind::Gray8: return QStringLiteral("gray8");
+    case PixelKind::Color: return QStringLiteral("color");
+    case PixelKind::Unsupported: return QStringLiteral("unsupported");
+    }
+    return QStringLiteral("unsupported");
+}
+
+bool writeExportReport(const QString& path, const ExportRequest& request,
+                       qint64 estimatedBmpBytes, qint64 overwrittenTargets,
+                       QString* error) {
+    QString sourceName;
+    if (request.document) {
+        sourceName = QFileInfo(request.document->sourcePath).fileName();
+        if (sourceName.isEmpty()) sourceName = QFileInfo(request.document->displayName).fileName();
+    }
+    const QString applicationVersion = QCoreApplication::applicationVersion().isEmpty()
+        ? QStringLiteral(IMAGE_HANDLER_VERSION) : QCoreApplication::applicationVersion();
+    QJsonObject application{{QStringLiteral("name"), QStringLiteral("ImageHandler")},
+                            {QStringLiteral("version"), applicationVersion}};
+    const auto& metadata = request.document->metadata;
+    QJsonObject source{{QStringLiteral("name"), sourceName},
+                       {QStringLiteral("width"), metadata.width},
+                       {QStringLiteral("height"), metadata.height},
+                       {QStringLiteral("pixelKind"), pixelKindName(metadata.kind)},
+                       {QStringLiteral("sourceBitsPerPixel"), metadata.sourceBitsPerPixel}};
+    const auto& settings = request.segmentation.settings;
+    QJsonObject segmentation{{QStringLiteral("cellWidth"), settings.cellWidth},
+                             {QStringLiteral("cellHeight"), settings.cellHeight},
+                             {QStringLiteral("rows"), request.segmentation.rows},
+                             {QStringLiteral("columns"), request.segmentation.columns},
+                             {QStringLiteral("threshold"), settings.threshold},
+                             {QStringLiteral("polarity"), settings.polarity == ForegroundPolarity::Dark
+                                  ? QStringLiteral("dark") : QStringLiteral("light")}};
+    const qint64 cells = qint64(request.segmentation.rows) * request.segmentation.columns;
+    const qint64 bmpCount = request.mode == ExportMode::PrintPackage
+        ? cells * request.printOptions.repeatTimes : cells;
+    QJsonObject output{{QStringLiteral("bmpCount"), bmpCount},
+                       {QStringLiteral("estimatedBmpBytes"), estimatedBmpBytes},
+                       {QStringLiteral("overwrittenTargetCount"), overwrittenTargets},
+                       {QStringLiteral("indexBase"), request.mode == ExportMode::PrintPackage ? 0 : 1},
+                       {QStringLiteral("indexEnd"), request.mode == ExportMode::PrintPackage
+                            ? cells - 1 : cells},
+                       {QStringLiteral("namingRule"), request.mode == ExportMode::PrintPackage
+                            ? QStringLiteral("{placeId}/{copy}.bmp")
+                            : QStringLiteral("{index}.bmp")}};
+    QJsonObject root{{QStringLiteral("schemaVersion"), 1},
+                     {QStringLiteral("application"), application},
+                     {QStringLiteral("createdAtUtc"), QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},
+                     {QStringLiteral("mode"), request.mode == ExportMode::PrintPackage
+                          ? QStringLiteral("print_package") : QStringLiteral("split_tiles")},
+                     {QStringLiteral("source"), source},
+                     {QStringLiteral("segmentation"), segmentation},
+                     {QStringLiteral("traversal"), request.traversalMode == TraversalMode::SnakeZ
+                          ? QStringLiteral("snake_z") : QStringLiteral("clockwise_spiral")},
+                     {QStringLiteral("output"), output}};
+    if (request.mode == ExportMode::PrintPackage) {
+        root.insert(QStringLiteral("print"), QJsonObject{
+            {QStringLiteral("canvasX"), request.printOptions.canvasX},
+            {QStringLiteral("canvasY"), request.printOptions.canvasY},
+            {QStringLiteral("reverseY"), request.printOptions.reverseY},
+            {QStringLiteral("repeatTimes"), request.printOptions.repeatTimes}});
+    }
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) {
+        if (error) *error = QStringLiteral("无法创建导出报告：%1").arg(file.errorString());
+        return false;
+    }
+    const QByteArray data = QJsonDocument(root).toJson(QJsonDocument::Indented);
+    if (file.write(data) != data.size() || !file.commit()) {
+        if (error) *error = QStringLiteral("无法保存导出报告：%1").arg(file.errorString());
+        return false;
+    }
+    return true;
+}
+
+bool verifyTargetFingerprint(const ExportRequest& request, const QString& expected,
+                             qint64* conflicts, QString* error,
+                             const CancellationTokenPtr& token) {
+    if (expected.isEmpty()) return true;
+    const QString actual = ExportPreflight::targetFingerprint(request, conflicts, nullptr,
+                                                               error, token);
+    if (!error->isEmpty() || (token && token->isCancelled())) return false;
+    if (actual != expected) {
+        *error = QStringLiteral("输出目录内容在预检后发生变化，请重新执行导出预检。");
+        return false;
+    }
+    return true;
+}
 
 QString jsonNumber(double value) {
     if (value == 0.0) return QStringLiteral("0.0");
@@ -224,6 +324,15 @@ bool SplitExporter::exportTiles(const QString& outputDirectory, const ImageDocum
                                 const SegmentationResult& segmentation, TraversalMode mode,
                                 bool overwrite, const CancellationTokenPtr& token,
                                 const Progress& progress, QString* error) {
+    return exportTiles(outputDirectory, document, segmentation, mode,
+                       ExportExecutionOptions{overwrite, false, {}}, token, progress, error);
+}
+
+bool SplitExporter::exportTiles(const QString& outputDirectory, const ImageDocumentPtr& document,
+                                const SegmentationResult& segmentation, TraversalMode mode,
+                                const ExportExecutionOptions& execution,
+                                const CancellationTokenPtr& token,
+                                const Progress& progress, QString* error) {
     if (!document || !document->image || segmentation.settings.cellWidth <= 0 ||
         segmentation.settings.cellHeight <= 0) {
         if (error) *error = QStringLiteral("分割文档或参数无效。");
@@ -244,6 +353,15 @@ bool SplitExporter::exportTiles(const QString& outputDirectory, const ImageDocum
     }
     QDir output(outputDirectory);
     if (!output.exists() && !output.mkpath(".")) { if(error)*error=QStringLiteral("无法创建输出目录。"); return false; }
+    const ExportRequest request{ExportMode::SplitTiles, outputDirectory, document, segmentation,
+                                mode, {}, execution.writeReport};
+    qint64 preflightConflictCount = 0;
+    QString fingerprintError;
+    if (!verifyTargetFingerprint(request, execution.confirmedTargetFingerprint,
+                                 &preflightConflictCount, &fingerprintError, token)) {
+        if (!token->isCancelled() && error) *error = fingerprintError;
+        return false;
+    }
     const auto order = traversal(segmentation.rows, segmentation.columns, mode);
     if (order.empty()) { if(error)*error=QStringLiteral("没有可导出的完整单元。"); return false; }
     const QString tempName = QStringLiteral(".image_handler_%1").arg(QUuid::createUuid().toString(QUuid::Id128));
@@ -286,7 +404,25 @@ bool SplitExporter::exportTiles(const QString& outputDirectory, const ImageDocum
         if (!ok) { cleanup(); if(!token->isCancelled()&&error)*error=writeError; return false; }
     }
 
+    if (execution.writeReport) {
+        QString estimateError;
+        const qint64 estimatedBytes = ExportPreflight::estimateBmpBytes(request, &estimateError);
+        if (estimatedBytes < 0 || !writeExportReport(temp.filePath(QString::fromLatin1(kExportReportName)),
+                                                     request, estimatedBytes,
+                                                     preflightConflictCount, error)) {
+            cleanup();
+            if (error && error->isEmpty()) *error = estimateError;
+            return false;
+        }
+    }
+
     if (token->isCancelled()) { cleanup(); return false; }
+    if (!verifyTargetFingerprint(request, execution.confirmedTargetFingerprint,
+                                 nullptr, &fingerprintError, token)) {
+        cleanup();
+        if (!token->isCancelled() && error) *error = fingerprintError;
+        return false;
+    }
     QDir backup(temp.filePath("backup")); temp.mkdir("backup");
     QStringList committed, backedUp;
     for (qsizetype i = 0; i < static_cast<qsizetype>(order.size()); ++i) {
@@ -299,13 +435,38 @@ bool SplitExporter::exportTiles(const QString& outputDirectory, const ImageDocum
                 if(error)*error=QStringLiteral("目标路径不是可覆盖的普通文件：%1").arg(name);
                 goto rollback;
             }
-            if (!overwrite) { if(error)*error=QStringLiteral("目标文件已存在：%1").arg(name); goto rollback; }
+            if (!execution.overwrite) { if(error)*error=QStringLiteral("目标文件已存在：%1").arg(name); goto rollback; }
             if (!QFile::rename(target, backup.filePath(name))) { if(error)*error=QStringLiteral("无法备份：%1").arg(name); goto rollback; }
             backedUp << name;
         }
         if (!QFile::rename(temp.filePath(name), target)) { if(error)*error=QStringLiteral("无法提交：%1").arg(name); goto rollback; }
         committed << name;
         reportProgress(QStringLiteral("提交文件"), qint64(order.size()) * 1000 + i + 1);
+    }
+    if (execution.writeReport) {
+        const QString name = QString::fromLatin1(kExportReportName);
+        const QString target = output.filePath(name);
+        const QFileInfo targetInfo(target);
+        if (targetInfo.exists() || targetInfo.isSymLink() || targetInfo.isJunction()) {
+            if (!targetInfo.isFile() || targetInfo.isSymLink() || targetInfo.isJunction()) {
+                if (error) *error = QStringLiteral("目标路径不是可覆盖的普通文件：%1").arg(name);
+                goto rollback;
+            }
+            if (!execution.overwrite) {
+                if (error) *error = QStringLiteral("目标文件已存在：%1").arg(name);
+                goto rollback;
+            }
+            if (!QFile::rename(target, backup.filePath(name))) {
+                if (error) *error = QStringLiteral("无法备份：%1").arg(name);
+                goto rollback;
+            }
+            backedUp << name;
+        }
+        if (!QFile::rename(temp.filePath(name), target)) {
+            if (error) *error = QStringLiteral("无法提交：%1").arg(name);
+            goto rollback;
+        }
+        committed << name;
     }
     cleanup(); return true;
 
@@ -341,6 +502,17 @@ bool SplitExporter::exportPrintPackage(const QString& outputDirectory,
                                        const ImageDocumentPtr& document,
                                        const SegmentationResult& segmentation, TraversalMode mode,
                                        const PrintExportOptions& options, bool overwrite,
+                                       const CancellationTokenPtr& token,
+                                       const Progress& progress, QString* error) {
+    return exportPrintPackage(outputDirectory, document, segmentation, mode, options,
+                              ExportExecutionOptions{overwrite, false, {}}, token, progress, error);
+}
+
+bool SplitExporter::exportPrintPackage(const QString& outputDirectory,
+                                       const ImageDocumentPtr& document,
+                                       const SegmentationResult& segmentation, TraversalMode mode,
+                                       const PrintExportOptions& options,
+                                       const ExportExecutionOptions& execution,
                                        const CancellationTokenPtr& token,
                                        const Progress& progress, QString* error) {
     if (!document || !document->image || !token || segmentation.settings.cellWidth <= 0 ||
@@ -379,6 +551,16 @@ bool SplitExporter::exportPrintPackage(const QString& outputDirectory,
         return false;
     }
 
+    const ExportRequest request{ExportMode::PrintPackage, outputDirectory, document,
+                                segmentation, mode, options, execution.writeReport};
+    qint64 preflightConflictCount = 0;
+    QString fingerprintError;
+    if (!verifyTargetFingerprint(request, execution.confirmedTargetFingerprint,
+                                 &preflightConflictCount, &fingerprintError, token)) {
+        if (!token->isCancelled() && error) *error = fingerprintError;
+        return false;
+    }
+
     const QRegularExpression numericName(QStringLiteral("^[0-9]+$"));
     QStringList existingTargets;
     const QFileInfoList entries = output.entryInfoList(
@@ -400,7 +582,17 @@ bool SplitExporter::exportPrintPackage(const QString& outputDirectory,
         }
         existingTargets << QStringLiteral("job.json");
     }
-    if (!existingTargets.isEmpty() && !overwrite) {
+    if (execution.writeReport) {
+        const QFileInfo reportInfo(output.filePath(QString::fromLatin1(kExportReportName)));
+        if (reportInfo.exists() || reportInfo.isSymLink() || reportInfo.isJunction()) {
+            if (!isSafeManagedTarget(reportInfo, false)) {
+                if (error) *error = QStringLiteral("export-report.json 不是可安全替换的普通文件。");
+                return false;
+            }
+            existingTargets << QString::fromLatin1(kExportReportName);
+        }
+    }
+    if (!existingTargets.isEmpty() && !execution.overwrite) {
         if (error) *error = QStringLiteral("PRINT_TARGETS_EXIST:%1").arg(existingTargets.size());
         return false;
     }
@@ -494,7 +686,25 @@ bool SplitExporter::exportPrintPackage(const QString& outputDirectory,
         cleanup();
         return false;
     }
+    if (execution.writeReport) {
+        QString estimateError;
+        const qint64 estimatedBytes = ExportPreflight::estimateBmpBytes(request, &estimateError);
+        if (estimatedBytes < 0 ||
+            !writeExportReport(staged.filePath(QString::fromLatin1(kExportReportName)), request,
+                               estimatedBytes, preflightConflictCount, error)) {
+            cleanup();
+            if (error && error->isEmpty()) *error = estimateError;
+            return false;
+        }
+    }
     if (token->isCancelled()) { cleanup(); return false; }
+
+    if (!verifyTargetFingerprint(request, execution.confirmedTargetFingerprint,
+                                 nullptr, &fingerprintError, token)) {
+        cleanup();
+        if (!token->isCancelled() && error) *error = fingerprintError;
+        return false;
+    }
 
     QStringList backedUp;
     QStringList committed;
@@ -529,6 +739,14 @@ bool SplitExporter::exportPrintPackage(const QString& outputDirectory,
         goto rollback_print;
     }
     committed << QStringLiteral("job.json");
+    if (execution.writeReport) {
+        const QString name = QString::fromLatin1(kExportReportName);
+        if (!QDir().rename(staged.filePath(name), output.filePath(name))) {
+            if (error) *error = QStringLiteral("无法提交导出报告。");
+            goto rollback_print;
+        }
+        committed << name;
+    }
     reportProgress(QStringLiteral("提交打印结果"), totalWork);
     cleanup();
     return true;

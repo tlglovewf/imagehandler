@@ -1,7 +1,9 @@
 #include "io/DirectoryScanner.h"
 #include "domain/MergeInputSelector.h"
+#include "domain/StorageSizeFormatter.h"
 #include "io/BmpStreamWriter.h"
 #include "io/MergedImageExporter.h"
+#include "io/ExportPreflight.h"
 #include "io/SplitExporter.h"
 #include "imaging/ImageLoader.h"
 #include "imaging/MosaicBuilder.h"
@@ -51,6 +53,10 @@ private Q_SLOTS:
     void exportRollbackRestoresOriginal();
     void printCanvasCoordinates();
     void printPackageExportAndReplacement();
+    void exportPreflightEstimatesAndSpacePolicy();
+    void storageSizeFormatting();
+    void exportPreflightConflictsAndPortableReports();
+    void exportReportFailureLeavesTargetsUntouched();
     void realPatternImageFromEnvironment();
 };
 
@@ -378,6 +384,139 @@ void TestCore::printPackageExportAndReplacement() {
     QVERIFY(!SplitExporter::exportPrintPackage(outputPath,document,grid,TraversalMode::SnakeZ,
                                                options,true,cancelled,{},&error));
     QVERIFY(job.open(QIODevice::ReadOnly));QCOMPARE(job.readAll(),replacedJob);
+}
+void TestCore::exportPreflightEstimatesAndSpacePolicy() {
+    auto document=std::make_shared<ImageDocument>();
+    document->metadata.width=5;document->metadata.height=3;document->metadata.kind=PixelKind::Binary1;
+    SegmentationResult grid;grid.settings={4,2,128,ForegroundPolarity::Dark};grid.rows=2;grid.columns=2;
+    ExportRequest request{ExportMode::SplitTiles,{},document,grid,TraversalMode::SnakeZ,{},true};
+    QString error;
+    QCOMPARE(ExportPreflight::bmpFileSize(PixelKind::Binary1,4,2),qint64(70));
+    QCOMPARE(ExportPreflight::estimateBmpBytes(request,&error),qint64(272));
+    QVERIFY2(error.isEmpty(),qPrintable(error));
+    auto estimate=ExportPreflight::estimateOutput(request);QVERIFY2(estimate.valid,qPrintable(estimate.error));
+    QCOMPARE(estimate.bmpFileCount,qint64(4));QCOMPARE(estimate.estimatedBmpBytes,qint64(272));
+    QCOMPARE(estimate.estimatedTotalBytes,qint64(272+8*1024));
+    QCOMPARE(estimate.requiredBytes,qint64(272+8*1024+16*1024*1024));
+    document->metadata.kind=PixelKind::Gray8;
+    QCOMPARE(ExportPreflight::estimateBmpBytes(request,&error),qint64(4336));
+    request.mode=ExportMode::PrintPackage;request.printOptions={20,10,3,false};
+    QCOMPARE(ExportPreflight::estimateBmpBytes(request,&error),qint64(13008));
+    estimate=ExportPreflight::estimateOutput(request);QVERIFY2(estimate.valid,qPrintable(estimate.error));
+    QCOMPARE(estimate.bmpFileCount,qint64(12));QCOMPARE(estimate.estimatedBmpBytes,qint64(13008));
+    QCOMPARE(estimate.estimatedTotalBytes,qint64(13008+8*1024+4*220));
+    QCOMPARE(estimate.requiredBytes,estimate.estimatedTotalBytes+16*1024*1024);
+
+    document->metadata.width=131070;document->metadata.height=65500;
+    request.segmentation.settings.cellWidth=65535;request.segmentation.settings.cellHeight=65500;
+    request.segmentation.rows=1;request.segmentation.columns=2;
+    request.printOptions.repeatTimes=INT_MAX;
+    estimate=ExportPreflight::estimateOutput(request);QVERIFY(!estimate.valid);
+    QVERIFY(estimate.error.contains(QStringLiteral("超过程序可表示范围")));
+    QVERIFY(ExportPreflight::hasSufficientSpace(100,100,true));
+    QVERIFY(!ExportPreflight::hasSufficientSpace(101,100,true));
+    QVERIFY(ExportPreflight::hasSufficientSpace(100,-1,false));
+}
+
+void TestCore::storageSizeFormatting() {
+    QCOMPARE(formatStorageSize(-1),QStringLiteral("未知"));
+    QCOMPARE(formatStorageSize(0),QStringLiteral("0 B"));
+    QCOMPARE(formatStorageSize(1023),QStringLiteral("1023 B"));
+    QCOMPARE(formatStorageSize(1024),QStringLiteral("1 KB"));
+    QCOMPARE(formatStorageSize(1536),QStringLiteral("1.5 KB"));
+    QCOMPARE(formatStorageSize(qint64(1024)*1024),QStringLiteral("1 MB"));
+    QCOMPARE(formatStorageSize(qint64(1024)*1024*1024),QStringLiteral("1 GB"));
+    QCOMPARE(formatStorageSize(qint64(1024)*1024*1024*1024),QStringLiteral("1 TB"));
+    QCOMPARE(formatStorageSize(qint64(5)*1024*1024*1024*1024/4),QStringLiteral("1.25 TB"));
+}
+
+void TestCore::exportPreflightConflictsAndPortableReports() {
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QImage source(5,3,QImage::Format_Grayscale8);source.fill(77);
+    const QString sourcePath=directory.filePath(QString::fromUtf8("源 图.bmp"));QVERIFY(source.save(sourcePath,"BMP"));
+    QString error;const auto document=ImageLoader::load(sourcePath,90,&error);QVERIFY2(document,qPrintable(error));
+    const auto grid=PatternDetector::makeManualGrid(document,{4,2,128,ForegroundPolarity::Dark});
+    const QString outputPath=directory.filePath("tiles");QVERIFY(QDir().mkpath(outputPath));
+    ExportRequest request{ExportMode::SplitTiles,outputPath,document,grid,
+                          TraversalMode::ClockwiseSpiral,{},true};
+    auto token=std::make_shared<CancellationToken>();
+    const ExportPreflightResult first=ExportPreflight::inspect(request,token,{});
+    QVERIFY2(first.valid,qPrintable(first.blockingError));QCOMPARE(first.bmpFileCount,qint64(4));
+    QCOMPARE(first.conflictCount,qint64(0));QCOMPARE(first.firstOutput,QStringLiteral("1.bmp"));
+    QCOMPARE(first.lastOutput,QStringLiteral("4.bmp"));
+    const ExportExecutionOptions execution{false,true,first.targetFingerprint};
+    QVERIFY2(SplitExporter::exportTiles(outputPath,document,grid,TraversalMode::ClockwiseSpiral,
+                                        execution,token,{},&error),qPrintable(error));
+    QFile report(QDir(outputPath).filePath("export-report.json"));QVERIFY(report.open(QIODevice::ReadOnly));
+    const QByteArray reportBytes=report.readAll();report.close();
+    QVERIFY(!reportBytes.contains(QDir::toNativeSeparators(directory.path()).toUtf8()));
+    QJsonParseError parseError;const QJsonObject root=QJsonDocument::fromJson(reportBytes,&parseError).object();
+    QCOMPARE(parseError.error,QJsonParseError::NoError);QCOMPARE(root.value("schemaVersion").toInt(),1);
+    QCOMPARE(root.value("mode").toString(),QStringLiteral("split_tiles"));
+    QCOMPARE(root.value("source").toObject().value("name").toString(),QString::fromUtf8("源 图.bmp"));
+    QCOMPARE(root.value("output").toObject().value("bmpCount").toInteger(),qint64(4));
+    QCOMPARE(root.value("output").toObject().value("indexBase").toInt(),1);
+    QVERIFY(!root.contains("print"));
+
+    const ExportPreflightResult conflicts=ExportPreflight::inspect(request,token,{});
+    QVERIFY(conflicts.valid);QCOMPARE(conflicts.conflictCount,qint64(5));
+    QFile changed(QDir(outputPath).filePath("1.bmp"));QVERIFY(changed.open(QIODevice::Append));
+    QCOMPARE(changed.write("x",1),qint64(1));changed.close();
+    QString fingerprintError;const QString changedFingerprint=ExportPreflight::targetFingerprint(
+        request,nullptr,nullptr,&fingerprintError,token,{});
+    QVERIFY2(fingerprintError.isEmpty(),qPrintable(fingerprintError));
+    QVERIFY(changedFingerprint!=conflicts.targetFingerprint);
+    error.clear();
+    QVERIFY(!SplitExporter::exportTiles(outputPath,document,grid,TraversalMode::ClockwiseSpiral,
+                                         {true,true,conflicts.targetFingerprint},token,{},&error));
+    QVERIFY(error.contains(QStringLiteral("预检后发生变化")));
+
+    const QString printPath=directory.filePath("print");QVERIFY(QDir().mkpath(printPath));
+    request={ExportMode::PrintPackage,printPath,document,grid,TraversalMode::SnakeZ,
+             {20,10,2,true},true};
+    const ExportPreflightResult printPreflight=ExportPreflight::inspect(request,token,{});
+    QVERIFY2(printPreflight.valid,qPrintable(printPreflight.blockingError));
+    QVERIFY2(SplitExporter::exportPrintPackage(printPath,document,grid,TraversalMode::SnakeZ,
+        request.printOptions,{false,true,printPreflight.targetFingerprint},token,{},&error),qPrintable(error));
+    QFile printReport(QDir(printPath).filePath("export-report.json"));QVERIFY(printReport.open(QIODevice::ReadOnly));
+    const QJsonObject printRoot=QJsonDocument::fromJson(printReport.readAll()).object();
+    QCOMPARE(printRoot.value("mode").toString(),QStringLiteral("print_package"));
+    QCOMPARE(printRoot.value("output").toObject().value("indexBase").toInt(),0);
+    QCOMPARE(printRoot.value("print").toObject().value("repeatTimes").toInt(),2);
+    QCOMPARE(printRoot.value("print").toObject().value("reverseY").toBool(),true);
+
+    const QString unsafePath=directory.filePath("unsafe");QVERIFY(QDir().mkpath(unsafePath));
+    QVERIFY(QDir(unsafePath).mkdir("export-report.json"));request.outputDirectory=unsafePath;
+    const auto unsafe=ExportPreflight::inspect(request,token,{});
+    QVERIFY(!unsafe.valid);QVERIFY(unsafe.blockingError.contains(QStringLiteral("类型不安全")));
+    QCOMPARE(QDir(unsafePath).entryList({QStringLiteral("*.bmp")},QDir::Files).size(),0);
+}
+void TestCore::exportReportFailureLeavesTargetsUntouched() {
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QImage source(2,2,QImage::Format_Grayscale8);source.fill(50);
+    const QString sourcePath=directory.filePath("source.bmp");QVERIFY(source.save(sourcePath,"BMP"));
+    QString error;const auto document=ImageLoader::load(sourcePath,91,&error);QVERIFY2(document,qPrintable(error));
+    const auto grid=PatternDetector::makeManualGrid(document,{2,2,128,ForegroundPolarity::Dark});
+    const QString outputPath=directory.filePath("output");QVERIFY(QDir().mkpath(outputPath));
+    QFile original(QDir(outputPath).filePath("1.bmp"));QVERIFY(original.open(QIODevice::WriteOnly));
+    const QByteArray originalBytes("original");QCOMPARE(original.write(originalBytes),qint64(originalBytes.size()));original.close();
+    ExportRequest request{ExportMode::SplitTiles,outputPath,document,grid,
+                          TraversalMode::SnakeZ,{},true};
+    auto token=std::make_shared<CancellationToken>();
+    const auto preflight=ExportPreflight::inspect(request,token,{});QVERIFY(preflight.valid);
+    bool injected=false;
+    const auto progress=[&](const TaskProgress&){
+        if(injected)return;
+        const QStringList temporary=QDir(outputPath).entryList(
+            {QStringLiteral(".image_handler_*")},QDir::Dirs|QDir::Hidden|QDir::NoDotAndDotDot);
+        if(!temporary.isEmpty())injected=QDir(QDir(outputPath).filePath(temporary.front())).mkdir("export-report.json");
+    };
+    QVERIFY(!SplitExporter::exportTiles(outputPath,document,grid,TraversalMode::SnakeZ,
+        {true,true,preflight.targetFingerprint},token,progress,&error));
+    QVERIFY(injected);QVERIFY(error.contains(QStringLiteral("导出报告")));
+    QVERIFY(original.open(QIODevice::ReadOnly));QCOMPARE(original.readAll(),originalBytes);
+    QCOMPARE(QDir(outputPath).entryList({QStringLiteral(".image_handler_*")},
+        QDir::Dirs|QDir::Hidden|QDir::NoDotAndDotDot).size(),0);
 }
 void TestCore::realPatternImageFromEnvironment() {
     const QString path=qEnvironmentVariable("IMAGE_HANDLER_REAL_TEST_IMAGE");

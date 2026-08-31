@@ -20,6 +20,7 @@ qt_standard_project_setup()
 add_library(image_handler_core
     src/domain/Models.h
     src/domain/JobModels.h
+    src/domain/StorageSizeFormatter.h src/domain/StorageSizeFormatter.cpp
     src/domain/MergeInputSelector.h src/domain/MergeInputSelector.cpp
     src/imaging/VipsSupport.h src/imaging/VipsSupport.cpp
     src/imaging/BmpRegionLoader.h src/imaging/BmpRegionLoader.cpp
@@ -33,6 +34,8 @@ add_library(image_handler_core
     src/io/DirectoryScanner.h src/io/DirectoryScanner.cpp
     src/io/BmpStreamWriter.h src/io/BmpStreamWriter.cpp
     src/io/MergedImageExporter.h src/io/MergedImageExporter.cpp
+    src/io/ExportTypes.h
+    src/io/ExportPreflight.h src/io/ExportPreflight.cpp
     src/io/SplitExporter.h src/io/SplitExporter.cpp
     src/io/JobFileLoader.h src/io/JobFileLoader.cpp
     src/tasks/TaskManager.h src/tasks/TaskManager.cpp
@@ -52,7 +55,10 @@ target_link_libraries(image_handler_core
         "${VIPS_ROOT}/lib/libglib-2.0.lib"
 )
 target_compile_definitions(image_handler_core PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-target_compile_definitions(image_handler_core PUBLIC QT_NO_KEYWORDS)
+target_compile_definitions(image_handler_core PUBLIC
+    QT_NO_KEYWORDS
+    IMAGE_HANDLER_VERSION="${PROJECT_VERSION}"
+)
 if(MSVC)
     target_compile_options(image_handler_core PUBLIC /utf-8)
 endif()

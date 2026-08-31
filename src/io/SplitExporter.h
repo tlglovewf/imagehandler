@@ -1,15 +1,9 @@
 #pragma once
 
 #include "domain/Models.h"
+#include "io/ExportTypes.h"
 #include <QPointF>
 #include <functional>
-
-struct PrintExportOptions {
-    int canvasX = 1;
-    int canvasY = 1;
-    int repeatTimes = 10;
-    bool reverseY = false;
-};
 
 class SplitExporter {
 public:
@@ -27,10 +21,22 @@ public:
                             const SegmentationResult& segmentation, TraversalMode mode,
                             bool overwrite, const CancellationTokenPtr& token,
                             const Progress& progress, QString* error);
+    static bool exportTiles(const QString& outputDirectory, const ImageDocumentPtr& document,
+                            const SegmentationResult& segmentation, TraversalMode mode,
+                            const ExportExecutionOptions& execution,
+                            const CancellationTokenPtr& token, const Progress& progress,
+                            QString* error);
     static bool exportPrintPackage(const QString& outputDirectory,
                                    const ImageDocumentPtr& document,
                                    const SegmentationResult& segmentation, TraversalMode mode,
                                    const PrintExportOptions& options, bool overwrite,
+                                   const CancellationTokenPtr& token,
+                                   const Progress& progress, QString* error);
+    static bool exportPrintPackage(const QString& outputDirectory,
+                                   const ImageDocumentPtr& document,
+                                   const SegmentationResult& segmentation, TraversalMode mode,
+                                   const PrintExportOptions& options,
+                                   const ExportExecutionOptions& execution,
                                    const CancellationTokenPtr& token,
                                    const Progress& progress, QString* error);
 };

@@ -4,15 +4,22 @@
 #include "ui/JobPreviewWidget.h"
 #include "ui/MainWindow.h"
 
+#include <QAbstractButton>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDragEnterEvent>
+#include <QDropEvent>
 #include <QListWidget>
 #include <QLabel>
+#include <QMessageBox>
+#include <QMimeData>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QSettings>
 #include <QTemporaryDir>
 #include <QTabBar>
+#include <QTimer>
 #include <QWindow>
 #include <QtTest>
 #include <algorithm>
@@ -21,17 +28,32 @@ class TestMainWindow final : public QObject {
     Q_OBJECT
 private Q_SLOTS:
     void initTestCase();
+    void init();
     void cleanupTestCase();
     void listModesAndMergedExportControl();
     void printCanvasFollowsDocument();
     void jobPreviewWorkspaceAndLinking();
     void denseJobPointCanBeSelectedAfterOrbit();
+    void settingsPersistenceAndReset();
+    void multipleImageDropIsSortedAndSelected();
+    void preflightDialogRequiresExplicitOverwrite();
+    void segmentationStatisticsUpdates();
+
+private:
+    QTemporaryDir settingsDirectory_;
 };
 
 void TestMainWindow::initTestCase() {
+    QVERIFY(settingsDirectory_.isValid());
+    QCoreApplication::setOrganizationName(QStringLiteral("ImageHandlerTests"));
+    QCoreApplication::setApplicationName(QStringLiteral("MainWindowTests"));
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settingsDirectory_.path());
     QString error;
     QVERIFY2(VipsSupport::initialize("MainWindowTests", &error), qPrintable(error));
 }
+
+void TestMainWindow::init() { QSettings().clear(); }
 
 void TestMainWindow::cleanupTestCase() { VipsSupport::shutdown(); }
 
@@ -212,6 +234,138 @@ void TestMainWindow::denseJobPointCanBeSelectedAfterOrbit() {
     const QImage selectedFrame=jobView->grabFrame();QVERIFY(!selectedFrame.isNull());
     bool hasYellow=false;for(int y=0;y<selectedFrame.height()&&!hasYellow;++y)for(int x=0;x<selectedFrame.width();++x){const QColor color=selectedFrame.pixelColor(x,y);if(color.red()>180&&color.green()>140&&color.blue()<100){hasYellow=true;break;}}
     QVERIFY2(hasYellow,"Selected Vulkan point was not highlighted yellow");
+}
+
+void TestMainWindow::settingsPersistenceAndReset() {
+    {
+        MainWindow window;
+        auto* width=window.findChild<QSpinBox*>(QStringLiteral("segmentationCellWidth"));
+        auto* height=window.findChild<QSpinBox*>(QStringLiteral("segmentationCellHeight"));
+        auto* threshold=window.findChild<QSpinBox*>(QStringLiteral("segmentationThreshold"));
+        auto* traversal=window.findChild<QComboBox*>(QStringLiteral("segmentationTraversal"));
+        auto* printMode=window.findChild<QCheckBox*>(QStringLiteral("chk_o_print"));
+        auto* reverseY=window.findChild<QCheckBox*>(QStringLiteral("chk_y_reverse"));
+        auto* repeat=window.findChild<QSpinBox*>(QStringLiteral("repeat_times"));
+        QVERIFY(width);QVERIFY(height);QVERIFY(threshold);QVERIFY(traversal);QVERIFY(printMode);QVERIFY(reverseY);QVERIFY(repeat);
+        width->setValue(321);height->setValue(123);threshold->setValue(77);traversal->setCurrentIndex(1);
+        printMode->setChecked(true);reverseY->setChecked(true);repeat->setValue(4);
+        window.show();QTest::qWait(10);window.close();
+    }
+    MainWindow restored;
+    auto* width=restored.findChild<QSpinBox*>(QStringLiteral("segmentationCellWidth"));
+    auto* height=restored.findChild<QSpinBox*>(QStringLiteral("segmentationCellHeight"));
+    auto* threshold=restored.findChild<QSpinBox*>(QStringLiteral("segmentationThreshold"));
+    auto* traversal=restored.findChild<QComboBox*>(QStringLiteral("segmentationTraversal"));
+    auto* printMode=restored.findChild<QCheckBox*>(QStringLiteral("chk_o_print"));
+    auto* reverseY=restored.findChild<QCheckBox*>(QStringLiteral("chk_y_reverse"));
+    auto* repeat=restored.findChild<QSpinBox*>(QStringLiteral("repeat_times"));
+    auto* reset=restored.findChild<QPushButton*>(QStringLiteral("resetParametersButton"));
+    auto* canvasX=restored.findChild<QSpinBox*>(QStringLiteral("canvasX"));
+    QVERIFY(width);QVERIFY(height);QVERIFY(threshold);QVERIFY(traversal);QVERIFY(printMode);QVERIFY(reverseY);QVERIFY(repeat);QVERIFY(reset);QVERIFY(canvasX);
+    QCOMPARE(width->value(),321);QCOMPARE(height->value(),123);QCOMPARE(threshold->value(),77);
+    QCOMPARE(traversal->currentIndex(),1);QVERIFY(printMode->isChecked());QVERIFY(reverseY->isChecked());
+    QCOMPARE(repeat->value(),4);QCOMPARE(canvasX->value(),1);
+    const auto restoredLabels=restored.findChildren<QLabel*>();
+    QVERIFY(std::any_of(restoredLabels.cbegin(),restoredLabels.cend(),
+        [](const QLabel* label){return label->text()==QStringLiteral("未加载图像");}));
+    QTest::mouseClick(reset,Qt::LeftButton);
+    QCOMPARE(width->value(),220);QCOMPARE(height->value(),220);QCOMPARE(threshold->value(),128);
+    QCOMPARE(traversal->currentIndex(),0);QVERIFY(!printMode->isChecked());QVERIFY(!reverseY->isChecked());
+    QCOMPARE(repeat->value(),10);
+
+    QSettings settings;settings.setValue(QStringLiteral("segmentation/cellWidth"),-5);
+    settings.setValue(QStringLiteral("segmentation/threshold"),999);
+    settings.setValue(QStringLiteral("segmentation/traversal"),99);settings.sync();
+    MainWindow invalid;
+    QCOMPARE(invalid.findChild<QSpinBox*>(QStringLiteral("segmentationCellWidth"))->value(),220);
+    QCOMPARE(invalid.findChild<QSpinBox*>(QStringLiteral("segmentationThreshold"))->value(),128);
+    QCOMPARE(invalid.findChild<QComboBox*>(QStringLiteral("segmentationTraversal"))->currentIndex(),0);
+}
+
+void TestMainWindow::multipleImageDropIsSortedAndSelected() {
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QImage image(3,2,QImage::Format_Grayscale8);image.fill(42);
+    const QString ten=directory.filePath("10.bmp");const QString two=directory.filePath("2.bmp");
+    QVERIFY(image.save(ten,"BMP"));QVERIFY(image.save(two,"BMP"));
+    MainWindow window;window.show();QTest::qWait(10);
+    QMimeData mime;mime.setUrls({QUrl::fromLocalFile(ten),QUrl::fromLocalFile(two),QUrl::fromLocalFile(two)});
+    QDragEnterEvent drag(QPoint(20,20),Qt::CopyAction,&mime,Qt::LeftButton,Qt::NoModifier);
+    QApplication::sendEvent(&window,&drag);QVERIFY(drag.isAccepted());
+    QDropEvent drop(QPointF(20,20),Qt::CopyAction,&mime,Qt::LeftButton,Qt::NoModifier);
+    QApplication::sendEvent(&window,&drop);
+    auto* list=window.findChild<QListWidget*>(QStringLiteral("directoryImageList"));
+    QVERIFY(list);QCOMPARE(list->count(),2);QCOMPARE(list->item(0)->text(),QStringLiteral("2.bmp"));
+    QCOMPARE(list->item(1)->text(),QStringLiteral("10.bmp"));QCOMPARE(list->selectedItems().size(),2);
+    QTRY_VERIFY_WITH_TIMEOUT(([&window]{const auto labels=window.findChildren<QLabel*>();return std::any_of(
+        labels.cbegin(),labels.cend(),[](const QLabel* label){return label->text().contains(QStringLiteral("3 × 2"));});})(),5000);
+}
+
+void TestMainWindow::preflightDialogRequiresExplicitOverwrite() {
+    MainWindow window;
+    ExportPreflightResult result;result.valid=true;result.bmpFileCount=4;
+    result.estimatedBmpBytes=4096;result.requiredBytes=16*1024*1024;
+    result.spaceKnown=true;result.availableBytes=100*1024*1024;
+    result.conflictCount=1;result.conflictSamples={QStringLiteral("1.bmp")};
+    result.firstOutput=QStringLiteral("1.bmp");result.lastOutput=QStringLiteral("4.bmp");
+    result.targetFingerprint=QStringLiteral("fingerprint");
+    bool dialogSeen=false;bool initiallyDisabled=false;bool enabledAfterCheck=false;
+    QTimer::singleShot(0,&window,[&]{
+        auto* box=window.findChild<QMessageBox*>(QStringLiteral("exportPreflightDialog"));
+        if(!box)return;dialogSeen=true;
+        auto* accept=box->findChild<QPushButton*>(QStringLiteral("exportPreflightAcceptButton"));
+        auto* check=box->findChild<QCheckBox*>(QStringLiteral("exportOverwriteCheck"));
+        initiallyDisabled=accept&&!accept->isEnabled();
+        if(check)check->setChecked(true);
+        enabledAfterCheck=accept&&accept->isEnabled();
+        for(QAbstractButton* button:box->buttons())if(box->buttonRole(button)==QMessageBox::RejectRole){button->click();break;}
+    });
+    QVERIFY(QMetaObject::invokeMethod(&window,"showExportPreflight",Qt::DirectConnection,
+                                      Q_ARG(ExportPreflightResult,result)));
+    QVERIFY(dialogSeen);QVERIFY(initiallyDisabled);QVERIFY(enabledAfterCheck);
+}
+
+void TestMainWindow::segmentationStatisticsUpdates() {
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QImage source(5,3,QImage::Format_Grayscale8);source.fill(42);
+    const QString path=directory.filePath("statistics.bmp");QVERIFY(source.save(path,"BMP"));
+    QString error;const auto document=ImageLoader::load(path,401,&error);QVERIFY2(document,qPrintable(error));
+    MainWindow window;
+    auto* status=window.findChild<QLabel*>(QStringLiteral("segmentationStatisticsStatus"));
+    auto* mode=window.findChild<QLabel*>(QStringLiteral("segmentationStatisticsMode"));
+    auto* grid=window.findChild<QLabel*>(QStringLiteral("segmentationStatisticsGrid"));
+    auto* files=window.findChild<QLabel*>(QStringLiteral("segmentationStatisticsFileCount"));
+    auto* output=window.findChild<QLabel*>(QStringLiteral("segmentationStatisticsOutputSize"));
+    auto* required=window.findChild<QLabel*>(QStringLiteral("segmentationStatisticsRequiredSpace"));
+    auto* width=window.findChild<QSpinBox*>(QStringLiteral("segmentationCellWidth"));
+    auto* height=window.findChild<QSpinBox*>(QStringLiteral("segmentationCellHeight"));
+    auto* preview=window.findChild<QPushButton*>(QStringLiteral("manualSegmentationPreviewButton"));
+    auto* printMode=window.findChild<QCheckBox*>(QStringLiteral("chk_o_print"));
+    auto* repeat=window.findChild<QSpinBox*>(QStringLiteral("repeat_times"));
+    QVERIFY(status);QVERIFY(mode);QVERIFY(grid);QVERIFY(files);QVERIFY(output);QVERIFY(required);
+    QVERIFY(width);QVERIFY(height);QVERIFY(preview);QVERIFY(printMode);QVERIFY(repeat);
+    QCOMPARE(status->text(),QStringLiteral("请先完成分割计算。"));
+    QCOMPARE(output->text(),QStringLiteral("--"));
+
+    QVERIFY(QMetaObject::invokeMethod(&window,"acceptDocument",Qt::DirectConnection,
+                                      Q_ARG(ImageDocumentPtr,document)));
+    QCOMPARE(status->text(),QStringLiteral("请先完成分割计算。"));
+    width->setValue(4);height->setValue(2);preview->click();
+    QCOMPARE(status->text(),QStringLiteral("已按当前导出选项计算。"));
+    QCOMPARE(mode->text(),QStringLiteral("普通分割"));QCOMPARE(grid->text(),QStringLiteral("2 × 2"));
+    QCOMPARE(files->text(),QStringLiteral("4 个"));QCOMPARE(output->text(),QStringLiteral("12.23 KB"));
+    QCOMPARE(required->text(),QStringLiteral("16.01 MB"));
+
+    width->setValue(3);
+    QVERIFY(status->text().contains(QStringLiteral("请重新应用参数")));
+    QCOMPARE(output->text(),QStringLiteral("--"));
+    width->setValue(4);printMode->setChecked(true);repeat->setValue(3);
+    QCOMPARE(mode->text(),QStringLiteral("打印包"));QCOMPARE(files->text(),QStringLiteral("12 个"));
+    QCOMPARE(output->text(),QStringLiteral("21.56 KB"));QCOMPARE(required->text(),QStringLiteral("16.02 MB"));
+
+    QVERIFY(QMetaObject::invokeMethod(&window,"acceptDocument",Qt::DirectConnection,
+                                      Q_ARG(ImageDocumentPtr,document)));
+    QCOMPARE(status->text(),QStringLiteral("请先完成分割计算。"));
+    QCOMPARE(files->text(),QStringLiteral("--"));QCOMPARE(output->text(),QStringLiteral("--"));
 }
 
 QTEST_MAIN(TestMainWindow)
