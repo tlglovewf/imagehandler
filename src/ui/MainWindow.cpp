@@ -3,6 +3,7 @@
 #include "ui/JobPreviewWidget.h"
 #include "ui/PointCloudWidget.h"
 #include "ui/ElementPointCloudWindow.h"
+#include "ui/MaskSliceWindow.h"
 #include "tasks/TaskManager.h"
 #include "domain/MergeInputSelector.h"
 #include "domain/StorageSizeFormatter.h"
@@ -184,13 +185,16 @@ void MainWindow::connectUi() {
     connect(traversal_,qOverload<int>(&QComboBox::currentIndexChanged),this,[this]{view_->setTraversalMode(selectedTraversalMode());updateSelectedCellLabel();scheduleJobPreview(false);});
     connect(view_,&LargeImageView::segmentationCellSelected,this,[this](int row,int column){selectedRow_=row;selectedColumn_=column;updateSelectedCellLabel();selectJobFromImage(row,column);});
     connect(view_,&LargeImageView::segmentationCellActivated,this,&MainWindow::showElementPointCloud);
+    connect(view_,&LargeImageView::segmentationCellSliceActivated,this,&MainWindow::showMaskSlices);
     connect(jobView_,&JobPreviewWidget::placeSelected,this,&MainWindow::selectImageFromJob);
     connect(previewTabs_,&QTabBar::currentChanged,this,&MainWindow::showPreviewTab);
     connect(previewLayoutMode_,qOverload<int>(&QComboBox::currentIndexChanged),this,&MainWindow::setPreviewLayoutMode);
     connect(jobPreviewTimer_,&QTimer::timeout,this,&MainWindow::rebuildJobPreview);
     connect(cellWidth_,qOverload<int>(&QSpinBox::valueChanged),this,[this]{updateGridCountLabel();updateSegmentationStatistics();updateElementPhysicalSize();});
     connect(cellHeight_,qOverload<int>(&QSpinBox::valueChanged),this,[this]{updateGridCountLabel();updateSegmentationStatistics();updateElementPhysicalSize();});
-    connect(cloudPixelScale_,qOverload<double>(&QDoubleSpinBox::valueChanged),this,[this]{updateElementPhysicalSize();});
+    connect(cloudPixelScale_,qOverload<double>(&QDoubleSpinBox::valueChanged),this,[this]{updateElementPhysicalSize();syncMaskSliceMapping();});
+    connect(cloudMaximumHeight_,qOverload<double>(&QDoubleSpinBox::valueChanged),this,[this]{syncMaskSliceMapping();});
+    connect(cloudInvertHeight_,&QCheckBox::toggled,this,[this]{syncMaskSliceMapping();});
     connect(printModeCheck_,&QCheckBox::toggled,this,[this](bool checked){printOptionsContainer_->setVisible(checked);updateSegmentationStatistics();});
     connect(repeatTimes_,qOverload<int>(&QSpinBox::valueChanged),this,[this]{updateSegmentationStatistics();});
     connect(canvasX_,qOverload<int>(&QSpinBox::valueChanged),this,[this](int value){if(canvasLockCheck_->isChecked()){const QSignalBlocker blocker(canvasY_);canvasY_->setValue(value);}});
@@ -262,6 +266,8 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
 
 void MainWindow::closeEvent(QCloseEvent* event) {
     saveSettings();
+    if (elementCloudWindow_) elementCloudWindow_->cancelAndClear();
+    if (maskSliceWindow_) maskSliceWindow_->cancelAndClear();
     QMainWindow::closeEvent(event);
 }
 
@@ -658,7 +664,7 @@ void MainWindow::showExportPreflight(const ExportPreflightResult& result) {
     }
     startExport({result.conflictCount > 0, true, result.targetFingerprint});
 }
-void MainWindow::acceptDocument(const ImageDocumentPtr& doc){if(!doc)return;mergePreviewGeneration_=0;if(elementCloudWindow_)elementCloudWindow_->cancelAndClear();document_=doc;segmentation_={};jobDocument_.reset();jobView_->setDocument({});pointCloudDocument_.reset();pointCloudView_->clear();selectedRow_=-1;selectedColumn_=-1;pathButton_->setChecked(false);lastTilePhase_.clear();lastTileCompleted_=-1;lastTileTotal_=-1;const int canvasWidth=static_cast<int>(std::clamp<qint64>(doc->metadata.width,1,INT_MAX));const int canvasHeight=static_cast<int>(std::clamp<qint64>(doc->metadata.height,1,INT_MAX));{const QSignalBlocker blockX(canvasX_);const QSignalBlocker blockY(canvasY_);const QSignalBlocker blockLock(canvasLockCheck_);canvasX_->setValue(canvasWidth);canvasY_->setValue(canvasHeight);canvasLockCheck_->setChecked(doc->metadata.width==doc->metadata.height);}view_->setDocument(doc);showPreviewTab(0);updateSelectedCellLabel();imageInfo_->setText(QStringLiteral("%1 × %2 | %3").arg(doc->metadata.width).arg(doc->metadata.height).arg(pixelDescription(doc->metadata)));updateGridCountLabel();updateSegmentationStatistics();setBusyUi(tasks_->isBusy());}
+void MainWindow::acceptDocument(const ImageDocumentPtr& doc){if(!doc)return;mergePreviewGeneration_=0;if(elementCloudWindow_)elementCloudWindow_->cancelAndClear();if(maskSliceWindow_)maskSliceWindow_->cancelAndClear();document_=doc;segmentation_={};jobDocument_.reset();jobView_->setDocument({});pointCloudDocument_.reset();pointCloudView_->clear();selectedRow_=-1;selectedColumn_=-1;pathButton_->setChecked(false);lastTilePhase_.clear();lastTileCompleted_=-1;lastTileTotal_=-1;const int canvasWidth=static_cast<int>(std::clamp<qint64>(doc->metadata.width,1,INT_MAX));const int canvasHeight=static_cast<int>(std::clamp<qint64>(doc->metadata.height,1,INT_MAX));{const QSignalBlocker blockX(canvasX_);const QSignalBlocker blockY(canvasY_);const QSignalBlocker blockLock(canvasLockCheck_);canvasX_->setValue(canvasWidth);canvasY_->setValue(canvasHeight);canvasLockCheck_->setChecked(doc->metadata.width==doc->metadata.height);}view_->setDocument(doc);showPreviewTab(0);updateSelectedCellLabel();imageInfo_->setText(QStringLiteral("%1 × %2 | %3").arg(doc->metadata.width).arg(doc->metadata.height).arg(pixelDescription(doc->metadata)));updateGridCountLabel();updateSegmentationStatistics();setBusyUi(tasks_->isBusy());}
 
 void MainWindow::chooseJobFile(){const QString path=QFileDialog::getOpenFileName(this,QStringLiteral("选择 Job 文件"),lastJobDirectory_,QStringLiteral("Job 文件 (*.json *.aldl);;JSON (*.json);;ALDL (*.aldl)"));if(!path.isEmpty()){lastJobDirectory_=QFileInfo(path).absolutePath();loadJobFile(path,false);}}
 
@@ -666,7 +672,11 @@ void MainWindow::generatePointCloud(){if(tasks_->isBusy()||!document_)return;if(
 
 void MainWindow::showElementPointCloud(int row, int column){if(!document_||segmentation_.rows<=0||segmentation_.columns<=0)return;const ImageRegion region=segmentationCellRegion(segmentation_,document_->metadata.width,document_->metadata.height,row,column);if(!region.isValid())return;if(!ImageLoader::isProcessable(document_->metadata)){statusBar()->showMessage(QStringLiteral("单要素 PointCloud 仅支持二值、8-bit 和 16-bit 灰度图。"),6000);return;}if(!elementCloudWindow_)elementCloudWindow_=new ElementPointCloudWindow(this);if(!elementCloudWindow_->isVulkanAvailable()){elementCloudWindow_->showElement(document_,region,row,column,SplitExporter::traversalIndex(segmentation_.rows,segmentation_.columns,selectedTraversalMode(),row,column),{},generation_++);statusBar()->showMessage(QStringLiteral("当前环境没有可用的 Vulkan PointCloud 渲染器。"),6000);return;}const PointCloudSettings settings{cloudPixelScale_->value(),cloudMaximumHeight_->value(),cloudInvertHeight_->isChecked(),cloudStartColor_,cloudEndColor_};const qint64 index=SplitExporter::traversalIndex(segmentation_.rows,segmentation_.columns,selectedTraversalMode(),row,column);elementCloudWindow_->showElement(document_,region,row,column,index,settings,generation_++);}
 
-void MainWindow::chooseCloudColor(bool startColor){QColor& current=startColor?cloudStartColor_:cloudEndColor_;QColorDialog dialog(current,this);dialog.setObjectName(QStringLiteral("cloudColorDialog"));dialog.setWindowTitle(startColor?QStringLiteral("选择 PointCloud 起色"):QStringLiteral("选择 PointCloud 终色"));dialog.setOption(QColorDialog::DontUseNativeDialog);if(dialog.exec()!=QDialog::Accepted)return;const QColor selected=dialog.selectedColor();if(!selected.isValid())return;current=selected;updateCloudColorButton(startColor?cloudStartColorButton_:cloudEndColorButton_,current,startColor?QStringLiteral("起色"):QStringLiteral("终色"));}
+void MainWindow::showMaskSlices(int row,int column){if(!document_||segmentation_.rows<=0||segmentation_.columns<=0)return;const ImageRegion region=segmentationCellRegion(segmentation_,document_->metadata.width,document_->metadata.height,row,column);if(!region.isValid())return;if(!ImageLoader::isProcessable(document_->metadata)){statusBar()->showMessage(QStringLiteral("单元分层切片仅支持二值、8-bit 和 16-bit 灰度图。"),6000);return;}if(!maskSliceWindow_)maskSliceWindow_=new MaskSliceWindow(this);const PointCloudSettings mapping{cloudPixelScale_->value(),cloudMaximumHeight_->value(),cloudInvertHeight_->isChecked(),cloudStartColor_,cloudEndColor_};const qint64 index=SplitExporter::traversalIndex(segmentation_.rows,segmentation_.columns,selectedTraversalMode(),row,column);maskSliceWindow_->showElement(document_,region,row,column,index,mapping);}
+
+void MainWindow::syncMaskSliceMapping(){if(!maskSliceWindow_)return;maskSliceWindow_->setPointCloudSettings({cloudPixelScale_->value(),cloudMaximumHeight_->value(),cloudInvertHeight_->isChecked(),cloudStartColor_,cloudEndColor_});}
+
+void MainWindow::chooseCloudColor(bool startColor){QColor& current=startColor?cloudStartColor_:cloudEndColor_;QColorDialog dialog(current,this);dialog.setObjectName(QStringLiteral("cloudColorDialog"));dialog.setWindowTitle(startColor?QStringLiteral("选择 PointCloud 起色"):QStringLiteral("选择 PointCloud 终色"));dialog.setOption(QColorDialog::DontUseNativeDialog);if(dialog.exec()!=QDialog::Accepted)return;const QColor selected=dialog.selectedColor();if(!selected.isValid())return;current=selected;updateCloudColorButton(startColor?cloudStartColorButton_:cloudEndColorButton_,current,startColor?QStringLiteral("起色"):QStringLiteral("终色"));syncMaskSliceMapping();}
 
 void MainWindow::updateCloudColorButton(QPushButton* button,const QColor& color,const QString& label){if(!button)return;button->setText(label);button->setProperty("cloudColor",color);const QString foreground=color.lightness()<128?QStringLiteral("white"):QStringLiteral("black");button->setStyleSheet(QStringLiteral("QPushButton { background-color: %1; color: %2; border: 1px solid #666; padding: 4px 10px; }").arg(color.name(QColor::HexRgb),foreground));}
 

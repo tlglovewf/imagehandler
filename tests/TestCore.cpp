@@ -3,10 +3,13 @@
 #include "domain/StorageSizeFormatter.h"
 #include "io/BmpStreamWriter.h"
 #include "io/MergedImageExporter.h"
+#include "io/MaskSliceExporter.h"
 #include "io/ExportPreflight.h"
 #include "io/SplitExporter.h"
 #include "imaging/ImageLoader.h"
 #include "imaging/MosaicBuilder.h"
+#include "imaging/MaskSliceGenerator.h"
+#include "imaging/MaskStackMeshBuilder.h"
 #include "imaging/PatternDetector.h"
 #include "imaging/PointCloudBuilder.h"
 #include "imaging/PointCloudMath.h"
@@ -41,6 +44,9 @@ private Q_SLOTS:
     void pointCloudRegionExtrema();
     void pointCloudRootBudget();
     void pointCloudMappingOptions();
+    void maskSliceAnalysisAndExport();
+    void maskSliceZeroHeightAndLimits();
+    void maskStackGeometryAndSampling();
     void pointCloudImageFromEnvironment();
     void gray16ImageFromEnvironment();
     void gray16MosaicDirectoryFromEnvironment();
@@ -76,6 +82,130 @@ private Q_SLOTS:
 
 void TestCore::initTestCase() { QString error; QVERIFY2(VipsSupport::initialize("ImageHandlerTests",&error),qPrintable(error)); }
 void TestCore::cleanupTestCase() { VipsSupport::shutdown(); }
+
+void TestCore::maskSliceAnalysisAndExport() {
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QImage source(2,1,QImage::Format_Grayscale8);source.scanLine(0)[0]=0;source.scanLine(0)[1]=255;
+    const QString sourcePath=directory.filePath("slice-source.bmp");QVERIFY(source.save(sourcePath,"BMP"));
+    QString error;const auto document=ImageLoader::load(sourcePath,950,&error);QVERIFY2(document,qPrintable(error));
+    MaskSliceRequest request{document,{0,0,2,1},{0.25,1.0,false},{0.1,4,2,false}};
+    const auto token=std::make_shared<CancellationToken>();
+    const MaskSliceAnalysis analysis=MaskSliceGenerator::analyze(request,token,{},&error);
+    QVERIFY2(error.isEmpty(),qPrintable(error));QCOMPARE(analysis.layerCount,10);
+    QCOMPARE(analysis.sourceSize,QSize(2,1));QCOMPARE(analysis.thumbnails.size(),10);
+    QVERIFY(std::abs(analysis.actualMaximumHeight-1.0)<0.000001);
+    for(const QImage& thumbnail:analysis.thumbnails){QVERIFY(!thumbnail.isNull());QCOMPARE(thumbnail.pixelColor(0,0),QColor(Qt::black));QCOMPARE(thumbnail.pixelColor(thumbnail.width()-1,0),QColor(Qt::white));}
+
+    const QString outputPath=directory.filePath("masks");QVERIFY(QDir().mkpath(outputPath));
+    QVERIFY2(MaskSliceExporter::exportAll(outputPath,request,analysis.layerCount,false,token,{},&error),qPrintable(error));
+    QCOMPARE(QDir(outputPath).entryList({QStringLiteral("*.bmp")},QDir::Files).size(),10);
+    QCOMPARE(MaskSliceExporter::bmpFileSize(4,2),quint64(70));
+    const auto first=ImageLoader::load(QDir(outputPath).filePath("1.bmp"),951,&error);QVERIFY2(first,qPrintable(error));
+    QCOMPARE(first->metadata.kind,PixelKind::Binary1);QCOMPARE(first->metadata.width,qint64(4));QCOMPARE(first->metadata.height,qint64(2));
+    const QImage pixels=VipsSupport::renderRegion(first,0,0,4,2,1.0,&error);QVERIFY2(!pixels.isNull(),qPrintable(error));
+    QCOMPARE(pixels.pixelColor(0,0),QColor(Qt::black));QCOMPARE(pixels.pixelColor(1,0),QColor(Qt::black));
+    QCOMPARE(pixels.pixelColor(2,0),QColor(Qt::white));QCOMPARE(pixels.pixelColor(3,0),QColor(Qt::white));
+
+    QFile original(QDir(outputPath).filePath("1.bmp"));QVERIFY(original.open(QIODevice::WriteOnly|QIODevice::Truncate));
+    QCOMPARE(original.write("original",8),qint64(8));original.close();
+    error.clear();QVERIFY(!MaskSliceExporter::exportAll(outputPath,request,analysis.layerCount,false,token,{},&error));
+    QVERIFY(error.startsWith(QStringLiteral("MASK_TARGETS_EXIST:")));
+    QVERIFY(original.open(QIODevice::ReadOnly));QCOMPARE(original.readAll(),QByteArray("original"));original.close();
+    error.clear();QVERIFY2(MaskSliceExporter::exportAll(outputPath,request,analysis.layerCount,true,token,{},&error),qPrintable(error));
+    QCOMPARE(QDir(outputPath).entryList({QStringLiteral(".image_handler_masks_*")},QDir::Dirs|QDir::Hidden|QDir::NoDotAndDotDot).size(),0);
+
+    request.settings.invertMask=true;
+    const auto inverted=MaskSliceGenerator::analyze(request,token,{},&error);QCOMPARE(inverted.layerCount,10);
+    QCOMPARE(inverted.thumbnails.front().pixelColor(0,0),QColor(Qt::white));
+    QCOMPARE(inverted.thumbnails.front().pixelColor(inverted.thumbnails.front().width()-1,0),QColor(Qt::black));
+}
+
+void TestCore::maskSliceZeroHeightAndLimits() {
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QImage zero(1,1,QImage::Format_Grayscale16);reinterpret_cast<quint16*>(zero.scanLine(0))[0]=0;
+    const QString path=directory.filePath("zero16.png");QVERIFY(zero.save(path,"PNG"));
+    QString error;const auto document=ImageLoader::load(path,960,&error);QVERIFY2(document,qPrintable(error));
+    MaskSliceRequest request{document,{0,0,1,1},{0.25,1.0,false},{0.1,1,1,false}};
+    const auto token=std::make_shared<CancellationToken>();
+    const auto analysis=MaskSliceGenerator::analyze(request,token,{},&error);
+    QVERIFY2(error.isEmpty(),qPrintable(error));QCOMPARE(analysis.actualMaximumHeight,0.0);QCOMPARE(analysis.layerCount,10);
+    QVERIFY(analysis.stackPreview);QVERIFY(std::all_of(analysis.stackPreview->columnLayers.cbegin(),analysis.stackPreview->columnLayers.cend(),[](quint16 level){return level==0;}));
+    QVERIFY(analysis.stackPreview->solidGeometry);QVERIFY(analysis.stackPreview->solidGeometry->indices.empty());
+    for(const QImage& thumbnail:analysis.thumbnails)QCOMPARE(thumbnail.pixelColor(0,0),QColor(Qt::black));
+    error.clear();QCOMPARE(MaskSliceGenerator::layerCount(0.95,1.0,0.1,&error),10);QVERIFY(error.isEmpty());
+    QCOMPARE(MaskSliceGenerator::layerCount(1.0,1.0,0.0009,&error),0);QVERIFY(error.contains(QStringLiteral("1000")));
+
+    reinterpret_cast<quint16*>(zero.scanLine(0))[0]=32768;const QString middlePath=directory.filePath("middle16.png");QVERIFY(zero.save(middlePath,"PNG"));
+    const auto middleDocument=ImageLoader::load(middlePath,961,&error);QVERIFY2(middleDocument,qPrintable(error));
+    request.source=middleDocument;error.clear();const auto middle=MaskSliceGenerator::analyze(request,token,{},&error);
+    QVERIFY2(error.isEmpty(),qPrintable(error));QCOMPARE(middle.layerCount,6);
+    QVERIFY(std::abs(middle.actualMaximumHeight-32768.0/65535.0)<0.000001);
+
+    QImage boundary(1,1,QImage::Format_Grayscale8);boundary.fill(242);
+    const QString boundaryPath=directory.filePath("boundary.bmp");QVERIFY(boundary.save(boundaryPath,"BMP"));
+    const auto boundaryDocument=ImageLoader::load(boundaryPath,962,&error);QVERIFY2(boundaryDocument,qPrintable(error));
+    request.source=boundaryDocument;request.mapping={0.25,1.0,false};error.clear();
+    const auto boundaryAnalysis=MaskSliceGenerator::analyze(request,token,{},&error);
+    QVERIFY2(error.isEmpty(),qPrintable(error));QCOMPARE(boundaryAnalysis.layerCount,10);
+    QCOMPARE(boundaryAnalysis.thumbnails.back().pixelColor(0,0),QColor(Qt::white));
+
+    QImage binary(2,1,QImage::Format_Mono);binary.setColorTable({qRgb(0,0,0),qRgb(255,255,255)});binary.setPixel(0,0,0);binary.setPixel(1,0,1);
+    const QString binaryPath=directory.filePath("binary.bmp");QVERIFY(binary.save(binaryPath,"BMP"));
+    const auto binaryDocument=ImageLoader::load(binaryPath,963,&error);QVERIFY2(binaryDocument,qPrintable(error));
+    QCOMPARE(binaryDocument->metadata.kind,PixelKind::Binary1);
+    request.source=binaryDocument;request.region={0,0,2,1};request.settings={0.5,2,1,false};error.clear();
+    const auto binaryAnalysis=MaskSliceGenerator::analyze(request,token,{},&error);
+    QVERIFY2(error.isEmpty(),qPrintable(error));QCOMPARE(binaryAnalysis.layerCount,2);
+    QCOMPARE(binaryAnalysis.thumbnails.back().pixelColor(0,0),QColor(Qt::black));
+    QCOMPARE(binaryAnalysis.thumbnails.back().pixelColor(1,0),QColor(Qt::white));
+
+    const QString cancelledOutput=directory.filePath("cancelled");QVERIFY(QDir().mkpath(cancelledOutput));
+    QFile existing(QDir(cancelledOutput).filePath("1.bmp"));QVERIFY(existing.open(QIODevice::WriteOnly));QCOMPARE(existing.write("keep",4),qint64(4));existing.close();
+    const auto cancelledToken=std::make_shared<CancellationToken>();cancelledToken->cancel();
+    error.clear();QVERIFY(!MaskSliceExporter::exportAll(cancelledOutput,request,binaryAnalysis.layerCount,true,cancelledToken,{},&error));
+    QVERIFY(existing.open(QIODevice::ReadOnly));QCOMPARE(existing.readAll(),QByteArray("keep"));
+    QCOMPARE(QDir(cancelledOutput).entryList({QStringLiteral(".image_handler_masks_*")},QDir::Dirs|QDir::Hidden|QDir::NoDotAndDotDot).size(),0);
+}
+
+void TestCore::maskStackGeometryAndSampling() {
+    MaskStackPreviewData grid;
+    grid.gridSize={2,1};grid.requestedOutputSize={2,1};grid.physicalSize={2.0,1.0};
+    grid.columnLayers={1,2};grid.layerHeight=0.1;grid.layerCount=2;
+    const auto token=std::make_shared<CancellationToken>();
+    const auto solid=MaskStackMeshBuilder::buildSolid(grid,token);
+    QVERIFY(solid);QCOMPARE(solid->indices.size(),size_t(54));
+    QVERIFY(std::any_of(solid->vertices.cbegin(),solid->vertices.cend(),
+        [](const MaskStackVertex& value){return value.faceKind==0.0F&&std::abs(value.z-0.2F)<0.00001F;}));
+    QVERIFY(std::any_of(solid->vertices.cbegin(),solid->vertices.cend(),
+        [](const MaskStackVertex& value){return value.faceKind==1.0F&&std::abs(value.z-0.1F)<0.00001F;}));
+    const auto exploded=MaskStackMeshBuilder::buildExploded(grid,token);
+    QVERIFY(exploded);QCOMPARE(exploded->layerStride,1);QCOMPARE(exploded->indices.size(),size_t(12));
+    MaskStackPreviewData oriented;oriented.gridSize={1,2};oriented.requestedOutputSize={1,2};
+    oriented.physicalSize={1.0,2.0};oriented.columnLayers={1,0};oriented.layerHeight=0.1;oriented.layerCount=1;
+    const auto orientedSolid=MaskStackMeshBuilder::buildSolid(oriented,token);QVERIFY(orientedSolid);
+    QVERIFY(std::all_of(orientedSolid->vertices.cbegin(),orientedSolid->vertices.cend(),
+        [](const MaskStackVertex& value){return value.y>=1.0F;}));
+
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QImage source(2,1,QImage::Format_Grayscale8);source.scanLine(0)[0]=0;source.scanLine(0)[1]=255;
+    const QString path=directory.filePath("stack.bmp");QVERIFY(source.save(path,"BMP"));
+    QString error;const auto document=ImageLoader::load(path,980,&error);QVERIFY2(document,qPrintable(error));
+    MaskSliceRequest request{document,{0,0,2,1},{0.25,1.0,false},{0.1,4,2,false}};
+    const auto analysis=MaskSliceGenerator::analyze(request,token,{},&error);QVERIFY2(analysis.stackPreview,qPrintable(error));
+    QCOMPARE(analysis.stackPreview->gridSize,QSize(4,2));
+    QCOMPARE(analysis.stackPreview->physicalSize,QSizeF(0.5,0.25));
+    QVERIFY(!analysis.stackPreview->downsampled);
+    QCOMPARE(analysis.stackPreview->columnLayers,QVector<quint16>({0,0,10,10,0,0,10,10}));
+    const auto logicalLevels=analysis.stackPreview->columnLayers;
+    request.settings.invertMask=true;error.clear();
+    const auto inverted=MaskSliceGenerator::analyze(request,token,{},&error);QVERIFY2(inverted.stackPreview,qPrintable(error));
+    QCOMPARE(inverted.stackPreview->columnLayers,logicalLevels);
+
+    request.settings.outputWidth=1024;request.settings.outputHeight=256;error.clear();
+    const auto sampled=MaskSliceGenerator::analyze(request,token,{},&error);QVERIFY2(sampled.stackPreview,qPrintable(error));
+    QCOMPARE(sampled.stackPreview->gridSize,QSize(512,128));QVERIFY(sampled.stackPreview->downsampled);
+    QCOMPARE(sampled.stackPreview->requestedOutputSize,QSize(1024,256));
+}
 
 void TestCore::pointCloudCoordinatesAndLodAverage() {
     QTemporaryDir directory;QVERIFY(directory.isValid());

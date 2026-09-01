@@ -21,6 +21,7 @@ add_library(image_handler_core
     src/domain/Models.h
     src/domain/JobModels.h
     src/domain/PointCloudModels.h
+    src/domain/MaskSliceModels.h
     src/domain/StorageSizeFormatter.h src/domain/StorageSizeFormatter.cpp
     src/domain/MergeInputSelector.h src/domain/MergeInputSelector.cpp
     src/imaging/VipsSupport.h src/imaging/VipsSupport.cpp
@@ -34,9 +35,12 @@ add_library(image_handler_core
     src/imaging/JobSpatialIndex.h src/imaging/JobSpatialIndex.cpp
     src/imaging/PointCloudBuilder.h src/imaging/PointCloudBuilder.cpp
     src/imaging/PointCloudMath.h src/imaging/PointCloudMath.cpp
+    src/imaging/MaskSliceGenerator.h src/imaging/MaskSliceGenerator.cpp
+    src/imaging/MaskStackMeshBuilder.h src/imaging/MaskStackMeshBuilder.cpp
     src/io/DirectoryScanner.h src/io/DirectoryScanner.cpp
     src/io/BmpStreamWriter.h src/io/BmpStreamWriter.cpp
     src/io/MergedImageExporter.h src/io/MergedImageExporter.cpp
+    src/io/MaskSliceExporter.h src/io/MaskSliceExporter.cpp
     src/io/ExportTypes.h
     src/io/ExportPreflight.h src/io/ExportPreflight.cpp
     src/io/SplitExporter.h src/io/SplitExporter.cpp
@@ -74,6 +78,7 @@ endif()
 add_library(job_preview_ui STATIC
     src/ui/JobPreviewWidget.h src/ui/JobPreviewWidget.cpp
     src/ui/PointCloudWidget.h src/ui/PointCloudWidget.cpp
+    src/ui/MaskStackWidget.h src/ui/MaskStackWidget.cpp
 )
 target_include_directories(job_preview_ui PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(job_preview_ui PUBLIC image_handler_core Qt6::Widgets)
@@ -115,6 +120,23 @@ if(JOB_PREVIEW_HAS_VULKAN)
     endforeach()
     qt_add_resources(job_preview_ui point_cloud_shaders
         PREFIX "/point_cloud_shaders" FILES ${CLOUD_SHADER_OUTPUTS})
+    set(MASK_STACK_SHADER_OUTPUTS)
+    foreach(MASK_STACK_SHADER IN ITEMS mask_stack.vert mask_stack.frag mask_stack_lines.vert mask_stack_lines.frag)
+        set(MASK_STACK_SHADER_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/shaders/${MASK_STACK_SHADER}")
+        set(MASK_STACK_SHADER_PACK "${CMAKE_CURRENT_BINARY_DIR}/mask_stack_shaders/${MASK_STACK_SHADER}.qsb")
+        set(MASK_STACK_SHADER_SPV "${CMAKE_CURRENT_BINARY_DIR}/mask_stack_shaders/${MASK_STACK_SHADER}.spv")
+        add_custom_command(OUTPUT "${MASK_STACK_SHADER_SPV}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/mask_stack_shaders"
+            COMMAND $<TARGET_FILE:Qt6::qsb> -o "${MASK_STACK_SHADER_PACK}" "${MASK_STACK_SHADER_SOURCE}"
+            COMMAND $<TARGET_FILE:Qt6::qsb> -x spirv,100 -o "${MASK_STACK_SHADER_SPV}" "${MASK_STACK_SHADER_PACK}"
+            DEPENDS "${MASK_STACK_SHADER_SOURCE}" Qt6::qsb
+            VERBATIM)
+        set_source_files_properties("${MASK_STACK_SHADER_SPV}" PROPERTIES
+            GENERATED TRUE QT_RESOURCE_ALIAS "${MASK_STACK_SHADER}.spv")
+        list(APPEND MASK_STACK_SHADER_OUTPUTS "${MASK_STACK_SHADER_SPV}")
+    endforeach()
+    qt_add_resources(job_preview_ui mask_stack_shaders
+        PREFIX "/mask_stack_shaders" FILES ${MASK_STACK_SHADER_OUTPUTS})
 else()
     message(WARNING "Vulkan SDK headers or Qt ShaderTools were not found; Job preview will use the disabled placeholder.")
 endif()
@@ -123,6 +145,7 @@ qt_add_executable(ImageHandler WIN32
     src/app/main.cpp
     src/ui/LargeImageView.h src/ui/LargeImageView.cpp
     src/ui/ElementPointCloudWindow.h src/ui/ElementPointCloudWindow.cpp
+    src/ui/MaskSliceWindow.h src/ui/MaskSliceWindow.cpp
     src/ui/MainWindow.h src/ui/MainWindow.cpp
 )
 target_include_directories(ImageHandler PRIVATE
@@ -188,6 +211,7 @@ qt_add_executable(MainWindowTests
     src/ui/MainWindow.h src/ui/MainWindow.cpp
     src/ui/LargeImageView.h src/ui/LargeImageView.cpp
     src/ui/ElementPointCloudWindow.h src/ui/ElementPointCloudWindow.cpp
+    src/ui/MaskSliceWindow.h src/ui/MaskSliceWindow.cpp
 )
 target_include_directories(MainWindowTests PRIVATE
     "${VIPS_ROOT}/include"

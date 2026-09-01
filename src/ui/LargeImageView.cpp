@@ -175,12 +175,10 @@ void LargeImageView::paintEvent(QPaintEvent*) {
         const QRectF target(offset_.x()+tx*targetTile, offset_.y()+ty*targetTile,
                             actualSourceWidth*zoom_, actualSourceHeight*zoom_);
         if(QImage* image=cache_.object(key)) { p.drawImage(target,*image); }
-        else if (failedTiles_.contains(key)) {
-            p.fillRect(target, QColor(70, 42, 42));
-            p.setPen(QPen(QColor(220, 110, 110), 1));
-            p.drawLine(target.topLeft(), target.bottomRight());
-            p.drawLine(target.topRight(), target.bottomLeft());
-        } else { p.fillRect(target,QColor(55,58,61)); requestTile(key,level,tx,ty,sourceTile); }
+        else if (!failedTiles_.contains(key)) {
+            p.fillRect(target,QColor(55,58,61));
+            requestTile(key,level,tx,ty,sourceTile);
+        }
     }
     visibleTileKeys_=std::move(visibleTileKeys);
     emitTileProgress();
@@ -531,7 +529,9 @@ void LargeImageView::mouseReleaseEvent(QMouseEvent* e) {
 }
 
 void LargeImageView::mouseDoubleClickEvent(QMouseEvent* event) {
-    if (event->button() != Qt::LeftButton || event->modifiers() != Qt::NoModifier) {
+    const Qt::KeyboardModifiers modifiers = event->modifiers();
+    if (event->button() != Qt::LeftButton ||
+        (modifiers != Qt::NoModifier && modifiers != Qt::ShiftModifier)) {
         QWidget::mouseDoubleClickEvent(event);
         return;
     }
@@ -542,7 +542,10 @@ void LargeImageView::mouseDoubleClickEvent(QMouseEvent* event) {
     }
     selectedCell_ = cell;
     Q_EMIT segmentationCellSelected(cell.y(), cell.x());
-    Q_EMIT segmentationCellActivated(cell.y(), cell.x());
+    if (modifiers == Qt::ShiftModifier)
+        Q_EMIT segmentationCellSliceActivated(cell.y(), cell.x());
+    else
+        Q_EMIT segmentationCellActivated(cell.y(), cell.x());
     update();
     event->accept();
 }

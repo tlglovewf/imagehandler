@@ -5,6 +5,7 @@
 #include <QTemporaryDir>
 #include <QMouseEvent>
 #include <QtTest>
+#include <cmath>
 
 class TestLargeImageView final : public QObject {
     Q_OBJECT
@@ -82,6 +83,9 @@ void TestLargeImageView::failedTileIsNotRetriedContinuously() {
         QTest::qWait(30);
     }
     QCOMPARE(errors.count(), 1);
+    const QColor failedArea = view.grab().toImage().pixelColor(150, 150);
+    QVERIFY(std::abs(failedArea.red() - failedArea.green()) < 8);
+    QVERIFY(std::abs(failedArea.green() - failedArea.blue()) < 8);
 }
 
 void TestLargeImageView::cellSelectionAndTraversalPath() {
@@ -108,6 +112,7 @@ void TestLargeImageView::cellSelectionAndTraversalPath() {
     view.setTraversalPathVisible(true);
     QSignalSpy selections(&view, &LargeImageView::segmentationCellSelected);
     QSignalSpy activations(&view, &LargeImageView::segmentationCellActivated);
+    QSignalSpy sliceActivations(&view, &LargeImageView::segmentationCellSliceActivated);
 
     QTRY_VERIFY_WITH_TIMEOUT(view.grab().toImage().pixelColor(90, 60).blue() >
                              view.grab().toImage().pixelColor(90, 60).red(), 3000);
@@ -134,8 +139,14 @@ void TestLargeImageView::cellSelectionAndTraversalPath() {
     QCOMPARE(activations.count(), 1);
     QCOMPARE(activations.at(0).at(0).toInt(), 1);
     QCOMPARE(activations.at(0).at(1).toInt(), 0);
+    QTest::mouseDClick(&view, Qt::LeftButton, Qt::ShiftModifier, view.rect().center());
+    QCOMPARE(activations.count(), 1);
+    QCOMPARE(sliceActivations.count(), 1);
+    QCOMPARE(sliceActivations.at(0).at(0).toInt(), 1);
+    QCOMPARE(sliceActivations.at(0).at(1).toInt(), 0);
     QTest::mouseDClick(&view, Qt::LeftButton, Qt::ControlModifier, view.rect().center());
     QCOMPARE(activations.count(), 1);
+    QCOMPARE(sliceActivations.count(), 1);
 }
 
 void TestLargeImageView::gray16PixelProbePreservesRawValue() {

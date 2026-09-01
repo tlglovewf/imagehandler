@@ -11,6 +11,7 @@ class LargeImageView;
 class JobPreviewWidget;
 class PointCloudWidget;
 class ElementPointCloudWindow;
+class MaskSliceWindow;
 class TaskManager;
 struct MosaicBuildResult;
 class QListWidget;
@@ -68,6 +69,8 @@ private:
     void acceptJobDocument(const JobDocumentPtr& document, bool preserveLink);
     void generatePointCloud();
     void showElementPointCloud(int row, int column);
+    void showMaskSlices(int row, int column);
+    void syncMaskSliceMapping();
     void chooseCloudColor(bool startColor);
     void updateCloudColorButton(QPushButton* button, const QColor& color,
                                 const QString& label);
@@ -104,6 +107,7 @@ private:
     JobPreviewWidget* jobView_ = nullptr;
     PointCloudWidget* pointCloudView_ = nullptr;
     ElementPointCloudWindow* elementCloudWindow_ = nullptr;
+    MaskSliceWindow* maskSliceWindow_ = nullptr;
     QWidget* imagePreviewHost_ = nullptr;
     QSplitter* previewSplitter_ = nullptr;
     QTabBar* previewTabs_ = nullptr;

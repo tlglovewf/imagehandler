@@ -49,6 +49,7 @@ Q_SIGNALS:
     void tileError(const QString& error);
     void segmentationCellSelected(int row, int column);
     void segmentationCellActivated(int row, int column);
+    void segmentationCellSliceActivated(int row, int column);
     void pixelValueChanged(qint64 x, qint64 y, quint32 value, bool valid);
     void fixedGrayPointCountChanged(int count);
     void fixedGrayPointError(const QString& error);
