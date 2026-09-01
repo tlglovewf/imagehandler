@@ -139,8 +139,19 @@ JobCameraPose JobTerrainCamera::focusPose(const QVector3D& point, bool preserveD
 
 void JobTerrainCamera::setPose(const JobCameraPose& pose) {
     pose_ = pose;
-    pose_.elevation = std::clamp(pose_.elevation, 5.0F, 89.0F);
+    pose_.elevation = std::clamp(pose_.elevation, minimumElevation_, maximumElevation_);
     pose_.distance = std::clamp(pose_.distance, minimumDistance(), maximumDistance());
+}
+
+void JobTerrainCamera::setElevationLimits(float minimum, float maximum) {
+    if (!std::isfinite(minimum) || !std::isfinite(maximum) || minimum >= maximum) return;
+    minimumElevation_ = std::clamp(minimum, -89.0F, 89.0F);
+    maximumElevation_ = std::clamp(maximum, -89.0F, 89.0F);
+    if (minimumElevation_ >= maximumElevation_) {
+        minimumElevation_ = 5.0F;
+        maximumElevation_ = 89.0F;
+    }
+    pose_.elevation = std::clamp(pose_.elevation, minimumElevation_, maximumElevation_);
 }
 
 float JobTerrainCamera::minimumDistance() const noexcept {
@@ -154,7 +165,7 @@ float JobTerrainCamera::maximumDistance() const noexcept {
 void JobTerrainCamera::orbit(const QPointF& pixelDelta) {
     pose_.azimuth -= static_cast<float>(pixelDelta.x()) * 0.25F;
     pose_.elevation = std::clamp(pose_.elevation + static_cast<float>(pixelDelta.y()) * 0.25F,
-                                 5.0F, 89.0F);
+                                 minimumElevation_, maximumElevation_);
     pose_.azimuth = std::remainder(pose_.azimuth, 360.0F);
 }
 

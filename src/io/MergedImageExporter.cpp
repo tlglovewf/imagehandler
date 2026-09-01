@@ -7,7 +7,7 @@
 #include <vips/vips.h>
 
 namespace {
-VipsImage* makeGrayUchar(VipsImage* input, QString* error) {
+VipsImage* makeGrayUchar(VipsImage* input, bool normalizeUnsigned16, QString* error) {
     VipsImage* gray = nullptr;
     if (input->Bands == 1) {
         gray = input;
@@ -27,17 +27,12 @@ VipsImage* makeGrayUchar(VipsImage* input, QString* error) {
         g_object_unref(gray);
         gray = firstBand;
     }
-    if (gray->BandFmt != VIPS_FORMAT_UCHAR) {
-        VipsImage* casted = nullptr;
-        if (vips_cast(gray, &casted, VIPS_FORMAT_UCHAR, nullptr) != 0) {
-            g_object_unref(gray);
-            if (error) *error = VipsSupport::lastError();
-            return nullptr;
-        }
-        g_object_unref(gray);
-        gray = casted;
-    }
-    return gray;
+    auto converted = VipsSupport::toUchar(gray, normalizeUnsigned16, error);
+    g_object_unref(gray);
+    if (!converted) return nullptr;
+    VipsImage* result = converted.get();
+    g_object_ref(result);
+    return result;
 }
 }
 
@@ -65,7 +60,9 @@ bool MergedImageExporter::writeGray8Bmp(const QString& path, const ImageDocument
     if (token && token->isCancelled()) return false;
 
     QString conversionError;
-    VipsImage* gray = makeGrayUchar(document->image.get(), &conversionError);
+    VipsImage* gray = makeGrayUchar(document->image.get(),
+                                    document->metadata.kind == PixelKind::Gray16,
+                                    &conversionError);
     if (!gray) {
         if (error) *error = conversionError;
         return false;

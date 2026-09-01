@@ -5,12 +5,19 @@
 #include <QFileInfo>
 #include <QMap>
 #include <QRegularExpression>
+#include <QSet>
 #include <algorithm>
 #include <limits>
 #include <vips/vips.h>
 
 namespace {
-VipsImagePtr normalizeTile(VipsImage* input, bool colorOutput, QString* error) {
+bool isMergeImage(const QString& path) {
+    static const QSet<QString> extensions{QStringLiteral("bmp"), QStringLiteral("png"),
+                                          QStringLiteral("tif"), QStringLiteral("tiff")};
+    return extensions.contains(QFileInfo(path).suffix().toLower());
+}
+
+VipsImagePtr normalizeTile(VipsImage* input, bool colorOutput, int sourceBits, QString* error) {
     VipsImage* prepared = nullptr;
     if (colorOutput) {
         VipsImage* srgb = nullptr;
@@ -36,9 +43,11 @@ VipsImagePtr normalizeTile(VipsImage* input, bool colorOutput, QString* error) {
         return {};
     }
 
-    if (prepared->BandFmt != VIPS_FORMAT_UCHAR) {
+    const VipsBandFormat targetFormat = !colorOutput && sourceBits == 16
+        ? VIPS_FORMAT_USHORT : VIPS_FORMAT_UCHAR;
+    if (prepared->BandFmt != targetFormat) {
         VipsImage* casted = nullptr;
-        if (vips_cast(prepared, &casted, VIPS_FORMAT_UCHAR, nullptr) != 0) {
+        if (vips_cast(prepared, &casted, targetFormat, nullptr) != 0) {
             g_object_unref(prepared);
             if (error) *error = VipsSupport::lastError();
             return {};
@@ -51,7 +60,7 @@ VipsImagePtr normalizeTile(VipsImage* input, bool colorOutput, QString* error) {
 }
 
 bool MosaicBuilder::parseName(const QString& path, MergeTile* tile) {
-    if (!tile || QFileInfo(path).suffix().compare("bmp", Qt::CaseInsensitive) != 0) return false;
+    if (!tile || !isMergeImage(path)) return false;
     static const QRegularExpression re(QStringLiteral(R"(^(?:(.*)_)?(\d+)_(\d+)$)"));
     const auto match = re.match(QFileInfo(path).completeBaseName());
     if (!match.hasMatch()) return false;
@@ -129,8 +138,11 @@ MosaicBuildResult MosaicBuilder::build(const QStringList& paths, quint64 generat
         QString loadError;
         docs[i] = ImageLoader::load(tiles[i].path, generation, &loadError);
         if (!docs[i]) problems << QStringLiteral("无法读取 %1：%2").arg(QFileInfo(tiles[i].path).fileName(), loadError);
-        else if (docs[i]->metadata.sourceBitsPerPixel != 1 && docs[i]->metadata.sourceBitsPerPixel != 8)
-            problems << QStringLiteral("只支持 1-bit 或 8-bit BMP：%1").arg(QFileInfo(tiles[i].path).fileName());
+        else if (docs[i]->metadata.sourceBitsPerPixel != 1 &&
+                 docs[i]->metadata.sourceBitsPerPixel != 8 &&
+                 docs[i]->metadata.sourceBitsPerPixel != 16)
+            problems << QStringLiteral("只支持 1-bit、8-bit 或 16-bit 图像：%1")
+                            .arg(QFileInfo(tiles[i].path).fileName());
         else if (referenceBits == 0) {
             reference = docs[i]->metadata;
             referenceBits = docs[i]->metadata.sourceBitsPerPixel;
@@ -189,7 +201,8 @@ MosaicBuildResult MosaicBuilder::build(const QStringList& paths, quint64 generat
     for (qsizetype i = 0; i < static_cast<qsizetype>(docs.size()); ++i) {
         if (token->isCancelled()) return buildResult;
         QString normalizationError;
-        auto image = normalizeTile(docs[i]->image.get(), colorOutput, &normalizationError);
+        auto image = normalizeTile(docs[i]->image.get(), colorOutput, referenceBits,
+                                   &normalizationError);
         if (!image) {
             if (error) *error = QStringLiteral("无法统一图块格式 %1：%2")
                                     .arg(QFileInfo(tiles[i].path).fileName(), normalizationError);
@@ -198,21 +211,27 @@ MosaicBuildResult MosaicBuilder::build(const QStringList& paths, quint64 generat
         normalized.push_back(std::move(image));
     }
 
+    VipsImage* blackSource = nullptr;
     VipsImage* black = nullptr;
     VipsImage* white = nullptr;
     VipsImage* mosaic = nullptr;
     const int outputBands = colorOutput ? 3 : 1;
     const VipsInterpretation interpretation = colorOutput ? VIPS_INTERPRETATION_sRGB
                                                            : VIPS_INTERPRETATION_B_W;
-    if (vips_black(&black, static_cast<int>(mosaicWidth), static_cast<int>(mosaicHeight),
+    if (vips_black(&blackSource, static_cast<int>(mosaicWidth), static_cast<int>(mosaicHeight),
                    "bands", outputBands, nullptr) != 0 ||
-        vips_linear1(black, &white, 1.0, 255.0, "uchar", TRUE, nullptr) != 0 ||
+        (referenceBits == 16
+             ? vips_cast(blackSource, &black, VIPS_FORMAT_USHORT, nullptr)
+             : vips_copy(blackSource, &black, nullptr)) != 0 ||
+        vips_invert(black, &white, nullptr) != 0 ||
         vips_copy(white, &mosaic, "interpretation", interpretation, nullptr) != 0) {
+        if (blackSource) g_object_unref(blackSource);
         if (black) g_object_unref(black);
         if (white) g_object_unref(white);
         if (error) *error = VipsSupport::lastError();
         return buildResult;
     }
+    g_object_unref(blackSource);
     g_object_unref(black);
     g_object_unref(white);
 
@@ -245,7 +264,8 @@ MosaicBuildResult MosaicBuilder::build(const QStringList& paths, quint64 generat
     result->metadata.height = mosaicHeight;
     result->metadata.bands = outputBands;
     result->metadata.kind = colorOutput ? PixelKind::Color
-                                        : (referenceBits == 1 ? PixelKind::Binary1 : PixelKind::Gray8);
+        : referenceBits == 1 ? PixelKind::Binary1
+        : referenceBits == 16 ? PixelKind::Gray16 : PixelKind::Gray8;
     result->metadata.sourceBitsPerPixel = referenceBits;
     result->image = VipsSupport::adopt(mosaic);
     result->generation = generation;

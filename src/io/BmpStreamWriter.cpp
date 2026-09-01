@@ -43,20 +43,17 @@ bool BmpStreamWriter::write(const QString& path, const ImageDocumentPtr& documen
     else if (vips_extract_band(document->image.get(), &gray, 0, nullptr) != 0) {
         if (error) *error = VipsSupport::lastError(); return false;
     }
-    VipsImage* ucharImage = gray;
-    if (gray->BandFmt != VIPS_FORMAT_UCHAR) {
-        if (vips_cast(gray, &ucharImage, VIPS_FORMAT_UCHAR, nullptr) != 0) {
-            g_object_unref(gray); if (error) *error = VipsSupport::lastError(); return false;
-        }
-        g_object_unref(gray);
-    }
-    VipsRegion* region = vips_region_new(ucharImage);
+    auto ucharImage = VipsSupport::toUchar(
+        gray, document->metadata.kind == PixelKind::Gray16, error);
+    g_object_unref(gray);
+    if (!ucharImage) return false;
+    VipsRegion* region = vips_region_new(ucharImage.get());
     QByteArray row(static_cast<qsizetype>(stride), '\0');
     for (int iy = 0; iy < height; ++iy) {
-        if (progress && !progress(iy, height)) { g_object_unref(region); g_object_unref(ucharImage); file.close(); return false; }
+        if (progress && !progress(iy, height)) { g_object_unref(region); file.close(); return false; }
         VipsRect rect{x, y + iy, width, 1};
         if (vips_region_prepare(region, &rect) != 0) {
-            g_object_unref(region); g_object_unref(ucharImage);
+            g_object_unref(region);
             if (error) *error = VipsSupport::lastError(); return false;
         }
         const uchar* src = VIPS_REGION_ADDR(region, x, y + iy);
@@ -70,12 +67,12 @@ bool BmpStreamWriter::write(const QString& path, const ImageDocumentPtr& documen
             }
         }
         if (file.write(row) != row.size()) {
-            g_object_unref(region); g_object_unref(ucharImage);
+            g_object_unref(region);
             if (error) *error = file.errorString(); return false;
         }
     }
     if (progress) progress(height, height);
-    g_object_unref(region); g_object_unref(ucharImage);
+    g_object_unref(region);
     if (!file.flush()) { if (error) *error = file.errorString(); return false; }
     return true;
 }

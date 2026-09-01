@@ -26,6 +26,7 @@ QString pixelKindName(PixelKind kind) {
     switch (kind) {
     case PixelKind::Binary1: return QStringLiteral("binary1");
     case PixelKind::Gray8: return QStringLiteral("gray8");
+    case PixelKind::Gray16: return QStringLiteral("gray16");
     case PixelKind::Color: return QStringLiteral("color");
     case PixelKind::Unsupported: return QStringLiteral("unsupported");
     }

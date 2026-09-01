@@ -2,13 +2,16 @@
 #include "imaging/ImageLoader.h"
 #include "ui/LargeImageView.h"
 #include "ui/JobPreviewWidget.h"
+#include "ui/PointCloudWidget.h"
 #include "ui/MainWindow.h"
 
 #include <QAbstractButton>
 #include <QCheckBox>
+#include <QColorDialog>
 #include <QComboBox>
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QDoubleSpinBox>
 #include <QListWidget>
 #include <QLabel>
 #include <QMessageBox>
@@ -38,6 +41,9 @@ private Q_SLOTS:
     void multipleImageDropIsSortedAndSelected();
     void preflightDialogRequiresExplicitOverwrite();
     void segmentationStatisticsUpdates();
+    void pointCloudControlsAndTab();
+    void fixedPointClearAndPhysicalSize();
+    void mergeProgressStartsImmediately();
 
 private:
     QTemporaryDir settingsDirectory_;
@@ -154,7 +160,7 @@ void TestMainWindow::jobPreviewWorkspaceAndLinking() {
     auto* imageView=window.findChild<LargeImageView*>();
     QVERIFY(importButton);QVERIFY(layoutMode);QVERIFY(autoJump);QVERIFY(tabs);QVERIFY(jobView);
     QVERIFY(status);QVERIFY(previewButton);QVERIFY(cellWidth);QVERIFY(cellHeight);QVERIFY(imageView);
-    QCOMPARE(layoutMode->currentIndex(),0);QVERIFY(!autoJump->isChecked());QCOMPARE(tabs->count(),2);
+    QCOMPARE(layoutMode->currentIndex(),0);QVERIFY(!autoJump->isChecked());QCOMPARE(tabs->count(),3);
     QVERIFY(QMetaObject::invokeMethod(&window,"acceptDocument",Qt::DirectConnection,Q_ARG(ImageDocumentPtr,document)));
     cellWidth->setValue(2);cellHeight->setValue(2);
     window.show();QTest::qWait(30);QTest::mouseClick(previewButton,Qt::LeftButton);
@@ -191,6 +197,44 @@ void TestMainWindow::jobPreviewWorkspaceAndLinking() {
         QVERIFY(!importButton->isEnabled());
         QVERIFY(window.findChild<QLabel*>(QStringLiteral("jobVulkanError")));
     }
+}
+
+void TestMainWindow::pointCloudControlsAndTab() {
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QImage source(4,4,QImage::Format_Grayscale8);for(int y=0;y<4;++y)for(int x=0;x<4;++x)source.setPixel(x,y,uchar((x+y)*32));
+    const QString path=directory.filePath("cloud.bmp");QVERIFY(source.save(path,"BMP"));
+    QString error;const auto document=ImageLoader::load(path,801,&error);QVERIFY2(document,qPrintable(error));
+    MainWindow window;auto* scale=window.findChild<QDoubleSpinBox*>(QStringLiteral("cloudPixelScale"));auto* height=window.findChild<QDoubleSpinBox*>(QStringLiteral("cloudMaximumHeight"));auto* invert=window.findChild<QCheckBox*>(QStringLiteral("cloudInvertHeight"));auto* startColor=window.findChild<QPushButton*>(QStringLiteral("cloudStartColorButton"));auto* endColor=window.findChild<QPushButton*>(QStringLiteral("cloudEndColorButton"));auto* generate=window.findChild<QPushButton*>(QStringLiteral("generateCloudButton"));auto* tabs=window.findChild<QTabBar*>(QStringLiteral("previewTabs"));auto* layoutMode=window.findChild<QComboBox*>(QStringLiteral("previewLayoutMode"));auto* cloud=window.findChild<PointCloudWidget*>(QStringLiteral("pointCloudWidget"));auto* job=window.findChild<JobPreviewWidget*>(QStringLiteral("jobPreviewWidget"));auto* imageView=window.findChild<LargeImageView*>();auto* probe=window.findChild<QLabel*>(QStringLiteral("pixelProbeLabel"));auto* resetView=window.findChild<QPushButton*>(QStringLiteral("pointCloudFitAllButton"));QVERIFY(scale);QVERIFY(height);QVERIFY(invert);QVERIFY(startColor);QVERIFY(endColor);QVERIFY(generate);QVERIFY(tabs);QVERIFY(layoutMode);QVERIFY(cloud);QVERIFY(job);QVERIFY(imageView);QVERIFY(probe);QVERIFY(resetView);QVERIFY(window.findChild<QObject*>(QStringLiteral("pointCloudResetShortcut")));QCOMPARE(resetView->text(),QStringLiteral("视角复位 (Space)"));QCOMPARE(scale->value(),0.25);QCOMPARE(height->value(),12.5);QVERIFY(invert->isChecked());QCOMPARE(startColor->property("cloudColor").value<QColor>(),QColor(0,0,255));QCOMPARE(endColor->property("cloudColor").value<QColor>(),QColor(0,255,0));QVERIFY(!generate->isEnabled());QCOMPARE(tabs->count(),3);QCOMPARE(tabs->tabText(2),QStringLiteral("PointCloud"));QCOMPARE(probe->text(),QStringLiteral("X: --  Y: --  灰度: --"));
+    QVERIFY(QMetaObject::invokeMethod(&window,"acceptDocument",Qt::DirectConnection,Q_ARG(ImageDocumentPtr,document)));
+    if(!cloud->isVulkanAvailable()){QVERIFY(!generate->isEnabled());return;}
+    QVERIFY(generate->isEnabled());const QColor beforeCancel=startColor->property("cloudColor").value<QColor>();QTimer::singleShot(0,&window,[&window]{if(auto* dialog=window.findChild<QColorDialog*>(QStringLiteral("cloudColorDialog")))dialog->reject();});QTest::mouseClick(startColor,Qt::LeftButton);QCOMPARE(startColor->property("cloudColor").value<QColor>(),beforeCancel);scale->setValue(0.5);height->setValue(20.0);window.show();QTest::mouseClick(generate,Qt::LeftButton);QCOMPARE(tabs->currentIndex(),2);QTRY_VERIFY_WITH_TIMEOUT(cloud->document()!=nullptr,5000);QCOMPARE(cloud->document()->settings.pixelScale,0.5);QCOMPARE(cloud->document()->settings.maximumHeight,20.0);QVERIFY(cloud->document()->settings.invertHeight);QCOMPARE(cloud->document()->settings.startColor,QColor(0,0,255));QCOMPARE(cloud->document()->settings.endColor,QColor(0,255,0));QCOMPARE(cloud->document()->rootTiles.front()->vertices.size(),size_t(16));invert->setChecked(false);QVERIFY(cloud->document()->settings.invertHeight);QImage frame;QTRY_VERIFY_WITH_TIMEOUT(!(frame=cloud->grabFrame()).isNull(),3000);bool hasBlue=false,hasGreen=false;for(int y=0;y<frame.height();++y)for(int x=0;x<frame.width();++x){const QColor color=frame.pixelColor(x,y);if(color.blue()>color.red()+30&&color.blue()>60)hasBlue=true;if(color.green()>color.red()+30&&color.green()>60)hasGreen=true;}QVERIFY(hasBlue);QVERIFY(hasGreen);layoutMode->setCurrentIndex(1);QTRY_VERIFY(cloud->isVisible());QVERIFY(!imageView->isVisible());QVERIFY(!job->isVisible());
+}
+
+void TestMainWindow::fixedPointClearAndPhysicalSize() {
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QImage source(1,1,QImage::Format_Grayscale8);source.fill(128);
+    const QString path=directory.filePath("fixed-ui.bmp");QVERIFY(source.save(path,"BMP"));
+    QString error;const auto document=ImageLoader::load(path,810,&error);QVERIFY2(document,qPrintable(error));
+    MainWindow window;auto* scale=window.findChild<QDoubleSpinBox*>(QStringLiteral("cloudPixelScale"));auto* width=window.findChild<QSpinBox*>(QStringLiteral("segmentationCellWidth"));auto* height=window.findChild<QSpinBox*>(QStringLiteral("segmentationCellHeight"));auto* physical=window.findChild<QLabel*>(QStringLiteral("elementPhysicalSize"));auto* clear=window.findChild<QPushButton*>(QStringLiteral("clearFixedGrayPointsButton"));auto* view=window.findChild<LargeImageView*>();
+    QVERIFY(scale);QVERIFY(width);QVERIFY(height);QVERIFY(physical);QVERIFY(clear);QVERIFY(view);QCOMPARE(physical->text(),QStringLiteral("55 : 55"));QVERIFY(!clear->isEnabled());
+    width->setValue(3);height->setValue(5);scale->setValue(0.125);QCOMPARE(physical->text(),QStringLiteral("0.375 : 0.625"));
+    QVERIFY(QMetaObject::invokeMethod(&window,"acceptDocument",Qt::DirectConnection,Q_ARG(ImageDocumentPtr,document)));window.show();QTRY_VERIFY(view->isVisible());view->fitToWindow();QCoreApplication::processEvents();
+    QTest::mouseClick(view,Qt::LeftButton,Qt::ControlModifier,view->rect().center());
+    QTRY_COMPARE_WITH_TIMEOUT(view->fixedGrayPoints().size(),1,5000);QTRY_VERIFY(clear->isEnabled());
+    QTest::mouseClick(clear,Qt::LeftButton);QCOMPARE(view->fixedGrayPoints().size(),0);QVERIFY(!clear->isEnabled());
+}
+
+void TestMainWindow::mergeProgressStartsImmediately() {
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QImage image(8,8,QImage::Format_Grayscale8);image.fill(42);
+    const QString first=directory.filePath("tile_1_1.bmp");const QString second=directory.filePath("tile_1_2.bmp");
+    QVERIFY(image.save(first,"BMP"));QVERIFY(image.save(second,"BMP"));
+    MainWindow window;window.show();QMimeData mime;mime.setUrls({QUrl::fromLocalFile(first),QUrl::fromLocalFile(second)});QDragEnterEvent drag(QPoint(20,20),Qt::CopyAction,&mime,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(&window,&drag);QVERIFY(drag.isAccepted());
+    QDropEvent drop(QPointF(20,20),Qt::CopyAction,&mime,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(&window,&drop);
+    auto* merge=window.findChild<QPushButton*>(QStringLiteral("mergeImageButton"));auto* progress=window.findChild<QProgressBar*>(QStringLiteral("taskProgress"));auto* percent=window.findChild<QLabel*>(QStringLiteral("taskProgressPercent"));
+    QVERIFY(merge);QVERIFY(progress);QVERIFY(percent);QTRY_VERIFY_WITH_TIMEOUT(merge->isEnabled(),5000);
+    merge->click();QVERIFY(progress->isVisible());QVERIFY(percent->isVisible());QCOMPARE(progress->minimum(),0);QCOMPARE(progress->maximum(),2);QCOMPARE(progress->value(),0);QCOMPARE(percent->text(),QStringLiteral("0%"));
+    QTRY_VERIFY_WITH_TIMEOUT(!progress->isVisible(),5000);
 }
 
 void TestMainWindow::denseJobPointCanBeSelectedAfterOrbit() {
@@ -246,9 +290,10 @@ void TestMainWindow::settingsPersistenceAndReset() {
         auto* printMode=window.findChild<QCheckBox*>(QStringLiteral("chk_o_print"));
         auto* reverseY=window.findChild<QCheckBox*>(QStringLiteral("chk_y_reverse"));
         auto* repeat=window.findChild<QSpinBox*>(QStringLiteral("repeat_times"));
-        QVERIFY(width);QVERIFY(height);QVERIFY(threshold);QVERIFY(traversal);QVERIFY(printMode);QVERIFY(reverseY);QVERIFY(repeat);
+        auto* cloudInvert=window.findChild<QCheckBox*>(QStringLiteral("cloudInvertHeight"));
+        QVERIFY(width);QVERIFY(height);QVERIFY(threshold);QVERIFY(traversal);QVERIFY(printMode);QVERIFY(reverseY);QVERIFY(repeat);QVERIFY(cloudInvert);
         width->setValue(321);height->setValue(123);threshold->setValue(77);traversal->setCurrentIndex(1);
-        printMode->setChecked(true);reverseY->setChecked(true);repeat->setValue(4);
+        printMode->setChecked(true);reverseY->setChecked(true);repeat->setValue(4);cloudInvert->setChecked(false);
         window.show();QTest::qWait(10);window.close();
     }
     MainWindow restored;
@@ -261,10 +306,11 @@ void TestMainWindow::settingsPersistenceAndReset() {
     auto* repeat=restored.findChild<QSpinBox*>(QStringLiteral("repeat_times"));
     auto* reset=restored.findChild<QPushButton*>(QStringLiteral("resetParametersButton"));
     auto* canvasX=restored.findChild<QSpinBox*>(QStringLiteral("canvasX"));
-    QVERIFY(width);QVERIFY(height);QVERIFY(threshold);QVERIFY(traversal);QVERIFY(printMode);QVERIFY(reverseY);QVERIFY(repeat);QVERIFY(reset);QVERIFY(canvasX);
+    auto* cloudInvert=restored.findChild<QCheckBox*>(QStringLiteral("cloudInvertHeight"));auto* cloudStart=restored.findChild<QPushButton*>(QStringLiteral("cloudStartColorButton"));auto* cloudEnd=restored.findChild<QPushButton*>(QStringLiteral("cloudEndColorButton"));
+    QVERIFY(width);QVERIFY(height);QVERIFY(threshold);QVERIFY(traversal);QVERIFY(printMode);QVERIFY(reverseY);QVERIFY(repeat);QVERIFY(reset);QVERIFY(canvasX);QVERIFY(cloudInvert);QVERIFY(cloudStart);QVERIFY(cloudEnd);
     QCOMPARE(width->value(),321);QCOMPARE(height->value(),123);QCOMPARE(threshold->value(),77);
     QCOMPARE(traversal->currentIndex(),1);QVERIFY(printMode->isChecked());QVERIFY(reverseY->isChecked());
-    QCOMPARE(repeat->value(),4);QCOMPARE(canvasX->value(),1);
+    QCOMPARE(repeat->value(),4);QCOMPARE(canvasX->value(),1);QVERIFY(!cloudInvert->isChecked());QCOMPARE(cloudStart->property("cloudColor").value<QColor>(),QColor(0,0,255));QCOMPARE(cloudEnd->property("cloudColor").value<QColor>(),QColor(0,255,0));
     const auto restoredLabels=restored.findChildren<QLabel*>();
     QVERIFY(std::any_of(restoredLabels.cbegin(),restoredLabels.cend(),
         [](const QLabel* label){return label->text()==QStringLiteral("未加载图像");}));
@@ -275,11 +321,12 @@ void TestMainWindow::settingsPersistenceAndReset() {
 
     QSettings settings;settings.setValue(QStringLiteral("segmentation/cellWidth"),-5);
     settings.setValue(QStringLiteral("segmentation/threshold"),999);
-    settings.setValue(QStringLiteral("segmentation/traversal"),99);settings.sync();
+    settings.setValue(QStringLiteral("segmentation/traversal"),99);settings.setValue(QStringLiteral("pointCloud/startColor"),QStringLiteral("invalid"));settings.setValue(QStringLiteral("pointCloud/endColor"),QStringLiteral("#not-a-color"));settings.sync();
     MainWindow invalid;
     QCOMPARE(invalid.findChild<QSpinBox*>(QStringLiteral("segmentationCellWidth"))->value(),220);
     QCOMPARE(invalid.findChild<QSpinBox*>(QStringLiteral("segmentationThreshold"))->value(),128);
     QCOMPARE(invalid.findChild<QComboBox*>(QStringLiteral("segmentationTraversal"))->currentIndex(),0);
+    QCOMPARE(invalid.findChild<QPushButton*>(QStringLiteral("cloudStartColorButton"))->property("cloudColor").value<QColor>(),QColor(0,0,255));QCOMPARE(invalid.findChild<QPushButton*>(QStringLiteral("cloudEndColorButton"))->property("cloudColor").value<QColor>(),QColor(0,255,0));
 }
 
 void TestMainWindow::multipleImageDropIsSortedAndSelected() {

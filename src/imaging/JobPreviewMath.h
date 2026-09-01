@@ -62,6 +62,9 @@ public:
     [[nodiscard]] float sceneRadius() const noexcept { return sceneRadius_; }
     [[nodiscard]] float minimumDistance() const noexcept;
     [[nodiscard]] float maximumDistance() const noexcept;
+    void setElevationLimits(float minimum, float maximum);
+    [[nodiscard]] float minimumElevation() const noexcept { return minimumElevation_; }
+    [[nodiscard]] float maximumElevation() const noexcept { return maximumElevation_; }
 
     void orbit(const QPointF& pixelDelta);
     void translate(const QVector3D& delta);
@@ -77,4 +80,6 @@ private:
     QVector3D sceneMinimum_{-0.5F, -0.5F, -0.5F};
     QVector3D sceneMaximum_{0.5F, 0.5F, 0.5F};
     float sceneRadius_ = 1.0F;
+    float minimumElevation_ = 5.0F;
+    float maximumElevation_ = 89.0F;
 };

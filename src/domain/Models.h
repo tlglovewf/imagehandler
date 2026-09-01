@@ -14,7 +14,7 @@
 struct _VipsImage;
 using VipsImage = _VipsImage;
 
-enum class PixelKind { Binary1, Gray8, Color, Unsupported };
+enum class PixelKind { Binary1, Gray8, Gray16, Color, Unsupported };
 enum class ForegroundPolarity { Dark, Light };
 enum class TraversalMode { SnakeZ, ClockwiseSpiral };
 

@@ -1,6 +1,6 @@
 # AGENTS.md
 
-## 范围与项目
+## 适用范围与项目概览
 
 本文件适用于整个仓库。ImageHandler 是 Windows x64 桌面应用，使用 C++20、Qt 6 Widgets 和 libvips，支持大图浏览、规则图块合并、分割预览、Job 数据预览及流式 BMP 导出。
 
@@ -13,9 +13,11 @@
 
 不要手动修改或提交 `build/`、`.vs/`、`out/` 及 DLL、PDB 等生成文件。
 
-## 构建与测试
+## 工具链与构建
 
-使用 Windows 10/11 x64、Visual Studio 2022、CMake 3.24+、Qt 6.8.2 MSVC 2022 x64 和 libvips 8.18。优先使用现有 preset：
+使用 Windows 10/11 x64、Visual Studio 2022（“使用 C++ 的桌面开发”工作负载）、CMake 3.24+、Qt 6.8.2 MSVC 2022 x64 和 libvips 8.18。Qt 和 libvips 的默认路径分别为 `D:/tools/3rdparty/Qt/6.8.2/msvc2022_64` 和 `D:/3rd/vips-dev-8.18`。
+
+优先使用仓库中的 `CMakePresets.json`，不要创建与 preset 冲突的构建目录：
 
 ```powershell
 cmake --preset vs2022-x64
@@ -29,12 +31,27 @@ Release 构建使用 `cmake --build --preset release --parallel`。依赖路径�
 cmake --preset vs2022-x64 -DQT_ROOT=D:/Qt/6.8.2/msvc2022_64 -DVIPS_ROOT=D:/vips-dev-8.18
 ```
 
-验证要求：
+可执行文件位于：
+
+- Debug：`build/vs2022-x64/Debug/ImageHandler.exe`
+- Release：`build/vs2022-x64/Release/ImageHandler.exe`
+
+## 验证要求
 
 - 修改 C++ 后至少完成 Debug 构建。
 - 修改算法、目录/Job 解析、图像格式、遍历顺序或导出逻辑时，运行 `ctest --preset test-debug`。
 - 新增或修复行为时，在 `tests/` 中对应的测试文件添加回归测试。
 - 仅修改文档时无需构建；无法执行要求的验证时，说明具体原因。
+
+## VS Code
+
+仓库的 `.vscode/` 配置使用 CMake Tools 和 C/C++ 扩展：
+
+- `Ctrl+Shift+B`：执行默认 Debug 构建。
+- `F5`：构建并使用 MSVC 调试 `ImageHandler`。
+- Release 构建和 Debug 测试：从“运行任务”中选择。
+
+保持 VS Code 任务与 `CMakePresets.json` 一致，不在任务中复制另一套编译参数。
 
 ## C++、Qt 与图像处理约定
 
@@ -53,5 +70,13 @@ cmake --preset vs2022-x64 -DQT_ROOT=D:/Qt/6.8.2/msvc2022_64 -DVIPS_ROOT=D:/vips-
 - 修改保持聚焦，不顺带格式化或重写无关代码。
 - 新增源文件时加入根目录 `CMakeLists.txt` 中正确的 target。
 - 新增 Qt 模块或 libvips 运行时依赖时，同时更新链接与 Windows 部署逻辑。
-- 保持 `.vscode/` 任务与 `CMakePresets.json` 一致，不复制另一套构建参数。
-- 完成前检查配置、受影响 target、相关测试及新增文件的 CMake 归属。
+
+## 完成标准
+
+提交修改前确认：
+
+1. CMake 配置成功，且没有引入新的配置错误。
+2. 受影响的 Debug 或 Release target 编译成功。
+3. 相关自动化测试通过；无法运行时说明具体原因。
+4. 新增文件已加入正确的 CMake target。
+5. 没有修改或提交 `build/` 下的生成内容。

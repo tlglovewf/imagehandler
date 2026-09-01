@@ -44,6 +44,10 @@ ImageDocumentPtr ImageLoader::load(const QString& path, quint64 generation, QStr
                (bmpBits == 0 && raw->Bands <= 2 && raw->BandFmt == VIPS_FORMAT_UCHAR)) {
         doc->metadata.kind = PixelKind::Gray8;
         doc->metadata.sourceBitsPerPixel = 8;
+    } else if (bmpBits == 0 && raw->Bands <= 2 && raw->BandFmt == VIPS_FORMAT_USHORT &&
+               (metadataBits == 0 || metadataBits == 16)) {
+        doc->metadata.kind = PixelKind::Gray16;
+        doc->metadata.sourceBitsPerPixel = 16;
     } else if (raw->Bands >= 3) {
         doc->metadata.kind = PixelKind::Color;
         doc->metadata.sourceBitsPerPixel = bmpBits > 0 ? bmpBits : raw->Bands * 8;
@@ -55,5 +59,6 @@ ImageDocumentPtr ImageLoader::load(const QString& path, quint64 generation, QStr
 }
 
 bool ImageLoader::isProcessable(const ImageMetadata& metadata) {
-    return metadata.kind == PixelKind::Binary1 || metadata.kind == PixelKind::Gray8;
+    return metadata.kind == PixelKind::Binary1 || metadata.kind == PixelKind::Gray8 ||
+           metadata.kind == PixelKind::Gray16;
 }

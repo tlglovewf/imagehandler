@@ -43,6 +43,21 @@ VipsImagePtr ref(VipsImage* image) {
     return adopt(image);
 }
 
+VipsImagePtr toUchar(VipsImage* image, bool normalizeUnsigned16, QString* error) {
+    if (!image) return {};
+    if (image->BandFmt == VIPS_FORMAT_UCHAR) return ref(image);
+
+    VipsImage* converted = nullptr;
+    const int status = normalizeUnsigned16 && image->BandFmt == VIPS_FORMAT_USHORT
+        ? vips_linear1(image, &converted, 1.0 / 257.0, 0.0, "uchar", TRUE, nullptr)
+        : vips_cast(image, &converted, VIPS_FORMAT_UCHAR, nullptr);
+    if (status != 0) {
+        if (error) *error = lastError();
+        return {};
+    }
+    return adopt(converted);
+}
+
 QImage renderRegion(const ImageDocumentPtr& document, qint64 x, qint64 y,
                     qint64 width, qint64 height, double scale, QString* error,
                     const CancellationTokenPtr& token) {
@@ -51,6 +66,7 @@ QImage renderRegion(const ImageDocumentPtr& document, qint64 x, qint64 y,
     VipsImage* cropped = nullptr;
     VipsImage* resized = nullptr;
     VipsImage* prepared = nullptr;
+    bool renderGray16 = false;
     x = std::clamp<qint64>(x, 0, document->metadata.width - 1);
     y = std::clamp<qint64>(y, 0, document->metadata.height - 1);
     width = std::min(width, document->metadata.width - x);
@@ -83,11 +99,19 @@ QImage renderRegion(const ImageDocumentPtr& document, qint64 x, qint64 y,
             g_object_ref(prepared);
         } else if (vips_extract_band(resized, &prepared, 0, nullptr) != 0) goto fail;
     }
-    if (prepared->BandFmt != VIPS_FORMAT_UCHAR) {
-        VipsImage* casted = nullptr;
-        if (vips_cast(prepared, &casted, VIPS_FORMAT_UCHAR, nullptr) != 0) goto fail;
+    renderGray16 = document->metadata.kind == PixelKind::Gray16 &&
+                   prepared->BandFmt == VIPS_FORMAT_USHORT;
+    if (prepared->BandFmt != VIPS_FORMAT_UCHAR && !renderGray16) {
+        QString conversionError;
+        auto converted = toUchar(prepared, document->metadata.kind == PixelKind::Gray16,
+                                 &conversionError);
+        if (!converted) {
+            if (error) *error = conversionError;
+            goto fail;
+        }
         g_object_unref(prepared);
-        prepared = casted;
+        prepared = converted.get();
+        g_object_ref(prepared);
     }
 
     {
@@ -104,8 +128,11 @@ QImage renderRegion(const ImageDocumentPtr& document, qint64 x, qint64 y,
         const int w = prepared->Xsize;
         const int h = prepared->Ysize;
         const int bands = prepared->Bands;
-        QImage image(reinterpret_cast<const uchar*>(memory), w, h, w * bands,
-                     bands == 1 ? QImage::Format_Grayscale8 : QImage::Format_RGB888);
+        const qsizetype bytesPerPixel = renderGray16 ? 2 : bands;
+        const QImage::Format imageFormat = renderGray16 ? QImage::Format_Grayscale16
+            : bands == 1 ? QImage::Format_Grayscale8 : QImage::Format_RGB888;
+        QImage image(reinterpret_cast<const uchar*>(memory), w, h,
+                     static_cast<qsizetype>(w) * bytesPerPixel, imageFormat);
         QImage copy = image.copy();
         g_free(memory);
         g_object_unref(prepared);

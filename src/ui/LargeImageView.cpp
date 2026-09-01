@@ -1,17 +1,33 @@
 #include "ui/LargeImageView.h"
+#include "imaging/ImageLoader.h"
 #include "imaging/VipsSupport.h"
 #include "io/SplitExporter.h"
 
 #include <QApplication>
 #include <QFutureWatcher>
+#include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QWheelEvent>
 #include <QtConcurrent/QtConcurrentRun>
 #include <algorithm>
 #include <cmath>
+#include <optional>
 
-namespace { constexpr int kTilePixels = 256; }
+namespace {
+constexpr int kTilePixels = 256;
+
+std::optional<quint32> grayValue(const QImage& image, int x, int y, PixelKind kind) {
+    if (image.isNull() || x < 0 || y < 0 || x >= image.width() || y >= image.height())
+        return std::nullopt;
+    if (image.format() == QImage::Format_Grayscale16)
+        return reinterpret_cast<const quint16*>(image.constScanLine(y))[x];
+    if (image.depth() < 8) return std::nullopt;
+    quint32 value = image.constScanLine(y)[x];
+    if (kind == PixelKind::Binary1) value = value == 0 ? 0U : 1U;
+    return value;
+}
+}
 
 LargeImageView::LargeImageView(QWidget* parent) : QWidget(parent) {
     setMinimumSize(320, 240);
@@ -22,6 +38,11 @@ LargeImageView::LargeImageView(QWidget* parent) : QWidget(parent) {
 
 void LargeImageView::setDocument(const ImageDocumentPtr& document) {
     document_ = document; cache_.clear(); pending_.clear(); failedTiles_.clear(); showGrid_ = false;
+    probeCache_ = {}; probeCacheOrigin_ = {-1, -1}; hoverPixel_ = {-1, -1}; probePending_ = false; ++probeRequestSerial_;
+    const bool hadFixedPoints = !fixedGrayPoints_.isEmpty();
+    fixedGrayPoints_.clear(); selectedFixedGrayPointId_ = 0;
+    if (hadFixedPoints) Q_EMIT fixedGrayPointCountChanged(0);
+    Q_EMIT pixelValueChanged(-1, -1, 0, false);
     showTraversalPath_ = false; clearSelectedCell();
     fitToWindow(); update();
 }
@@ -224,25 +245,281 @@ void LargeImageView::paintEvent(QPaintEvent*) {
         }
         p.restore();
     }
+    drawFixedGrayPoints(p);
 }
 
 void LargeImageView::resizeEvent(QResizeEvent*) { update(); }
 void LargeImageView::mousePressEvent(QMouseEvent* e) {
     if(e->button()!=Qt::LeftButton)return;
-    leftPressed_=true;dragging_=false;pressPosition_=lastMouse_=e->pos();e->accept();
+    setFocus(Qt::MouseFocusReason);
+    leftPressed_=true;dragging_=false;pressModifiers_=e->modifiers();pressPosition_=lastMouse_=e->pos();e->accept();
 }
 void LargeImageView::mouseMoveEvent(QMouseEvent* e) {
+    updatePixelProbe(e->pos());
     if(!leftPressed_)return;
     if(!dragging_&&(e->pos()-pressPosition_).manhattanLength()<QApplication::startDragDistance())return;
     if(!dragging_){dragging_=true;setCursor(Qt::ClosedHandCursor);}
     offset_+=e->pos()-lastMouse_;lastMouse_=e->pos();update();e->accept();
 }
+
+void LargeImageView::leaveEvent(QEvent* event) {
+    hoverPixel_ = {-1, -1};
+    Q_EMIT pixelValueChanged(-1, -1, 0, false);
+    QWidget::leaveEvent(event);
+}
+
+void LargeImageView::updatePixelProbe(const QPoint& viewportPosition) {
+    if (!document_ || zoom_ <= 0.0 || !ImageLoader::isProcessable(document_->metadata)) {
+        if (hoverPixel_.x() >= 0) Q_EMIT pixelValueChanged(-1, -1, 0, false);
+        hoverPixel_ = {-1, -1};
+        return;
+    }
+    const QPointF imagePosition = (QPointF(viewportPosition) - offset_) / zoom_;
+    const qint64 x = static_cast<qint64>(std::floor(imagePosition.x()));
+    const qint64 y = static_cast<qint64>(std::floor(imagePosition.y()));
+    if (x < 0 || y < 0 || x >= document_->metadata.width || y >= document_->metadata.height) {
+        if (hoverPixel_.x() >= 0) Q_EMIT pixelValueChanged(-1, -1, 0, false);
+        hoverPixel_ = {-1, -1};
+        return;
+    }
+    hoverPixel_ = {static_cast<int>(x), static_cast<int>(y)};
+    if (!probeCache_.isNull() && x >= probeCacheOrigin_.x() && y >= probeCacheOrigin_.y() &&
+        x < probeCacheOrigin_.x() + probeCache_.width() &&
+        y < probeCacheOrigin_.y() + probeCache_.height()) {
+        emitCachedProbe();
+    } else if (!probePending_) {
+        requestProbeBlock(x, y);
+    }
+}
+
+void LargeImageView::requestProbeBlock(qint64 x, qint64 y) {
+    if (!document_ || probePending_) return;
+    constexpr qint64 blockSize = 64;
+    const qint64 blockX = (x / blockSize) * blockSize;
+    const qint64 blockY = (y / blockSize) * blockSize;
+    const qint64 blockWidth = std::min(blockSize, document_->metadata.width - blockX);
+    const qint64 blockHeight = std::min(blockSize, document_->metadata.height - blockY);
+    const auto doc = document_;
+    const quint64 generation = doc->generation;
+    const quint64 requestSerial = ++probeRequestSerial_;
+    probePending_ = true;
+    auto* watcher = new QFutureWatcher<QImage>(this);
+    connect(watcher, &QFutureWatcher<QImage>::finished, this,
+            [this, watcher, generation, requestSerial, blockX, blockY] {
+        const QImage image = watcher->result();
+        watcher->deleteLater();
+        if (requestSerial != probeRequestSerial_) return;
+        probePending_ = false;
+        if (!document_ || document_->generation != generation) return;
+        if (!image.isNull()) {
+            probeCache_ = image;
+            probeCacheOrigin_ = {static_cast<int>(blockX), static_cast<int>(blockY)};
+        }
+        if (hoverPixel_.x() < 0) return;
+        if (!probeCache_.isNull() && hoverPixel_.x() >= probeCacheOrigin_.x() &&
+            hoverPixel_.y() >= probeCacheOrigin_.y() &&
+            hoverPixel_.x() < probeCacheOrigin_.x() + probeCache_.width() &&
+            hoverPixel_.y() < probeCacheOrigin_.y() + probeCache_.height()) {
+            emitCachedProbe();
+        } else {
+            requestProbeBlock(hoverPixel_.x(), hoverPixel_.y());
+        }
+    });
+    watcher->setFuture(QtConcurrent::run([doc, blockX, blockY, blockWidth, blockHeight] {
+        QString error;
+        return VipsSupport::renderRegion(doc, blockX, blockY, blockWidth, blockHeight, 1.0, &error);
+    }));
+}
+
+void LargeImageView::emitCachedProbe() {
+    if (!document_ || probeCache_.isNull() || hoverPixel_.x() < 0) return;
+    const int localX = hoverPixel_.x() - probeCacheOrigin_.x();
+    const int localY = hoverPixel_.y() - probeCacheOrigin_.y();
+    const auto value = grayValue(probeCache_, localX, localY, document_->metadata.kind);
+    if (value) Q_EMIT pixelValueChanged(hoverPixel_.x(), hoverPixel_.y(), *value, true);
+}
+
+void LargeImageView::addFixedGrayPointAt(const QPoint& viewportPosition) {
+    if (!document_ || zoom_ <= 0.0 || !ImageLoader::isProcessable(document_->metadata)) return;
+    if (const quint64 existingId = fixedGrayPointAt(viewportPosition); existingId != 0) {
+        selectedFixedGrayPointId_ = existingId;
+        update();
+        return;
+    }
+    const QPointF imagePosition = (QPointF(viewportPosition) - offset_) / zoom_;
+    const qint64 x = static_cast<qint64>(std::floor(imagePosition.x()));
+    const qint64 y = static_cast<qint64>(std::floor(imagePosition.y()));
+    if (x < 0 || y < 0 || x >= document_->metadata.width || y >= document_->metadata.height) return;
+    const auto duplicate = std::find_if(fixedGrayPoints_.cbegin(), fixedGrayPoints_.cend(),
+        [x, y](const FixedGrayPoint& point) { return point.x == x && point.y == y; });
+    if (duplicate != fixedGrayPoints_.cend()) {
+        selectedFixedGrayPointId_ = duplicate->id;
+        update();
+        return;
+    }
+
+    FixedGrayPoint point;
+    point.id = nextFixedGrayPointId_++;
+    point.x = x;
+    point.y = y;
+    selectedFixedGrayPointId_ = point.id;
+    fixedGrayPoints_.push_back(point);
+    Q_EMIT fixedGrayPointCountChanged(fixedGrayPoints_.size());
+    update();
+
+    if (!probeCache_.isNull() && x >= probeCacheOrigin_.x() && y >= probeCacheOrigin_.y() &&
+        x < probeCacheOrigin_.x() + probeCache_.width() &&
+        y < probeCacheOrigin_.y() + probeCache_.height()) {
+        const auto value = grayValue(probeCache_, static_cast<int>(x - probeCacheOrigin_.x()),
+                                     static_cast<int>(y - probeCacheOrigin_.y()),
+                                     document_->metadata.kind);
+        if (value) {
+            fixedGrayPoints_.back().value = *value;
+            fixedGrayPoints_.back().state = FixedGrayPointState::Ready;
+            update();
+            return;
+        }
+    }
+
+    const auto doc = document_;
+    const quint64 generation = doc->generation;
+    const quint64 pointId = point.id;
+    auto* watcher = new QFutureWatcher<QPair<QImage, QString>>(this);
+    connect(watcher, &QFutureWatcher<QPair<QImage, QString>>::finished, this,
+            [this, watcher, generation, pointId] {
+        const auto result = watcher->result();
+        watcher->deleteLater();
+        if (!document_ || document_->generation != generation) return;
+        const auto pointIt = std::find_if(fixedGrayPoints_.begin(), fixedGrayPoints_.end(),
+            [pointId](const FixedGrayPoint& candidate) { return candidate.id == pointId; });
+        if (pointIt == fixedGrayPoints_.end()) return;
+        const auto value = grayValue(result.first, 0, 0, document_->metadata.kind);
+        if (value) {
+            pointIt->value = *value;
+            pointIt->state = FixedGrayPointState::Ready;
+        } else {
+            pointIt->state = FixedGrayPointState::Failed;
+            Q_EMIT fixedGrayPointError(result.second.isEmpty()
+                ? QStringLiteral("无法读取源像素。") : result.second);
+        }
+        update();
+    });
+    watcher->setFuture(QtConcurrent::run([doc, x, y] {
+        QString error;
+        QImage image = VipsSupport::renderRegion(doc, x, y, 1, 1, 1.0, &error);
+        return qMakePair(image, error);
+    }));
+}
+
+QPointF LargeImageView::fixedGrayPointPosition(const FixedGrayPoint& point) const {
+    return offset_ + QPointF((static_cast<double>(point.x) + 0.5) * zoom_,
+                             (static_cast<double>(point.y) + 0.5) * zoom_);
+}
+
+QString LargeImageView::fixedGrayPointLabel(const FixedGrayPoint& point) const {
+    if (point.state == FixedGrayPointState::Ready)
+        return QStringLiteral("灰度: %1").arg(point.value);
+    if (point.state == FixedGrayPointState::Failed) return QStringLiteral("灰度: 读取失败");
+    return QStringLiteral("灰度: …");
+}
+
+QRectF LargeImageView::fixedGrayPointLabelRect(const FixedGrayPoint& point) const {
+    const QPointF marker = fixedGrayPointPosition(point);
+    const QString label = fixedGrayPointLabel(point);
+    const QSizeF textSize(fontMetrics().horizontalAdvance(label), fontMetrics().height());
+    const QSizeF boxSize(textSize.width() + 10.0, textSize.height() + 6.0);
+    QPointF topLeft(marker.x() + 10.0, marker.y() - boxSize.height() - 5.0);
+    if (topLeft.x() + boxSize.width() > width() - 2.0)
+        topLeft.setX(marker.x() - boxSize.width() - 10.0);
+    if (topLeft.y() < 2.0) topLeft.setY(marker.y() + 10.0);
+    topLeft.setX(std::clamp(topLeft.x(), 2.0, std::max(2.0, width() - boxSize.width() - 2.0)));
+    topLeft.setY(std::clamp(topLeft.y(), 2.0, std::max(2.0, height() - boxSize.height() - 2.0)));
+    return {topLeft, boxSize};
+}
+
+quint64 LargeImageView::fixedGrayPointAt(const QPoint& viewportPosition) const {
+    for (auto it = fixedGrayPoints_.crbegin(); it != fixedGrayPoints_.crend(); ++it) {
+        const QPointF marker = fixedGrayPointPosition(*it);
+        const QPointF delta = QPointF(viewportPosition) - marker;
+        if (delta.x() * delta.x() + delta.y() * delta.y() <= 100.0 ||
+            fixedGrayPointLabelRect(*it).adjusted(-2.0, -2.0, 2.0, 2.0).contains(viewportPosition))
+            return it->id;
+    }
+    return 0;
+}
+
+void LargeImageView::drawFixedGrayPoints(QPainter& painter) const {
+    if (fixedGrayPoints_.isEmpty()) return;
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    for (const auto& point : fixedGrayPoints_) {
+        const QPointF marker = fixedGrayPointPosition(point);
+        if (!QRectF(rect()).adjusted(-12.0, -12.0, 12.0, 12.0).contains(marker)) continue;
+        const bool selected = point.id == selectedFixedGrayPointId_;
+        const QColor accent = selected ? QColor(255, 215, 0) : QColor(0, 220, 255);
+        painter.setPen(QPen(QColor(0, 0, 0, 210), 4.0));
+        painter.drawEllipse(marker, 6.0, 6.0);
+        painter.drawLine(marker + QPointF(-9.0, 0.0), marker + QPointF(9.0, 0.0));
+        painter.drawLine(marker + QPointF(0.0, -9.0), marker + QPointF(0.0, 9.0));
+        painter.setPen(QPen(accent, 2.0));
+        painter.drawEllipse(marker, 6.0, 6.0);
+        painter.drawLine(marker + QPointF(-9.0, 0.0), marker + QPointF(9.0, 0.0));
+        painter.drawLine(marker + QPointF(0.0, -9.0), marker + QPointF(0.0, 9.0));
+        const QRectF labelRect = fixedGrayPointLabelRect(point);
+        painter.setPen(QPen(accent, selected ? 2.0 : 1.0));
+        painter.setBrush(QColor(15, 18, 22, 220));
+        painter.drawRoundedRect(labelRect, 4.0, 4.0);
+        painter.setPen(Qt::white);
+        painter.drawText(labelRect.adjusted(5.0, 3.0, -5.0, -3.0),
+                         Qt::AlignLeft | Qt::AlignVCenter, fixedGrayPointLabel(point));
+    }
+    painter.restore();
+}
+
+void LargeImageView::removeSelectedFixedGrayPoint() {
+    const auto pointIt = std::find_if(fixedGrayPoints_.begin(), fixedGrayPoints_.end(),
+        [this](const FixedGrayPoint& point) { return point.id == selectedFixedGrayPointId_; });
+    if (pointIt == fixedGrayPoints_.end()) return;
+    fixedGrayPoints_.erase(pointIt);
+    selectedFixedGrayPointId_ = 0;
+    Q_EMIT fixedGrayPointCountChanged(fixedGrayPoints_.size());
+    update();
+}
+
+void LargeImageView::clearFixedGrayPoints() {
+    if (fixedGrayPoints_.isEmpty()) return;
+    fixedGrayPoints_.clear();
+    selectedFixedGrayPointId_ = 0;
+    Q_EMIT fixedGrayPointCountChanged(0);
+    update();
+}
+
 void LargeImageView::mouseReleaseEvent(QMouseEvent* e) {
     if(e->button()!=Qt::LeftButton||!leftPressed_)return;
     leftPressed_=false;
     if(dragging_){dragging_=false;unsetCursor();}
-    else selectCellAt(e->pos());
+    else if (pressModifiers_.testFlag(Qt::ControlModifier)) addFixedGrayPointAt(e->pos());
+    else {
+        const quint64 fixedPointId = fixedGrayPointAt(e->pos());
+        if (fixedPointId != 0) {
+            selectedFixedGrayPointId_ = fixedPointId;
+            update();
+        } else {
+            selectedFixedGrayPointId_ = 0;
+            selectCellAt(e->pos());
+        }
+    }
     e->accept();
+}
+
+void LargeImageView::keyPressEvent(QKeyEvent* event) {
+    if ((event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) &&
+        selectedFixedGrayPointId_ != 0) {
+        removeSelectedFixedGrayPoint();
+        event->accept();
+        return;
+    }
+    QWidget::keyPressEvent(event);
 }
 
 void LargeImageView::selectCellAt(const QPoint& viewportPosition) {

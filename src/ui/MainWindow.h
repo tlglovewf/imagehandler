@@ -2,12 +2,14 @@
 
 #include "domain/Models.h"
 #include "domain/JobModels.h"
+#include "domain/PointCloudModels.h"
 #include "io/ExportTypes.h"
 #include <QMainWindow>
 #include <QVector>
 
 class LargeImageView;
 class JobPreviewWidget;
+class PointCloudWidget;
 class TaskManager;
 struct MosaicBuildResult;
 class QListWidget;
@@ -15,6 +17,7 @@ class QPushButton;
 class QProgressBar;
 class QLabel;
 class QSpinBox;
+class QDoubleSpinBox;
 class QComboBox;
 class QCheckBox;
 class QTimer;
@@ -39,7 +42,7 @@ protected:
 private:
     enum class PendingAction { None, Scan, Load, Merge, Detect, Grid, ExportPreflight,
                                SplitExport, MosaicExport,
-                               JobLoad, JobLoadExport, JobPreviewBuild };
+                               JobLoad, JobLoadExport, JobPreviewBuild, PointCloudBuild };
     void buildUi();
     void connectUi();
     void openImage();
@@ -62,6 +65,10 @@ private:
     void scheduleJobPreview(bool switchToJob);
     void rebuildJobPreview();
     void acceptJobDocument(const JobDocumentPtr& document, bool preserveLink);
+    void generatePointCloud();
+    void chooseCloudColor(bool startColor);
+    void updateCloudColorButton(QPushButton* button, const QColor& color,
+                                const QString& label);
     void setPreviewLayoutMode(int mode);
     void showPreviewTab(int index);
     void selectJobFromImage(int row, int column);
@@ -79,6 +86,7 @@ private:
     void setBusyUi(bool busy);
     void updateGridCountLabel();
     void updateSegmentationStatistics();
+    void updateElementPhysicalSize();
     void setTaskDisplay(const QString& title, const QString& phase,
                         qint64 completed, qint64 total);
     void setIdleTaskDisplay();
@@ -92,6 +100,7 @@ private:
     TaskManager* tasks_ = nullptr;
     LargeImageView* view_ = nullptr;
     JobPreviewWidget* jobView_ = nullptr;
+    PointCloudWidget* pointCloudView_ = nullptr;
     QWidget* imagePreviewHost_ = nullptr;
     QSplitter* previewSplitter_ = nullptr;
     QTabBar* previewTabs_ = nullptr;
@@ -101,13 +110,20 @@ private:
     QPushButton *detectButton_=nullptr,*exportButton_=nullptr,*previousButton_=nullptr,*nextButton_=nullptr;
     QPushButton *manualPreviewButton_=nullptr,*pathButton_=nullptr,*cancelButton_=nullptr;
     QPushButton *mergedExportButton_=nullptr,*jobImportButton_=nullptr,*resetParametersButton_=nullptr;
+    QPushButton* clearFixedGrayPointsButton_ = nullptr;
+    QPushButton* generateCloudButton_ = nullptr;
+    QPushButton *cloudStartColorButton_=nullptr,*cloudEndColorButton_=nullptr;
     QSpinBox *cellWidth_=nullptr,*cellHeight_=nullptr,*threshold_=nullptr;
     QSpinBox *canvasX_=nullptr,*canvasY_=nullptr,*repeatTimes_=nullptr;
+    QDoubleSpinBox *cloudPixelScale_=nullptr,*cloudMaximumHeight_=nullptr;
     QCheckBox *printModeCheck_=nullptr,*canvasLockCheck_=nullptr,*reverseYCheck_=nullptr;
     QCheckBox* autoJumpCheck_=nullptr;
+    QCheckBox* cloudInvertHeight_ = nullptr;
     QWidget* printOptionsContainer_=nullptr;
     QComboBox *polarity_=nullptr,*traversal_=nullptr,*previewLayoutMode_=nullptr;
     QLabel *gridCountLabel_=nullptr,*selectedCellLabel_=nullptr,*taskTitle_=nullptr,*taskPhase_=nullptr,*progressPercent_=nullptr,*imageInfo_=nullptr,*zoomInfo_=nullptr;
+    QLabel* pixelProbeLabel_ = nullptr;
+    QLabel* elementPhysicalSizeLabel_ = nullptr;
     QLabel *statisticsStatus_=nullptr,*statisticsMode_=nullptr,*statisticsGrid_=nullptr;
     QLabel *statisticsFileCount_=nullptr,*statisticsOutputSize_=nullptr,*statisticsRequiredSpace_=nullptr;
     QProgressBar* progress_=nullptr;
@@ -116,6 +132,9 @@ private:
     QSplitter* mainSplitter_=nullptr;
     ImageDocumentPtr document_;
     JobDocumentPtr jobDocument_;
+    PointCloudDocumentPtr pointCloudDocument_;
+    QColor cloudStartColor_{0,0,255};
+    QColor cloudEndColor_{0,255,0};
     SegmentationResult segmentation_;
     QStringList directoryPaths_;
     QStringList pendingMergePaths_;

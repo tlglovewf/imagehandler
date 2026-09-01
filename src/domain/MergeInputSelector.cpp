@@ -1,6 +1,15 @@
 #include "domain/MergeInputSelector.h"
 
 #include <QFileInfo>
+#include <QSet>
+
+namespace {
+bool isMergeImage(const QString& path) {
+    static const QSet<QString> extensions{QStringLiteral("bmp"), QStringLiteral("png"),
+                                          QStringLiteral("tif"), QStringLiteral("tiff")};
+    return extensions.contains(QFileInfo(path).suffix().toLower());
+}
+}
 
 QStringList MergeInputSelector::resolve(const QStringList& directoryPaths,
                                         const QStringList& selectedPaths) {
@@ -8,8 +17,7 @@ QStringList MergeInputSelector::resolve(const QStringList& directoryPaths,
 
     QStringList result;
     for (const auto& path : directoryPaths) {
-        if (QFileInfo(path).suffix().compare(QStringLiteral("bmp"), Qt::CaseInsensitive) == 0)
-            result << path;
+        if (isMergeImage(path)) result << path;
     }
     return result;
 }

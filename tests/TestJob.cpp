@@ -213,6 +213,7 @@ void TestJob::guidesUsePointZeroAndFullBounds() {
 
 void TestJob::terrainCameraIsGroundOrientedAndClamped() {
     JobTerrainCamera camera;
+    QCOMPARE(camera.minimumElevation(),5.0F);QCOMPARE(camera.maximumElevation(),89.0F);
     camera.setSceneBounds({-50.0F, -25.0F, 0.0F}, {50.0F, 25.0F, 10.0F});
     QCOMPARE(camera.pose().pivot, QVector3D(0.0F, 0.0F, 5.0F));
     QVERIFY(camera.pose().distance > camera.sceneRadius());
@@ -224,6 +225,12 @@ void TestJob::terrainCameraIsGroundOrientedAndClamped() {
     QCOMPARE(camera.pose().elevation, 89.0F);
     camera.orbit({0.0, -20000.0});
     QCOMPARE(camera.pose().elevation, 5.0F);
+    camera.setElevationLimits(-89.0F,89.0F);
+    QCOMPARE(camera.minimumElevation(),-89.0F);QCOMPARE(camera.maximumElevation(),89.0F);
+    camera.orbit({0.0,-10000.0});QCOMPARE(camera.pose().elevation,-89.0F);
+    camera.orbit({0.0,200.0});QCOMPARE(camera.pose().elevation,-39.0F);
+    const QMatrix4x4 belowSurfaceView=camera.viewMatrix();
+    for(int i=0;i<16;++i)QVERIFY(std::isfinite(belowSurfaceView.constData()[i]));
     camera.zoomBy(0.0F);
     QVERIFY(camera.pose().distance >= camera.minimumDistance());
     camera.zoomBy(1.0e-12F);

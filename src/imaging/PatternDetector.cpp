@@ -1,4 +1,5 @@
 #include "imaging/PatternDetector.h"
+#include "imaging/ImageLoader.h"
 #include "imaging/VipsSupport.h"
 
 #include <QQueue>
@@ -128,8 +129,8 @@ SegmentationResult PatternDetector::detect(const ImageDocumentPtr& document,
                                            const CancellationTokenPtr& token,
                                            const Progress& progress, QString* error) {
     SegmentationResult result;
-    if (!document || (document->metadata.kind != PixelKind::Binary1 && document->metadata.kind != PixelKind::Gray8)) {
-        if (error) *error = QStringLiteral("只有 1-bit 二值图或 8-bit 灰度图可以分割。");
+    if (!document || !ImageLoader::isProcessable(document->metadata)) {
+        if (error) *error = QStringLiteral("只有 1-bit 二值图、8-bit 或 16-bit 灰度图可以分割。");
         return result;
     }
     const double scale = std::min(1.0, 2048.0 / std::max(document->metadata.width, document->metadata.height));
@@ -141,6 +142,8 @@ SegmentationResult PatternDetector::detect(const ImageDocumentPtr& document,
         if (!cancelled(token) && error) *error = renderError;
         return result;
     }
+    if (sample.format() == QImage::Format_Grayscale16)
+        sample = sample.convertToFormat(QImage::Format_Grayscale8);
     if (cancelled(token)) return result;
     if (progress) progress({QStringLiteral("计算直方图"), 1, 4});
     int minimumGray = 255, maximumGray = 0;
