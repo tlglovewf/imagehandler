@@ -5,6 +5,7 @@
 #include <QColor>
 #include <QMetaType>
 #include <memory>
+#include <optional>
 #include <vector>
 
 inline constexpr int kPointCloudTileSamples = 256;
@@ -25,6 +26,12 @@ struct PointCloudVertex {
     float normalizedGray = 0.0F;
 };
 
+struct PointCloudExtremum {
+    qint64 pixelX = 0;
+    qint64 pixelY = 0;
+    double normalizedGray = 0.0;
+};
+
 struct PointCloudTile {
     int level = 0;
     int tileX = 0;
@@ -39,6 +46,8 @@ struct PointCloudDocument {
     int rootLevel = 0;
     quint64 generation = 0;
     std::vector<PointCloudTilePtr> rootTiles;
+    std::optional<PointCloudExtremum> highestPoint;
+    std::optional<PointCloudExtremum> lowestPoint;
 };
 using PointCloudDocumentPtr = std::shared_ptr<PointCloudDocument>;
 

@@ -45,9 +45,10 @@ public Q_SLOTS:
 
 Q_SIGNALS:
     void viewStatusChanged(double zoom, qint64 width, qint64 height);
-    void tileProgress(const QString& phase, qint64 completed, qint64 total);
+    void tileProgress(quint64 generation, qint64 completed, qint64 failed, qint64 total);
     void tileError(const QString& error);
     void segmentationCellSelected(int row, int column);
+    void segmentationCellActivated(int row, int column);
     void pixelValueChanged(qint64 x, qint64 y, quint32 value, bool valid);
     void fixedGrayPointCountChanged(int count);
     void fixedGrayPointError(const QString& error);
@@ -58,6 +59,7 @@ protected:
     void mousePressEvent(QMouseEvent*) override;
     void mouseMoveEvent(QMouseEvent*) override;
     void mouseReleaseEvent(QMouseEvent*) override;
+    void mouseDoubleClickEvent(QMouseEvent*) override;
     void keyPressEvent(QKeyEvent*) override;
     void leaveEvent(QEvent*) override;
     void wheelEvent(QWheelEvent*) override;
@@ -65,6 +67,8 @@ protected:
 private:
     QString tileKey(int level, int tx, int ty) const;
     void requestTile(const QString& key, int level, int tx, int ty, int sourceTile);
+    void emitTileProgress();
+    [[nodiscard]] QPoint cellAt(const QPoint& viewportPosition) const;
     void selectCellAt(const QPoint& viewportPosition);
     void updatePixelProbe(const QPoint& viewportPosition);
     void requestProbeBlock(qint64 x, qint64 y);
@@ -96,6 +100,8 @@ private:
     QCache<QString, QImage> cache_{256 * 1024};
     QSet<QString> pending_;
     QHash<QString, QString> failedTiles_;
+    QSet<QString> visibleTileKeys_;
+    CancellationTokenPtr tileRequestToken_;
     QImage probeCache_;
     QPoint probeCacheOrigin_{-1, -1};
     QPoint hoverPixel_{-1, -1};

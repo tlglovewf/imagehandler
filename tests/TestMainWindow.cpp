@@ -3,6 +3,7 @@
 #include "ui/LargeImageView.h"
 #include "ui/JobPreviewWidget.h"
 #include "ui/PointCloudWidget.h"
+#include "ui/ElementPointCloudWindow.h"
 #include "ui/MainWindow.h"
 
 #include <QAbstractButton>
@@ -44,6 +45,8 @@ private Q_SLOTS:
     void pointCloudControlsAndTab();
     void fixedPointClearAndPhysicalSize();
     void mergeProgressStartsImmediately();
+    void listActivationRequiresDoubleClick();
+    void elementPointCloudWindowIsReused();
 
 private:
     QTemporaryDir settingsDirectory_;
@@ -233,8 +236,44 @@ void TestMainWindow::mergeProgressStartsImmediately() {
     QDropEvent drop(QPointF(20,20),Qt::CopyAction,&mime,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(&window,&drop);
     auto* merge=window.findChild<QPushButton*>(QStringLiteral("mergeImageButton"));auto* progress=window.findChild<QProgressBar*>(QStringLiteral("taskProgress"));auto* percent=window.findChild<QLabel*>(QStringLiteral("taskProgressPercent"));
     QVERIFY(merge);QVERIFY(progress);QVERIFY(percent);QTRY_VERIFY_WITH_TIMEOUT(merge->isEnabled(),5000);
-    merge->click();QVERIFY(progress->isVisible());QVERIFY(percent->isVisible());QCOMPARE(progress->minimum(),0);QCOMPARE(progress->maximum(),2);QCOMPARE(progress->value(),0);QCOMPARE(percent->text(),QStringLiteral("0%"));
+    merge->click();QVERIFY(progress->isVisible());QVERIFY(percent->isVisible());QCOMPARE(progress->minimum(),0);QCOMPARE(progress->maximum(),1000);QCOMPARE(progress->value(),0);QCOMPARE(percent->text(),QStringLiteral("0%"));
     QTRY_VERIFY_WITH_TIMEOUT(!progress->isVisible(),5000);
+}
+
+void TestMainWindow::listActivationRequiresDoubleClick() {
+    QTemporaryDir directory;QVERIFY(directory.isValid());QStringList paths;
+    const QSize sizes[]={{3,2},{4,2},{3,2},{4,2}};
+    for(int row=0;row<2;++row)for(int column=0;column<2;++column){QImage image(sizes[row*2+column],QImage::Format_Grayscale8);image.fill(30+row*20+column);const QString path=directory.filePath(QString("tile_%1_%2.bmp").arg(row).arg(column));QVERIFY(image.save(path,"BMP"));paths<<path;}
+    MainWindow window;window.show();QMimeData mime;for(const auto& path:paths)mime.setUrls(mime.urls()+QList<QUrl>{QUrl::fromLocalFile(path)});
+    QDragEnterEvent drag(QPoint(20,20),Qt::CopyAction,&mime,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(&window,&drag);QVERIFY(drag.isAccepted());
+    QDropEvent drop(QPointF(20,20),Qt::CopyAction,&mime,Qt::LeftButton,Qt::NoModifier);QApplication::sendEvent(&window,&drop);
+    auto* files=window.findChild<QListWidget*>(QStringLiteral("directoryImageList"));auto* merged=window.findChild<QListWidget*>(QStringLiteral("mergedImageList"));auto* info=window.findChild<QLabel*>(QStringLiteral("imageInfo"));auto* merge=window.findChild<QPushButton*>(QStringLiteral("mergeImageButton"));
+    QVERIFY(files);QVERIFY(merged);QVERIFY(info);QVERIFY(merge);QTRY_VERIFY_WITH_TIMEOUT(info->text().contains(QStringLiteral("3 × 2")),5000);
+    QTest::mouseClick(files->viewport(),Qt::LeftButton,Qt::NoModifier,files->visualItemRect(files->item(1)).center());
+    QTest::qWait(100);QVERIFY(info->text().contains(QStringLiteral("3 × 2")));
+    QTest::mouseDClick(files->viewport(),Qt::LeftButton,Qt::NoModifier,files->visualItemRect(files->item(1)).center());
+    QTRY_VERIFY_WITH_TIMEOUT(info->text().contains(QStringLiteral("4 × 2")),5000);
+
+    files->selectAll();QTRY_VERIFY_WITH_TIMEOUT(merge->isEnabled(),5000);merge->click();QTRY_COMPARE_WITH_TIMEOUT(merged->count(),1,5000);QTRY_VERIFY_WITH_TIMEOUT(info->text().contains(QStringLiteral("7 × 4")),5000);
+    files->clearSelection();files->item(0)->setSelected(true);files->item(1)->setSelected(true);merge->click();QTRY_COMPARE_WITH_TIMEOUT(merged->count(),2,5000);QTRY_VERIFY_WITH_TIMEOUT(info->text().contains(QStringLiteral("7 × 2")),5000);
+    QTest::mouseClick(merged->viewport(),Qt::LeftButton,Qt::NoModifier,merged->visualItemRect(merged->item(0)).center());
+    QTest::qWait(100);QVERIFY(info->text().contains(QStringLiteral("7 × 2")));
+    QTest::mouseDClick(merged->viewport(),Qt::LeftButton,Qt::NoModifier,merged->visualItemRect(merged->item(0)).center());
+    QTRY_VERIFY_WITH_TIMEOUT(info->text().contains(QStringLiteral("7 × 4")),5000);
+}
+
+void TestMainWindow::elementPointCloudWindowIsReused() {
+    QTemporaryDir directory;QVERIFY(directory.isValid());QImage source(4,4,QImage::Format_Grayscale8);for(int y=0;y<4;++y)for(int x=0;x<4;++x)source.setPixel(x,y,uchar((x+y)*24));
+    const QString path=directory.filePath("elements.bmp");QVERIFY(source.save(path,"BMP"));QString error;const auto document=ImageLoader::load(path,850,&error);QVERIFY2(document,qPrintable(error));
+    MainWindow window;auto* width=window.findChild<QSpinBox*>(QStringLiteral("segmentationCellWidth"));auto* height=window.findChild<QSpinBox*>(QStringLiteral("segmentationCellHeight"));auto* preview=window.findChild<QPushButton*>(QStringLiteral("manualSegmentationPreviewButton"));auto* imageView=window.findChild<LargeImageView*>();
+    QVERIFY(width);QVERIFY(height);QVERIFY(preview);QVERIFY(imageView);QVERIFY(QMetaObject::invokeMethod(&window,"acceptDocument",Qt::DirectConnection,Q_ARG(ImageDocumentPtr,document)));width->setValue(2);height->setValue(2);preview->click();
+    QVERIFY(QMetaObject::invokeMethod(imageView,"segmentationCellActivated",Qt::DirectConnection,Q_ARG(int,0),Q_ARG(int,1)));
+    auto* elementWindow=window.findChild<ElementPointCloudWindow*>(QStringLiteral("elementPointCloudWindow"));QVERIFY(elementWindow);QVERIFY(elementWindow->isVisible());
+    QWindow* elementRenderWindow=nullptr;
+    if(elementWindow->isVulkanAvailable()){QTRY_VERIFY_WITH_TIMEOUT(elementWindow->document()!=nullptr,5000);QCOMPARE(elementWindow->document()->source->metadata.width,qint64(2));QCOMPARE(elementWindow->document()->source->metadata.height,qint64(2));QVERIFY(elementWindow->document()->highestPoint.has_value());QVERIFY(elementWindow->document()->lowestPoint.has_value());for(QWindow* candidate:QGuiApplication::allWindows())if(candidate->objectName()==QStringLiteral("pointCloudVulkanWindow")&&candidate->isVisible()){elementRenderWindow=candidate;break;}QVERIFY(elementRenderWindow);const QPoint renderCenter(elementRenderWindow->width()/2,elementRenderWindow->height()/2);QTest::mousePress(elementRenderWindow,Qt::LeftButton,Qt::NoModifier,renderCenter);elementWindow->close();QTRY_VERIFY(!elementWindow->isVisible());}
+    QVERIFY(QMetaObject::invokeMethod(imageView,"segmentationCellActivated",Qt::DirectConnection,Q_ARG(int,1),Q_ARG(int,0)));QCOMPARE(window.findChildren<ElementPointCloudWindow*>().size(),1);QTRY_VERIFY(elementWindow->isVisible());
+    if(elementRenderWindow)QTest::mouseRelease(elementRenderWindow,Qt::LeftButton,Qt::NoModifier,QPoint(elementRenderWindow->width()/2,elementRenderWindow->height()/2));
+    QVERIFY(QMetaObject::invokeMethod(&window,"acceptDocument",Qt::DirectConnection,Q_ARG(ImageDocumentPtr,document)));QVERIFY(!elementWindow->isVisible());
 }
 
 void TestMainWindow::denseJobPointCanBeSelectedAfterOrbit() {

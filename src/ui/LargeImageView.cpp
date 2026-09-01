@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <optional>
+#include <utility>
 
 namespace {
 constexpr int kTilePixels = 256;
@@ -34,10 +35,13 @@ LargeImageView::LargeImageView(QWidget* parent) : QWidget(parent) {
     setMouseTracking(true);
     setFocusPolicy(Qt::StrongFocus);
     setAutoFillBackground(false);
+    tileRequestToken_ = std::make_shared<CancellationToken>();
 }
 
 void LargeImageView::setDocument(const ImageDocumentPtr& document) {
-    document_ = document; cache_.clear(); pending_.clear(); failedTiles_.clear(); showGrid_ = false;
+    if (tileRequestToken_) tileRequestToken_->cancel();
+    tileRequestToken_ = std::make_shared<CancellationToken>();
+    document_ = document; cache_.clear(); pending_.clear(); failedTiles_.clear(); visibleTileKeys_.clear(); showGrid_ = false;
     probeCache_ = {}; probeCacheOrigin_ = {-1, -1}; hoverPixel_ = {-1, -1}; probePending_ = false; ++probeRequestSerial_;
     const bool hadFixedPoints = !fixedGrayPoints_.isEmpty();
     fixedGrayPoints_.clear(); selectedFixedGrayPointId_ = 0;
@@ -117,6 +121,7 @@ void LargeImageView::requestTile(const QString& key, int level, int tx, int ty, 
     if (!document_ || pending_.contains(key) || failedTiles_.contains(key)) return;
     pending_.insert(key);
     const auto doc = document_; const quint64 generation = doc->generation;
+    const auto token = tileRequestToken_;
     const double scale = std::pow(2.0, -level);
     auto* watcher = new QFutureWatcher<QPair<QImage,QString>>(this);
     connect(watcher, &QFutureWatcher<QPair<QImage,QString>>::finished, this, [this, watcher, key, generation] {
@@ -130,12 +135,13 @@ void LargeImageView::requestTile(const QString& key, int level, int tx, int ty, 
             failedTiles_.insert(key, message);
             Q_EMIT tileError(message);
         }
+        emitTileProgress();
         update();
     });
-    watcher->setFuture(QtConcurrent::run([doc, tx, ty, sourceTile, scale] {
+    watcher->setFuture(QtConcurrent::run([doc, token, tx, ty, sourceTile, scale] {
         QString error;
         QImage image = VipsSupport::renderRegion(doc, qint64(tx)*sourceTile, qint64(ty)*sourceTile,
-                                                 sourceTile, sourceTile, scale, &error);
+                                                 sourceTile, sourceTile, scale, &error, token);
         return qMakePair(image,error);
     }));
 }
@@ -157,26 +163,27 @@ void LargeImageView::paintEvent(QPaintEvent*) {
     const double bottomImage = std::min(double(document_->metadata.height), (height()-offset_.y())/zoom_);
     const int tx0=std::max(0,int(std::floor(leftImage/sourceTile))), ty0=std::max(0,int(std::floor(topImage/sourceTile)));
     const int tx1=std::max(tx0,int(std::ceil(rightImage/sourceTile))), ty1=std::max(ty0,int(std::ceil(bottomImage/sourceTile)));
-    qint64 total=0,completed=0;
+    QSet<QString> visibleTileKeys;
     for(int ty=ty0;ty<ty1;++ty) for(int tx=tx0;tx<tx1;++tx) {
-        ++total; const QString key=tileKey(level,tx,ty);
+        const QString key=tileKey(level,tx,ty);
         const qint64 sourceX = qint64(tx) * sourceTile;
         const qint64 sourceY = qint64(ty) * sourceTile;
         const qint64 actualSourceWidth = std::min<qint64>(sourceTile, document_->metadata.width - sourceX);
         const qint64 actualSourceHeight = std::min<qint64>(sourceTile, document_->metadata.height - sourceY);
         if (actualSourceWidth <= 0 || actualSourceHeight <= 0) continue;
+        visibleTileKeys.insert(key);
         const QRectF target(offset_.x()+tx*targetTile, offset_.y()+ty*targetTile,
                             actualSourceWidth*zoom_, actualSourceHeight*zoom_);
-        if(QImage* image=cache_.object(key)) { p.drawImage(target,*image); ++completed; }
+        if(QImage* image=cache_.object(key)) { p.drawImage(target,*image); }
         else if (failedTiles_.contains(key)) {
             p.fillRect(target, QColor(70, 42, 42));
             p.setPen(QPen(QColor(220, 110, 110), 1));
             p.drawLine(target.topLeft(), target.bottomRight());
             p.drawLine(target.topRight(), target.bottomLeft());
-            ++completed;
         } else { p.fillRect(target,QColor(55,58,61)); requestTile(key,level,tx,ty,sourceTile); }
     }
-    Q_EMIT tileProgress(QStringLiteral("加载可视图块"),completed,total);
+    visibleTileKeys_=std::move(visibleTileKeys);
+    emitTileProgress();
 
     if(showGrid_) {
         p.save();
@@ -246,6 +253,17 @@ void LargeImageView::paintEvent(QPaintEvent*) {
         p.restore();
     }
     drawFixedGrayPoints(p);
+}
+
+void LargeImageView::emitTileProgress() {
+    if (!document_ || visibleTileKeys_.isEmpty()) return;
+    qint64 completed = 0;
+    qint64 failed = 0;
+    for (const QString& key : std::as_const(visibleTileKeys_)) {
+        if (cache_.contains(key)) ++completed;
+        else if (failedTiles_.contains(key)) ++failed;
+    }
+    Q_EMIT tileProgress(document_->generation, completed, failed, visibleTileKeys_.size());
 }
 
 void LargeImageView::resizeEvent(QResizeEvent*) { update(); }
@@ -512,6 +530,23 @@ void LargeImageView::mouseReleaseEvent(QMouseEvent* e) {
     e->accept();
 }
 
+void LargeImageView::mouseDoubleClickEvent(QMouseEvent* event) {
+    if (event->button() != Qt::LeftButton || event->modifiers() != Qt::NoModifier) {
+        QWidget::mouseDoubleClickEvent(event);
+        return;
+    }
+    const QPoint cell = cellAt(event->pos());
+    if (cell.x() < 0 || cell.y() < 0) {
+        event->ignore();
+        return;
+    }
+    selectedCell_ = cell;
+    Q_EMIT segmentationCellSelected(cell.y(), cell.x());
+    Q_EMIT segmentationCellActivated(cell.y(), cell.x());
+    update();
+    event->accept();
+}
+
 void LargeImageView::keyPressEvent(QKeyEvent* event) {
     if ((event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) &&
         selectedFixedGrayPointId_ != 0) {
@@ -522,19 +557,24 @@ void LargeImageView::keyPressEvent(QKeyEvent* event) {
     QWidget::keyPressEvent(event);
 }
 
-void LargeImageView::selectCellAt(const QPoint& viewportPosition) {
-    if(!document_||!showGrid_||zoom_<=0.0){clearSelectedCell();update();return;}
+QPoint LargeImageView::cellAt(const QPoint& viewportPosition) const {
+    if(!document_||!showGrid_||zoom_<=0.0)return {-1,-1};
     const QPointF imagePosition=(QPointF(viewportPosition)-offset_)/zoom_;
     if(imagePosition.x()<0.0||imagePosition.y()<0.0||
        imagePosition.x()>=document_->metadata.width||imagePosition.y()>=document_->metadata.height){
-        clearSelectedCell();update();return;
+        return {-1,-1};
     }
     const int column=int(std::floor(imagePosition.x()/segmentation_.settings.cellWidth));
     const int row=int(std::floor(imagePosition.y()/segmentation_.settings.cellHeight));
     const ImageRegion region=segmentationCellRegion(
         segmentation_,document_->metadata.width,document_->metadata.height,row,column);
-    if(!region.isValid()){clearSelectedCell();update();return;}
-    selectedCell_={column,row};Q_EMIT segmentationCellSelected(row,column);update();
+    return region.isValid()?QPoint(column,row):QPoint(-1,-1);
+}
+
+void LargeImageView::selectCellAt(const QPoint& viewportPosition) {
+    const QPoint cell=cellAt(viewportPosition);
+    if(cell.x()<0||cell.y()<0){clearSelectedCell();update();return;}
+    selectedCell_=cell;Q_EMIT segmentationCellSelected(cell.y(),cell.x());update();
 }
 
 void LargeImageView::clearSelectedCell() {

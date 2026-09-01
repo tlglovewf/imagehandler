@@ -5,6 +5,8 @@
 #include "imaging/PointCloudMath.h"
 
 #include <QCheckBox>
+#include <QElapsedTimer>
+#include <QEvent>
 #include <QFile>
 #include <QFocusEvent>
 #include <QFutureWatcher>
@@ -18,6 +20,7 @@
 #include <QPushButton>
 #include <QShortcut>
 #include <QStyleHints>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 #include <QtConcurrent/QtConcurrentRun>
@@ -99,13 +102,19 @@ private:
 
 class CloudVulkanWindow final : public QVulkanWindow {
 public:
-    CloudVulkanWindow() { camera_.setElevationLimits(-89.0F, 89.0F); }
+    CloudVulkanWindow() {
+        camera_.setContinuousOrbitEnabled(true);
+        movementTimer_.setInterval(16);
+        connect(&movementTimer_, &QTimer::timeout, this, [this] { tickMovement(); });
+    }
+    ~CloudVulkanWindow() override { cancelInteraction(); }
     QVulkanWindowRenderer* createRenderer() override {
         renderer_ = new CloudVulkanRenderer(this);
         return renderer_;
     }
 
     void setDocument(const PointCloudDocumentPtr& document) {
+        cancelInteraction();
         document_ = document;
         if (document_ && document_->source) {
             const float width = static_cast<float>(std::max<qint64>(0, document_->source->metadata.width - 1)) *
@@ -174,10 +183,58 @@ public:
         }
         add({x0,y0,z0},{x1,y0,z0},{1.0F,0.25F,0.25F});
         add({x0,y0,z0},{x0,y1,z0},{0.25F,1.0F,0.35F});
-        add({x0,y0,z0},{x0,y0,z1},{0.25F,0.55F,1.0F});
+        const QVector3D zColor(0.25F,0.55F,1.0F);
+        add({x0,y0,z0},{x0,y0,z1},zColor);
         const QMatrix4x4 mvp=viewProjection();QPointF xScreen,yScreen;
         if(JobPreviewMath::project({x1,y0,z0},mvp,QSizeF(width(),height()),&xScreen))appendOutlinedText(result,xScreen+QPointF(6,-14),QStringLiteral("X MAX %1").arg(PointCloudMath::formatAxisMaximum(PointCloudMath::axisMaximum(document_->source->metadata.width,document_->settings.pixelScale))),{1.0F,0.25F,0.25F});
         if(JobPreviewMath::project({x0,y1,z0},mvp,QSizeF(width(),height()),&yScreen))appendOutlinedText(result,yScreen+QPointF(6,-14),QStringLiteral("Y MAX %1").arg(PointCloudMath::formatAxisMaximum(PointCloudMath::axisMaximum(document_->source->metadata.height,document_->settings.pixelScale))),{0.25F,1.0F,0.35F});
+
+        QPointF zBaseScreen, zTopScreen;
+        const bool zAxisProjected =
+            JobPreviewMath::project({x0,y0,z0},mvp,QSizeF(width(),height()),&zBaseScreen) &&
+            JobPreviewMath::project({x0,y0,z1},mvp,QSizeF(width(),height()),&zTopScreen);
+        QPointF tickDirection(1.0, 0.0);
+        if (zAxisProjected) {
+            const QPointF axisDirection = zTopScreen - zBaseScreen;
+            const double axisLength = std::hypot(axisDirection.x(), axisDirection.y());
+            if (axisLength > 0.001) {
+                tickDirection = QPointF(-axisDirection.y() / axisLength,
+                                        axisDirection.x() / axisLength);
+            }
+        }
+        const auto appendExtremumGuide = [&](const std::optional<PointCloudExtremum>& extremum,
+                                             const QString& prefix, const QVector3D& color,
+                                             double labelOffsetY) {
+            if (!extremum) return;
+            const float scale = static_cast<float>(document_->settings.pixelScale);
+            const double heightValue = PointCloudMath::heightForNormalized(
+                extremum->normalizedGray, document_->settings);
+            const QVector3D point(float(extremum->pixelX) * scale - origin_.x(),
+                                  float(extremum->pixelY) * scale - origin_.y(),
+                                  static_cast<float>(heightValue) - origin_.z());
+            const QVector3D intersection(x0, y0, point.z());
+            QPointF pointScreen, intersectionScreen;
+            if (!JobPreviewMath::project(point, mvp, QSizeF(width(),height()), &pointScreen) ||
+                !JobPreviewMath::project(intersection, mvp, QSizeF(width(),height()),
+                                         &intersectionScreen)) {
+                return;
+            }
+            appendDashedOverlayLine(result, pointScreen, intersectionScreen, color);
+            appendOverlayLine(result, intersectionScreen - tickDirection * 5.0,
+                              intersectionScreen + tickDirection * 5.0, color);
+            const QString text = QStringLiteral("%1 %2").arg(
+                prefix, PointCloudMath::formatAxisMaximum(heightValue));
+            QPointF anchor = intersectionScreen + QPointF(8.0, labelOffsetY);
+            const double maximumX = std::max(2.0, double(width()) - text.size() * 8.0 - 2.0);
+            const double maximumY = std::max(2.0, double(height()) - 12.0);
+            anchor.setX(std::clamp(anchor.x(), 2.0, maximumX));
+            anchor.setY(std::clamp(anchor.y(), 2.0, maximumY));
+            appendOutlinedText(result, anchor, text, color);
+        };
+        appendExtremumGuide(document_->highestPoint, QStringLiteral("Z MAX"),
+                            {0.20F,0.90F,1.0F}, -16.0);
+        appendExtremumGuide(document_->lowestPoint, QStringLiteral("Z MIN"),
+                            {1.0F,0.72F,0.20F}, 6.0);
         return result;
     }
 
@@ -186,8 +243,9 @@ public:
 protected:
     void mousePressEvent(QMouseEvent* event) override {
         if (event->button()!=Qt::LeftButton && event->button()!=Qt::MiddleButton && event->button()!=Qt::RightButton) return;
+        clearPointerInteraction();
         pressedButton_=event->button(); lastPosition_=event->position(); requestActivate();
-        setMouseGrabEnabled(true); event->accept();
+        mouseGrabActive_=setMouseGrabEnabled(true); event->accept();
     }
     void mouseMoveEvent(QMouseEvent* event) override {
         if (pressedButton_ == Qt::NoButton) return;
@@ -202,11 +260,22 @@ protected:
         lastPosition_=event->position(); notifyViewChanged(); requestUpdate(); event->accept();
     }
     void mouseReleaseEvent(QMouseEvent* event) override {
-        if(event->button()!=pressedButton_)return; clearPointerInteraction();event->accept();
+        if(event->button()!=pressedButton_ && event->buttons().testFlag(pressedButton_))return;
+        clearPointerInteraction();event->accept();
     }
     void focusOutEvent(QFocusEvent* event) override {
-        clearPointerInteraction();
+        cancelInteraction();
         QVulkanWindow::focusOutEvent(event);
+    }
+    bool event(QEvent* event) override {
+        if (event->type() == QEvent::UngrabMouse) {
+            mouseGrabActive_ = false;
+            pressedButton_ = Qt::NoButton;
+        } else if (event->type() == QEvent::Hide ||
+                   event->type() == QEvent::WindowDeactivate) {
+            cancelInteraction();
+        }
+        return QVulkanWindow::event(event);
     }
     void keyPressEvent(QKeyEvent* event) override {
         if (event->key() == Qt::Key_Space) {
@@ -214,7 +283,27 @@ protected:
             event->accept();
             return;
         }
+        if (isMovementKey(event->key()) || event->key() == Qt::Key_Shift) {
+            if (!event->isAutoRepeat()) {
+                activeKeys_.insert(event->key());
+                if (!movementTimer_.isActive()) {
+                    movementClock_.restart();
+                    movementTimer_.start();
+                }
+            }
+            event->accept();
+            return;
+        }
         QVulkanWindow::keyPressEvent(event);
+    }
+    void keyReleaseEvent(QKeyEvent* event) override {
+        if (isMovementKey(event->key()) || event->key() == Qt::Key_Shift) {
+            if (!event->isAutoRepeat()) activeKeys_.remove(event->key());
+            if (activeKeys_.isEmpty()) movementTimer_.stop();
+            event->accept();
+            return;
+        }
+        QVulkanWindow::keyReleaseEvent(event);
     }
     void wheelEvent(QWheelEvent* event) override {
         camera_.zoomBy(std::exp(-float(event->angleDelta().y())*0.0012F));
@@ -237,14 +326,45 @@ private:
                     scale*std::max(1,width()), scale*std::max(1,height()));
     }
     void clearPointerInteraction() {
-        const bool hadPointerInteraction = pressedButton_ != Qt::NoButton;
         pressedButton_ = Qt::NoButton;
-        if (hadPointerInteraction) setMouseGrabEnabled(false);
+        if (mouseGrabActive_) {
+            mouseGrabActive_ = false;
+            setMouseGrabEnabled(false);
+        }
+    }
+    void cancelInteraction() {
+        clearPointerInteraction();
+        activeKeys_.clear();
+        movementTimer_.stop();
+    }
+
+    static bool isMovementKey(int key) {
+        return key == Qt::Key_W || key == Qt::Key_A || key == Qt::Key_S ||
+               key == Qt::Key_D || key == Qt::Key_Q || key == Qt::Key_E;
+    }
+
+    void tickMovement() {
+        const float deltaSeconds = std::clamp(movementClock_.restart() / 1000.0F, 0.0F, 0.05F);
+        if (activeKeys_.isEmpty() || deltaSeconds <= 0.0F) return;
+        float speed = std::max(camera_.sceneRadius() * 0.05F, camera_.pose().distance * 0.6F);
+        if (activeKeys_.contains(Qt::Key_Shift)) speed *= 4.0F;
+        QVector3D movement;
+        if (activeKeys_.contains(Qt::Key_W)) movement += camera_.groundForward();
+        if (activeKeys_.contains(Qt::Key_S)) movement -= camera_.groundForward();
+        if (activeKeys_.contains(Qt::Key_A)) movement -= camera_.right();
+        if (activeKeys_.contains(Qt::Key_D)) movement += camera_.right();
+        if (activeKeys_.contains(Qt::Key_Q)) movement.setZ(movement.z() - 1.0F);
+        if (activeKeys_.contains(Qt::Key_E)) movement.setZ(movement.z() + 1.0F);
+        if (movement.isNull()) return;
+        camera_.translate(movement.normalized() * speed * deltaSeconds);
+        notifyViewChanged();
+        requestUpdate();
     }
 
     QVector2D pixelToNdc(const QPointF& point) const{return JobPreviewMath::screenToVulkanNdc(point,QSizeF(width(),height()));}
     void appendOverlayLine(std::vector<CloudLineVertex>& lines,const QPointF& a,const QPointF& b,const QVector3D& color)const{const QVector2D na=pixelToNdc(a),nb=pixelToNdc(b);lines.push_back({na.x(),na.y(),0.0F,color.x(),color.y(),color.z(),1.0F});lines.push_back({nb.x(),nb.y(),0.0F,color.x(),color.y(),color.z(),1.0F});}
-    void appendGlyph(std::vector<CloudLineVertex>& lines,float x,float y,QChar glyph,const QVector3D& color)const{static constexpr unsigned char masks[10]={0x3F,0x06,0x5B,0x4F,0x66,0x6D,0x7D,0x07,0x7F,0x6F};const float w=6.0F,h=10.0F;const QPointF points[6]={{x,y},{x+w,y},{x,y+h*0.5F},{x+w,y+h*0.5F},{x,y+h},{x+w,y+h}};const int pairs[7][2]={{0,1},{1,3},{3,5},{4,5},{2,4},{0,2},{2,3}};unsigned char mask=0;if(glyph.isDigit())mask=masks[glyph.digitValue()];else if(glyph==QLatin1Char('-'))mask=0x40;if(mask){for(int segment=0;segment<7;++segment)if(mask&(1U<<segment))appendOverlayLine(lines,points[pairs[segment][0]],points[pairs[segment][1]],color);}else if(glyph==QLatin1Char('.'))appendOverlayLine(lines,{x+2,y+h},{x+3,y+h},color);else if(glyph==QLatin1Char('X')){appendOverlayLine(lines,{x,y},{x+w,y+h},color);appendOverlayLine(lines,{x+w,y},{x,y+h},color);}else if(glyph==QLatin1Char('Y')){appendOverlayLine(lines,{x,y},{x+w*0.5F,y+h*0.5F},color);appendOverlayLine(lines,{x+w,y},{x+w*0.5F,y+h*0.5F},color);appendOverlayLine(lines,{x+w*0.5F,y+h*0.5F},{x+w*0.5F,y+h},color);}else if(glyph==QLatin1Char('M')){appendOverlayLine(lines,{x,y+h},{x,y},color);appendOverlayLine(lines,{x,y},{x+w*0.5F,y+h*0.5F},color);appendOverlayLine(lines,{x+w*0.5F,y+h*0.5F},{x+w,y},color);appendOverlayLine(lines,{x+w,y},{x+w,y+h},color);}else if(glyph==QLatin1Char('A')){appendOverlayLine(lines,{x,y+h},{x+w*0.5F,y},color);appendOverlayLine(lines,{x+w*0.5F,y},{x+w,y+h},color);appendOverlayLine(lines,{x+1,y+h*0.55F},{x+w-1,y+h*0.55F},color);}}
+    void appendDashedOverlayLine(std::vector<CloudLineVertex>& lines,const QPointF& a,const QPointF& b,const QVector3D& color)const{const QPointF delta=b-a;const double length=std::hypot(delta.x(),delta.y());if(length<=0.001)return;constexpr double dash=8.0,gap=5.0;for(double start=0.0;start<length;start+=dash+gap){const double end=std::min(start+dash,length);appendOverlayLine(lines,a+delta*(start/length),a+delta*(end/length),color);}}
+    void appendGlyph(std::vector<CloudLineVertex>& lines,float x,float y,QChar glyph,const QVector3D& color)const{static constexpr unsigned char masks[10]={0x3F,0x06,0x5B,0x4F,0x66,0x6D,0x7D,0x07,0x7F,0x6F};const float w=6.0F,h=10.0F;const QPointF points[6]={{x,y},{x+w,y},{x,y+h*0.5F},{x+w,y+h*0.5F},{x,y+h},{x+w,y+h}};const int pairs[7][2]={{0,1},{1,3},{3,5},{4,5},{2,4},{0,2},{2,3}};unsigned char mask=0;if(glyph.isDigit())mask=masks[glyph.digitValue()];else if(glyph==QLatin1Char('-'))mask=0x40;if(mask){for(int segment=0;segment<7;++segment)if(mask&(1U<<segment))appendOverlayLine(lines,points[pairs[segment][0]],points[pairs[segment][1]],color);}else if(glyph==QLatin1Char('.'))appendOverlayLine(lines,{x+2,y+h},{x+3,y+h},color);else if(glyph==QLatin1Char('X')){appendOverlayLine(lines,{x,y},{x+w,y+h},color);appendOverlayLine(lines,{x+w,y},{x,y+h},color);}else if(glyph==QLatin1Char('Y')){appendOverlayLine(lines,{x,y},{x+w*0.5F,y+h*0.5F},color);appendOverlayLine(lines,{x+w,y},{x+w*0.5F,y+h*0.5F},color);appendOverlayLine(lines,{x+w*0.5F,y+h*0.5F},{x+w*0.5F,y+h},color);}else if(glyph==QLatin1Char('Z')){appendOverlayLine(lines,{x,y},{x+w,y},color);appendOverlayLine(lines,{x+w,y},{x,y+h},color);appendOverlayLine(lines,{x,y+h},{x+w,y+h},color);}else if(glyph==QLatin1Char('I')){appendOverlayLine(lines,{x,y},{x+w,y},color);appendOverlayLine(lines,{x+w*0.5F,y},{x+w*0.5F,y+h},color);appendOverlayLine(lines,{x,y+h},{x+w,y+h},color);}else if(glyph==QLatin1Char('N')){appendOverlayLine(lines,{x,y+h},{x,y},color);appendOverlayLine(lines,{x,y},{x+w,y+h},color);appendOverlayLine(lines,{x+w,y+h},{x+w,y},color);}else if(glyph==QLatin1Char('M')){appendOverlayLine(lines,{x,y+h},{x,y},color);appendOverlayLine(lines,{x,y},{x+w*0.5F,y+h*0.5F},color);appendOverlayLine(lines,{x+w*0.5F,y+h*0.5F},{x+w,y},color);appendOverlayLine(lines,{x+w,y},{x+w,y+h},color);}else if(glyph==QLatin1Char('A')){appendOverlayLine(lines,{x,y+h},{x+w*0.5F,y},color);appendOverlayLine(lines,{x+w*0.5F,y},{x+w,y+h},color);appendOverlayLine(lines,{x+1,y+h*0.55F},{x+w-1,y+h*0.55F},color);}}
     void appendText(std::vector<CloudLineVertex>& lines,const QPointF& anchor,const QString& text,const QVector3D& color)const{float x=float(anchor.x());const float y=float(anchor.y());for(QChar glyph:text){appendGlyph(lines,x,y,glyph,color);x+=8.0F;}}
     void appendOutlinedText(std::vector<CloudLineVertex>& lines,const QPointF& anchor,const QString& text,const QVector3D& color)const{const QVector3D outline(0.96F,0.96F,0.96F);static constexpr QPointF offsets[]={{-1.5,0},{1.5,0},{0,-1.5},{0,1.5}};for(const QPointF& offset:offsets)appendText(lines,anchor+offset,text,outline);appendText(lines,anchor,text,color);}
 
@@ -257,8 +377,12 @@ private:
     bool verticesDirty_ = true;
     bool linesDirty_ = true;
     bool guidesVisible_ = true;
+    bool mouseGrabActive_ = false;
     Qt::MouseButton pressedButton_ = Qt::NoButton;
     QPointF lastPosition_;
+    QSet<int> activeKeys_;
+    QTimer movementTimer_;
+    QElapsedTimer movementClock_;
 };
 
 bool CloudVulkanRenderer::createBuffer(VkDeviceSize size,VkBufferUsageFlags usage,Buffer* buffer){
@@ -379,7 +503,7 @@ private:
 };
 
 PointCloudWidget::PointCloudWidget(QWidget* parent):QWidget(parent){
-    setObjectName(QStringLiteral("pointCloudWidget"));auto* root=new QVBoxLayout(this);root->setContentsMargins(0,0,0,0);root->setSpacing(4);auto* tools=new QHBoxLayout;fitButton_=new QPushButton(QStringLiteral("视角复位 (Space)"));fitButton_->setObjectName(QStringLiteral("pointCloudFitAllButton"));guidesCheck_=new QCheckBox(QStringLiteral("坐标轴与网格"));guidesCheck_->setObjectName(QStringLiteral("pointCloudGuidesCheck"));guidesCheck_->setChecked(true);statusLabel_=new QLabel(QStringLiteral("未生成 PointCloud"));statusLabel_->setObjectName(QStringLiteral("pointCloudStatus"));tools->addWidget(fitButton_);tools->addWidget(guidesCheck_);tools->addStretch();tools->addWidget(statusLabel_);root->addLayout(tools);backend_=new Backend(this,this);if(backend_->available())root->addWidget(backend_->widget(),1);else{auto* error=new QLabel(backend_->error());error->setObjectName(QStringLiteral("pointCloudVulkanError"));error->setAlignment(Qt::AlignCenter);error->setWordWrap(true);error->setStyleSheet(QStringLiteral("QLabel { color: #ff8a80; background: #25282b; padding: 24px; }"));root->addWidget(error,1);}auto* resetShortcut=new QShortcut(QKeySequence(Qt::Key_Space),this);resetShortcut->setObjectName(QStringLiteral("pointCloudResetShortcut"));resetShortcut->setContext(Qt::WidgetWithChildrenShortcut);connect(resetShortcut,&QShortcut::activated,this,&PointCloudWidget::fitAll);connect(fitButton_,&QPushButton::clicked,this,&PointCloudWidget::fitAll);connect(guidesCheck_,&QCheckBox::toggled,this,[this](bool visible){backend_->setGuides(visible);});fitButton_->setEnabled(backend_->available());guidesCheck_->setEnabled(backend_->available());
+    setObjectName(QStringLiteral("pointCloudWidget"));auto* root=new QVBoxLayout(this);root->setContentsMargins(0,0,0,0);root->setSpacing(4);auto* tools=new QHBoxLayout;fitButton_=new QPushButton(QStringLiteral("视角复位 (Space)"));fitButton_->setObjectName(QStringLiteral("pointCloudFitAllButton"));guidesCheck_=new QCheckBox(QStringLiteral("坐标轴与网格"));guidesCheck_->setObjectName(QStringLiteral("pointCloudGuidesCheck"));guidesCheck_->setChecked(true);auto* roamHelp=new QLabel(QStringLiteral("漫游 W/A/S/D · 升降 Q/E · Shift 加速"));roamHelp->setObjectName(QStringLiteral("pointCloudRoamHelp"));statusLabel_=new QLabel(QStringLiteral("未生成 PointCloud"));statusLabel_->setObjectName(QStringLiteral("pointCloudStatus"));tools->addWidget(fitButton_);tools->addWidget(guidesCheck_);tools->addWidget(roamHelp);tools->addStretch();tools->addWidget(statusLabel_);root->addLayout(tools);backend_=new Backend(this,this);if(backend_->available())root->addWidget(backend_->widget(),1);else{auto* error=new QLabel(backend_->error());error->setObjectName(QStringLiteral("pointCloudVulkanError"));error->setAlignment(Qt::AlignCenter);error->setWordWrap(true);error->setStyleSheet(QStringLiteral("QLabel { color: #ff8a80; background: #25282b; padding: 24px; }"));root->addWidget(error,1);}auto* resetShortcut=new QShortcut(QKeySequence(Qt::Key_Space),this);resetShortcut->setObjectName(QStringLiteral("pointCloudResetShortcut"));resetShortcut->setContext(Qt::WidgetWithChildrenShortcut);connect(resetShortcut,&QShortcut::activated,this,&PointCloudWidget::fitAll);connect(fitButton_,&QPushButton::clicked,this,&PointCloudWidget::fitAll);connect(guidesCheck_,&QCheckBox::toggled,this,[this](bool visible){backend_->setGuides(visible);});fitButton_->setEnabled(backend_->available());guidesCheck_->setEnabled(backend_->available());roamHelp->setEnabled(backend_->available());
 }
 PointCloudWidget::~PointCloudWidget(){if(requestToken_)requestToken_->cancel();delete backend_;}
 bool PointCloudWidget::isVulkanAvailable()const noexcept{return backend_&&backend_->available();}

@@ -37,6 +37,8 @@ private Q_SLOTS:
     void gray16PngImportPreviewAndExport();
     void gray16PatternDetection();
     void pointCloudCoordinatesAndLodAverage();
+    void pointCloudRegionPreservesLocalSamples();
+    void pointCloudRegionExtrema();
     void pointCloudRootBudget();
     void pointCloudMappingOptions();
     void pointCloudImageFromEnvironment();
@@ -48,6 +50,7 @@ private Q_SLOTS:
     void mosaicAllowsDifferentTileSizesAndPrefixes();
     void mosaicRejectsDifferentBitDepths();
     void mosaicMissingTilesRequireConfirmation();
+    void mosaicProgressIsCumulative();
     void mergedExporterWritesGray8();
     void mergedExporterConvertsColorAndIsAtomic();
     void mergedExporterRejectsClassicBmpOverflow();
@@ -102,6 +105,105 @@ void TestCore::pointCloudCoordinatesAndLodAverage() {
     QCOMPARE(edgeLod->vertices.size(),size_t(4));QCOMPARE(edgeLod->vertices.back().pixelX,2.0F);QCOMPARE(edgeLod->vertices.back().pixelY,2.0F);QCOMPARE(edgeLod->vertices.back().normalizedGray,1.0F);
 }
 
+void TestCore::pointCloudRegionPreservesLocalSamples() {
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QImage source(5,4,QImage::Format_Grayscale16);
+    for(int y=0;y<source.height();++y){auto* row=reinterpret_cast<quint16*>(source.scanLine(y));for(int x=0;x<source.width();++x)row[x]=quint16((y*source.width()+x)*3000);}
+    const QString path=directory.filePath("region16.png");QVERIFY(source.save(path,"PNG"));
+    QString error;const auto image=ImageLoader::load(path,920,&error);QVERIFY2(image,qPrintable(error));
+    const ImageRegion region{3,2,2,2};
+    const PointCloudSettings settings{0.5,20.0,false,QColor(10,20,30),QColor(200,210,220)};
+    const auto cloud=PointCloudBuilder::buildRegion(image,region,settings,921,
+        std::make_shared<CancellationToken>(),{},&error);
+    QVERIFY2(cloud,qPrintable(error));QCOMPARE(cloud->source->metadata.width,qint64(2));QCOMPARE(cloud->source->metadata.height,qint64(2));
+    QCOMPARE(cloud->settings.pixelScale,0.5);QCOMPARE(cloud->settings.maximumHeight,20.0);QVERIFY(!cloud->settings.invertHeight);
+    const auto& vertices=cloud->rootTiles.front()->vertices;QCOMPARE(vertices.size(),size_t(4));
+    QCOMPARE(vertices.front().pixelX,0.0F);QCOMPARE(vertices.front().pixelY,0.0F);QCOMPARE(vertices.back().pixelX,1.0F);QCOMPARE(vertices.back().pixelY,1.0F);
+    const float expected=float((2*5+3)*3000)/65535.0F;QVERIFY(std::abs(vertices.front().normalizedGray-expected)<0.00001F);
+
+    QImage binary(3,2,QImage::Format_Mono);binary.setColorTable({qRgb(0,0,0),qRgb(255,255,255)});binary.fill(0);binary.setPixel(2,1,1);
+    const QString binaryPath=directory.filePath("region1.bmp");QVERIFY(binary.save(binaryPath,"BMP"));
+    const auto binaryImage=ImageLoader::load(binaryPath,922,&error);QVERIFY2(binaryImage,qPrintable(error));
+    const auto binaryCloud=PointCloudBuilder::buildRegion(binaryImage,{2,1,1,1},{},923,std::make_shared<CancellationToken>(),{},&error);
+    QVERIFY2(binaryCloud,qPrintable(error));QCOMPARE(binaryCloud->rootTiles.front()->vertices.front().normalizedGray,1.0F);
+    QVERIFY(binaryCloud->highestPoint.has_value());QVERIFY(binaryCloud->lowestPoint.has_value());
+    QCOMPARE(binaryCloud->highestPoint->pixelX,qint64(0));QCOMPARE(binaryCloud->highestPoint->pixelY,qint64(0));
+    QCOMPARE(binaryCloud->lowestPoint->pixelX,qint64(0));QCOMPARE(binaryCloud->lowestPoint->pixelY,qint64(0));
+    QCOMPARE(binaryCloud->highestPoint->normalizedGray,1.0);QCOMPARE(binaryCloud->lowestPoint->normalizedGray,1.0);
+
+    QImage gray8(2,1,QImage::Format_Grayscale8);gray8.scanLine(0)[0]=17;gray8.scanLine(0)[1]=231;
+    const QString gray8Path=directory.filePath("region8.bmp");QVERIFY(gray8.save(gray8Path,"BMP"));
+    const auto gray8Image=ImageLoader::load(gray8Path,924,&error);QVERIFY2(gray8Image,qPrintable(error));
+    const auto gray8Cloud=PointCloudBuilder::buildRegion(gray8Image,{1,0,1,1},{},925,std::make_shared<CancellationToken>(),{},&error);
+    QVERIFY2(gray8Cloud,qPrintable(error));QVERIFY(std::abs(gray8Cloud->rootTiles.front()->vertices.front().normalizedGray-231.0F/255.0F)<0.00001F);
+}
+
+void TestCore::pointCloudRegionExtrema() {
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QImage source(5,4,QImage::Format_Grayscale8);source.fill(100);
+    source.scanLine(1)[1]=40;source.scanLine(1)[2]=220;source.scanLine(1)[3]=220;
+    source.scanLine(2)[1]=40;source.scanLine(2)[2]=120;source.scanLine(2)[3]=80;
+    const QString path=directory.filePath("extrema8.bmp");QVERIFY(source.save(path,"BMP"));
+    QString error;const auto image=ImageLoader::load(path,930,&error);QVERIFY2(image,qPrintable(error));
+    PointCloudSettings settings{0.25,55.0,false};
+    std::vector<TaskProgress> updates;
+    const auto cloud=PointCloudBuilder::buildRegion(image,{1,1,3,2},settings,931,
+        std::make_shared<CancellationToken>(),
+        [&updates](const TaskProgress& value){updates.push_back(value);},&error);
+    QVERIFY2(cloud,qPrintable(error));QCOMPARE(cloud->rootLevel,0);
+    QVERIFY(cloud->highestPoint.has_value());QVERIFY(cloud->lowestPoint.has_value());
+    QCOMPARE(cloud->highestPoint->pixelX,qint64(1));QCOMPARE(cloud->highestPoint->pixelY,qint64(0));
+    QCOMPARE(cloud->lowestPoint->pixelX,qint64(0));QCOMPARE(cloud->lowestPoint->pixelY,qint64(0));
+    QVERIFY(std::abs(cloud->highestPoint->normalizedGray-220.0/255.0)<0.000001);
+    QVERIFY(std::abs(cloud->lowestPoint->normalizedGray-40.0/255.0)<0.000001);
+    QVERIFY(!updates.empty());qint64 previous=-1;
+    for(const auto& update:updates){QCOMPARE(update.total,qint64(1000));QVERIFY(update.completed>=previous);QVERIFY(update.completed<=update.total);previous=update.completed;}
+    QCOMPARE(updates.back().completed,qint64(1000));
+
+    settings.invertHeight=true;
+    const auto inverted=PointCloudBuilder::buildRegion(image,{1,1,3,2},settings,932,
+        std::make_shared<CancellationToken>(),{},&error);
+    QVERIFY2(inverted,qPrintable(error));
+    QCOMPARE(inverted->highestPoint->pixelX,qint64(0));QCOMPARE(inverted->highestPoint->pixelY,qint64(0));
+    QCOMPARE(inverted->lowestPoint->pixelX,qint64(1));QCOMPARE(inverted->lowestPoint->pixelY,qint64(0));
+
+    const auto wholeImageCloud=PointCloudBuilder::build(image,settings,933,
+        std::make_shared<CancellationToken>(),{},&error);
+    QVERIFY2(wholeImageCloud,qPrintable(error));QVERIFY(!wholeImageCloud->highestPoint.has_value());QVERIFY(!wholeImageCloud->lowestPoint.has_value());
+
+    QImage gray16(2,2,QImage::Format_Grayscale16);gray16.fill(32768);
+    reinterpret_cast<quint16*>(gray16.scanLine(0))[0]=0;
+    reinterpret_cast<quint16*>(gray16.scanLine(1))[1]=65535;
+    const QString path16=directory.filePath("extrema16.png");QVERIFY(gray16.save(path16,"PNG"));
+    const auto image16=ImageLoader::load(path16,934,&error);QVERIFY2(image16,qPrintable(error));
+    settings.invertHeight=false;
+    const auto cloud16=PointCloudBuilder::buildRegion(image16,{0,0,2,2},settings,935,
+        std::make_shared<CancellationToken>(),{},&error);
+    QVERIFY2(cloud16,qPrintable(error));
+    QCOMPARE(cloud16->highestPoint->pixelX,qint64(1));QCOMPARE(cloud16->highestPoint->pixelY,qint64(1));
+    QCOMPARE(cloud16->lowestPoint->pixelX,qint64(0));QCOMPARE(cloud16->lowestPoint->pixelY,qint64(0));
+    QCOMPARE(PointCloudMath::formatAxisMaximum(PointCloudMath::heightForNormalized(
+        cloud16->highestPoint->normalizedGray,settings)),QStringLiteral("55"));
+    QCOMPARE(PointCloudMath::formatAxisMaximum(PointCloudMath::heightForNormalized(
+        cloud16->lowestPoint->normalizedGray,settings)),QStringLiteral("0"));
+
+    QImage large(1001,1000,QImage::Format_Grayscale8);large.fill(127);
+    large.scanLine(998)[999]=0;large.scanLine(999)[1000]=255;
+    const QString largePath=directory.filePath("extrema-lod.bmp");QVERIFY(large.save(largePath,"BMP"));
+    const auto largeImage=ImageLoader::load(largePath,936,&error);QVERIFY2(largeImage,qPrintable(error));
+    const auto largeCloud=PointCloudBuilder::buildRegion(largeImage,{0,0,1001,1000},settings,937,
+        std::make_shared<CancellationToken>(),{},&error);
+    QVERIFY2(largeCloud,qPrintable(error));QVERIFY(largeCloud->rootLevel>0);
+    QCOMPARE(largeCloud->highestPoint->pixelX,qint64(1000));QCOMPARE(largeCloud->highestPoint->pixelY,qint64(999));
+    QCOMPARE(largeCloud->lowestPoint->pixelX,qint64(999));QCOMPARE(largeCloud->lowestPoint->pixelY,qint64(998));
+    QCOMPARE(largeCloud->highestPoint->normalizedGray,1.0);QCOMPARE(largeCloud->lowestPoint->normalizedGray,0.0);
+
+    auto cancelledToken=std::make_shared<CancellationToken>();error.clear();
+    const auto cancelled=PointCloudBuilder::buildRegion(largeImage,{0,0,1001,1000},settings,938,
+        cancelledToken,[cancelledToken](const TaskProgress& value){if(value.completed>=600)cancelledToken->cancel();},&error);
+    QVERIFY(!cancelled);QVERIFY(cancelledToken->isCancelled());QVERIFY(error.isEmpty());
+}
+
 void TestCore::pointCloudRootBudget() {
     ImageMetadata metadata;metadata.width=28000;metadata.height=28000;metadata.kind=PixelKind::Gray16;
     const int level=PointCloudBuilder::rootLevelFor(metadata);QVERIFY(level>0);
@@ -119,7 +221,7 @@ void TestCore::pointCloudMappingOptions() {
     const double middle16=PointCloudMath::heightForRaw(32768.0,65535.0,settings);QVERIFY(std::abs(middle16-(1.0-32768.0/65535.0)*12.5)<0.000001);
     settings.invertHeight=false;QCOMPARE(PointCloudMath::heightForNormalized(0.0,settings),0.0);QCOMPARE(PointCloudMath::heightForNormalized(1.0,settings),12.5);QCOMPARE(PointCloudMath::heightForRaw(128.0,255.0,settings),128.0/255.0*12.5);
     QCOMPARE(PointCloudMath::interpolateColor(0.0,QColor(0,0,255),QColor(0,255,0)),QColor(0,0,255));QCOMPARE(PointCloudMath::interpolateColor(1.0,QColor(0,0,255),QColor(0,255,0)),QColor(0,255,0));QCOMPARE(PointCloudMath::interpolateColor(0.5,QColor(0,0,255),QColor(0,255,0)),QColor(0,128,128));
-    QCOMPARE(PointCloudMath::axisMaximum(1,0.25),0.0);QCOMPARE(PointCloudMath::axisMaximum(4,0.25),0.75);QCOMPARE(PointCloudMath::formatAxisMaximum(6999.750000),QStringLiteral("6999.75"));
+    QCOMPARE(PointCloudMath::axisMaximum(1,0.25),0.25);QCOMPARE(PointCloudMath::axisMaximum(4,0.25),1.0);QCOMPARE(PointCloudMath::formatAxisMaximum(6999.750000),QStringLiteral("6999.75"));
     QCOMPARE(PointCloudMath::physicalDimension(220,0.25),55.0);QCOMPARE(PointCloudMath::physicalDimension(0,0.25),0.0);QCOMPARE(PointCloudMath::physicalDimension(3,0.125),0.375);
 }
 
@@ -341,6 +443,17 @@ void TestCore::mosaicMissingTilesRequireConfirmation() {
     QVERIFY2(continued.document,qPrintable(error));QCOMPARE(continued.document->metadata.width,qint64(8));QCOMPARE(continued.document->metadata.height,qint64(10));
     const QImage rendered=VipsSupport::renderRegion(continued.document,0,0,8,10,1.0,&error);QVERIFY2(!rendered.isNull(),qPrintable(error));
     QCOMPARE(rendered.constScanLine(0)[0],uchar(10));QCOMPARE(rendered.constScanLine(0)[3],uchar(255));QCOMPARE(rendered.constScanLine(3)[0],uchar(255));QCOMPARE(rendered.constScanLine(6)[0],uchar(30));QCOMPARE(rendered.constScanLine(6)[5],uchar(40));
+}
+void TestCore::mosaicProgressIsCumulative() {
+    QTemporaryDir dir;QVERIFY(dir.isValid());QStringList paths;
+    for(int column=0;column<2;++column){QImage image(2,2,QImage::Format_Grayscale8);image.fill(20+column);const QString path=dir.filePath(QString("tile_0_%1.bmp").arg(column));QVERIFY(image.save(path,"BMP"));paths<<path;}
+    std::vector<TaskProgress> updates;QString error;
+    const auto result=MosaicBuilder::build(paths,30,{},std::make_shared<CancellationToken>(),
+        [&updates](const TaskProgress& value){updates.push_back(value);},&error);
+    QVERIFY2(result.document,qPrintable(error));QVERIFY(!updates.empty());
+    qint64 previous=-1;QSet<QString> phases;
+    for(const auto& update:updates){QCOMPARE(update.total,qint64(10));QVERIFY(update.completed>=previous);QVERIFY(update.completed<=8);previous=update.completed;phases.insert(update.phase);}
+    QCOMPARE(previous,qint64(8));QCOMPARE(phases.size(),4);
 }
 void TestCore::mergedExporterWritesGray8() {
     QTemporaryDir dir;QVERIFY(dir.isValid());QImage source(2,1,QImage::Format_Mono);source.setColorTable({qRgb(0,0,0),qRgb(255,255,255)});source.setPixel(0,0,0);source.setPixel(1,0,1);

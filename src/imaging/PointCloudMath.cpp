@@ -25,8 +25,10 @@ QColor interpolateColor(double normalizedGray, const QColor& start, const QColor
 }
 
 double axisMaximum(qint64 pixelCount, double pixelScale) {
-    if (pixelCount <= 1 || !std::isfinite(pixelScale) || pixelScale <= 0.0) return 0.0;
-    return static_cast<double>(pixelCount - 1) * pixelScale;
+    // Axis labels describe the full physical extent, not the coordinate of
+    // the last pixel centre. A 220-pixel span at 0.25 units/pixel is 55.
+    if (pixelCount <= 0 || !std::isfinite(pixelScale) || pixelScale <= 0.0) return 0.0;
+    return static_cast<double>(pixelCount) * pixelScale;
 }
 
 double physicalDimension(qint64 pixelCount, double pixelScale) {

@@ -122,6 +122,7 @@ endif()
 qt_add_executable(ImageHandler WIN32
     src/app/main.cpp
     src/ui/LargeImageView.h src/ui/LargeImageView.cpp
+    src/ui/ElementPointCloudWindow.h src/ui/ElementPointCloudWindow.cpp
     src/ui/MainWindow.h src/ui/MainWindow.cpp
 )
 target_include_directories(ImageHandler PRIVATE
@@ -186,6 +187,7 @@ qt_add_executable(MainWindowTests
     tests/TestMainWindow.cpp
     src/ui/MainWindow.h src/ui/MainWindow.cpp
     src/ui/LargeImageView.h src/ui/LargeImageView.cpp
+    src/ui/ElementPointCloudWindow.h src/ui/ElementPointCloudWindow.cpp
 )
 target_include_directories(MainWindowTests PRIVATE
     "${VIPS_ROOT}/include"

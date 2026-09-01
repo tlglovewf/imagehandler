@@ -63,6 +63,8 @@ public:
     [[nodiscard]] float minimumDistance() const noexcept;
     [[nodiscard]] float maximumDistance() const noexcept;
     void setElevationLimits(float minimum, float maximum);
+    void setContinuousOrbitEnabled(bool enabled);
+    [[nodiscard]] bool continuousOrbitEnabled() const noexcept { return continuousOrbitEnabled_; }
     [[nodiscard]] float minimumElevation() const noexcept { return minimumElevation_; }
     [[nodiscard]] float maximumElevation() const noexcept { return maximumElevation_; }
 
@@ -82,4 +84,5 @@ private:
     float sceneRadius_ = 1.0F;
     float minimumElevation_ = 5.0F;
     float maximumElevation_ = 89.0F;
+    bool continuousOrbitEnabled_ = false;
 };

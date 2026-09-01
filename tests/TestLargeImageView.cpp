@@ -107,6 +107,7 @@ void TestLargeImageView::cellSelectionAndTraversalPath() {
     view.setTraversalMode(TraversalMode::SnakeZ);
     view.setTraversalPathVisible(true);
     QSignalSpy selections(&view, &LargeImageView::segmentationCellSelected);
+    QSignalSpy activations(&view, &LargeImageView::segmentationCellActivated);
 
     QTRY_VERIFY_WITH_TIMEOUT(view.grab().toImage().pixelColor(90, 60).blue() >
                              view.grab().toImage().pixelColor(90, 60).red(), 3000);
@@ -114,6 +115,7 @@ void TestLargeImageView::cellSelectionAndTraversalPath() {
     QCOMPARE(selections.count(), 1);
     QCOMPARE(selections.at(0).at(0).toInt(), 0);
     QCOMPARE(selections.at(0).at(1).toInt(), 1);
+    QCOMPARE(activations.count(), 0);
     const QColor selectedColor = view.grab().toImage().pixelColor(170, 70);
     QVERIFY(selectedColor.red() > selectedColor.blue() + 30);
 
@@ -126,6 +128,14 @@ void TestLargeImageView::cellSelectionAndTraversalPath() {
     QCOMPARE(selections.count(), 2);
     QCOMPARE(selections.at(1).at(0).toInt(), -1);
     QCOMPARE(selections.at(1).at(1).toInt(), -1);
+
+    view.setSelectedCell(1,0,true);QCoreApplication::processEvents();
+    QTest::mouseDClick(&view, Qt::LeftButton, Qt::NoModifier, view.rect().center());
+    QCOMPARE(activations.count(), 1);
+    QCOMPARE(activations.at(0).at(0).toInt(), 1);
+    QCOMPARE(activations.at(0).at(1).toInt(), 0);
+    QTest::mouseDClick(&view, Qt::LeftButton, Qt::ControlModifier, view.rect().center());
+    QCOMPARE(activations.count(), 1);
 }
 
 void TestLargeImageView::gray16PixelProbePreservesRawValue() {

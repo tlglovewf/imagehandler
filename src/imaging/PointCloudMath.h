@@ -9,6 +9,7 @@ namespace PointCloudMath {
                                   const PointCloudSettings& settings);
 [[nodiscard]] QColor interpolateColor(double normalizedGray, const QColor& start,
                                       const QColor& end);
+// Returns the physical extent/boundary shown on the axis (pixelCount * pixelScale).
 [[nodiscard]] double axisMaximum(qint64 pixelCount, double pixelScale);
 [[nodiscard]] double physicalDimension(qint64 pixelCount, double pixelScale);
 [[nodiscard]] QString formatAxisMaximum(double value);

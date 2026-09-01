@@ -139,7 +139,9 @@ JobCameraPose JobTerrainCamera::focusPose(const QVector3D& point, bool preserveD
 
 void JobTerrainCamera::setPose(const JobCameraPose& pose) {
     pose_ = pose;
-    pose_.elevation = std::clamp(pose_.elevation, minimumElevation_, maximumElevation_);
+    pose_.elevation = continuousOrbitEnabled_
+        ? std::remainder(pose_.elevation, 360.0F)
+        : std::clamp(pose_.elevation, minimumElevation_, maximumElevation_);
     pose_.distance = std::clamp(pose_.distance, minimumDistance(), maximumDistance());
 }
 
@@ -151,7 +153,15 @@ void JobTerrainCamera::setElevationLimits(float minimum, float maximum) {
         minimumElevation_ = 5.0F;
         maximumElevation_ = 89.0F;
     }
-    pose_.elevation = std::clamp(pose_.elevation, minimumElevation_, maximumElevation_);
+    if (!continuousOrbitEnabled_)
+        pose_.elevation = std::clamp(pose_.elevation, minimumElevation_, maximumElevation_);
+}
+
+void JobTerrainCamera::setContinuousOrbitEnabled(bool enabled) {
+    continuousOrbitEnabled_ = enabled;
+    pose_.elevation = enabled
+        ? std::remainder(pose_.elevation, 360.0F)
+        : std::clamp(pose_.elevation, minimumElevation_, maximumElevation_);
 }
 
 float JobTerrainCamera::minimumDistance() const noexcept {
@@ -164,8 +174,10 @@ float JobTerrainCamera::maximumDistance() const noexcept {
 
 void JobTerrainCamera::orbit(const QPointF& pixelDelta) {
     pose_.azimuth -= static_cast<float>(pixelDelta.x()) * 0.25F;
-    pose_.elevation = std::clamp(pose_.elevation + static_cast<float>(pixelDelta.y()) * 0.25F,
-                                 minimumElevation_, maximumElevation_);
+    const float elevation = pose_.elevation + static_cast<float>(pixelDelta.y()) * 0.25F;
+    pose_.elevation = continuousOrbitEnabled_
+        ? std::remainder(elevation, 360.0F)
+        : std::clamp(elevation, minimumElevation_, maximumElevation_);
     pose_.azimuth = std::remainder(pose_.azimuth, 360.0F);
 }
 
@@ -187,16 +199,25 @@ QVector3D JobTerrainCamera::eye() const {
 
 QVector3D JobTerrainCamera::groundForward() const {
     const float azimuth = pose_.azimuth * kPi / 180.0F;
-    return QVector3D(-std::cos(azimuth), -std::sin(azimuth), 0.0F).normalized();
+    const float elevation = pose_.elevation * kPi / 180.0F;
+    const float direction = continuousOrbitEnabled_ && std::cos(elevation) < 0.0F ? 1.0F : -1.0F;
+    return QVector3D(direction * std::cos(azimuth), direction * std::sin(azimuth), 0.0F);
 }
 
 QVector3D JobTerrainCamera::right() const {
-    const QVector3D forward = groundForward();
-    return {forward.y(), -forward.x(), 0.0F};
+    const float azimuth = pose_.azimuth * kPi / 180.0F;
+    return {-std::sin(azimuth), std::cos(azimuth), 0.0F};
 }
 
 QMatrix4x4 JobTerrainCamera::viewMatrix() const {
     QMatrix4x4 view;
-    view.lookAt(eye(), pose_.pivot, QVector3D(0.0F, 0.0F, 1.0F));
+    QVector3D up(0.0F, 0.0F, 1.0F);
+    if (continuousOrbitEnabled_) {
+        const float azimuth = pose_.azimuth * kPi / 180.0F;
+        const float elevation = pose_.elevation * kPi / 180.0F;
+        up = {-std::sin(elevation) * std::cos(azimuth),
+              -std::sin(elevation) * std::sin(azimuth), std::cos(elevation)};
+    }
+    view.lookAt(eye(), pose_.pivot, up);
     return view;
 }

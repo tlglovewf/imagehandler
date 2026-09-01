@@ -82,6 +82,8 @@ MosaicBuildResult MosaicBuilder::build(const QStringList& paths, quint64 generat
     MosaicBuildResult buildResult;
     buildResult.sourceCount = static_cast<int>(paths.size());
     if (paths.isEmpty()) { if (error) *error = QStringLiteral("当前列表中没有图片。"); return buildResult; }
+    const qint64 phaseSize = paths.size();
+    const qint64 totalProgress = phaseSize * 5;
     std::vector<MergeTile> tiles;
     QStringList problems;
     tiles.reserve(paths.size());
@@ -90,7 +92,7 @@ MosaicBuildResult MosaicBuilder::build(const QStringList& paths, quint64 generat
         MergeTile tile;
         if (!parseName(paths[i], &tile)) problems << QStringLiteral("名称不符合规则：%1").arg(QFileInfo(paths[i]).fileName());
         else tiles.push_back(tile);
-        if (progress) progress({QStringLiteral("验证文件名"), i + 1, paths.size()});
+        if (progress) progress({QStringLiteral("验证文件名与坐标"), i + 1, totalProgress});
     }
     if (!problems.isEmpty()) { if (error) *error = problems.join('\n'); return buildResult; }
 
@@ -155,7 +157,8 @@ MosaicBuildResult MosaicBuilder::build(const QStringList& paths, quint64 generat
         } else {
             colorOutput = colorOutput || docs[i]->metadata.kind == PixelKind::Color;
         }
-        if (progress) progress({QStringLiteral("读取并验证图块"), i + 1, static_cast<qint64>(tiles.size())});
+        if (progress) progress({QStringLiteral("读取并验证图块"), phaseSize + i + 1,
+                                totalProgress});
     }
     if (!problems.isEmpty()) { if (error) *error = problems.join('\n'); return buildResult; }
 
@@ -209,6 +212,8 @@ MosaicBuildResult MosaicBuilder::build(const QStringList& paths, quint64 generat
             return buildResult;
         }
         normalized.push_back(std::move(image));
+        if (progress) progress({QStringLiteral("统一图块格式"), phaseSize * 2 + i + 1,
+                                totalProgress});
     }
 
     VipsImage* blackSource = nullptr;
@@ -253,8 +258,8 @@ MosaicBuildResult MosaicBuilder::build(const QStringList& paths, quint64 generat
         }
         g_object_unref(mosaic);
         mosaic = next;
-        if (progress) progress({QStringLiteral("构建虚拟拼图"), i + 1,
-                                static_cast<qint64>(tiles.size())});
+        if (progress) progress({QStringLiteral("构建虚拟拼图"), phaseSize * 3 + i + 1,
+                                totalProgress});
     }
 
     auto result = std::make_shared<ImageDocument>();

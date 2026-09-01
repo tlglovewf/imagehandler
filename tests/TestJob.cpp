@@ -26,6 +26,7 @@ private Q_SLOTS:
     void vulkanScreenCoordinatesKeepYDirection();
     void guidesUsePointZeroAndFullBounds();
     void terrainCameraIsGroundOrientedAndClamped();
+    void terrainCameraContinuousOrbitCrossesPoles();
     void millionPointPreviewScale();
 };
 
@@ -247,6 +248,24 @@ void TestJob::terrainCameraIsGroundOrientedAndClamped() {
     QCOMPARE(linkedFocus.distance,currentDistance);
     QCOMPARE(linkedFocus.azimuth,camera.pose().azimuth);
     QCOMPARE(linkedFocus.elevation,camera.pose().elevation);
+}
+
+void TestJob::terrainCameraContinuousOrbitCrossesPoles() {
+    JobTerrainCamera camera;
+    camera.setContinuousOrbitEnabled(true);
+    QVERIFY(camera.continuousOrbitEnabled());
+    camera.setSceneBounds({-50.0F,-25.0F,0.0F},{50.0F,25.0F,10.0F});
+    JobCameraPose pose=camera.pose();pose.elevation=89.0F;camera.setPose(pose);
+    camera.orbit({0.0,8.0});
+    QCOMPARE(camera.pose().elevation,91.0F);
+    const QMatrix4x4 abovePole=camera.viewMatrix();
+    for(int i=0;i<16;++i)QVERIFY(std::isfinite(abovePole.constData()[i]));
+    camera.orbit({0.0,-728.0});
+    QCOMPARE(camera.pose().elevation,-91.0F);
+    const QMatrix4x4 belowPole=camera.viewMatrix();
+    for(int i=0;i<16;++i)QVERIFY(std::isfinite(belowPole.constData()[i]));
+    camera.setContinuousOrbitEnabled(false);
+    QCOMPARE(camera.pose().elevation,camera.minimumElevation());
 }
 
 void TestJob::millionPointPreviewScale() {

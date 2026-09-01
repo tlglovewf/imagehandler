@@ -2,6 +2,7 @@
 #include "ui/LargeImageView.h"
 #include "ui/JobPreviewWidget.h"
 #include "ui/PointCloudWidget.h"
+#include "ui/ElementPointCloudWindow.h"
 #include "tasks/TaskManager.h"
 #include "domain/MergeInputSelector.h"
 #include "domain/StorageSizeFormatter.h"
@@ -94,7 +95,7 @@ void MainWindow::buildUi() {
     exportButton_->setObjectName(QStringLiteral("splitExportButton"));
     for(auto* b:{openButton_,directoryButton_,mergeButton_,detectButton_,jobImportButton_,fit,actual}) tools->addWidget(b);
     tools->addWidget(previewLayoutMode_);tools->addWidget(autoJumpCheck_);
-    tools->addStretch(); imageInfo_=new QLabel(QStringLiteral("未加载图像")); zoomInfo_=new QLabel; tools->addWidget(imageInfo_);tools->addWidget(zoomInfo_); root->addLayout(tools);
+    tools->addStretch(); imageInfo_=new QLabel(QStringLiteral("未加载图像"));imageInfo_->setObjectName(QStringLiteral("imageInfo")); zoomInfo_=new QLabel; tools->addWidget(imageInfo_);tools->addWidget(zoomInfo_); root->addLayout(tools);
     auto* cloudTools=new QHBoxLayout;cloudTools->addWidget(new QLabel(QStringLiteral("PointCloud 参数")));cloudTools->addWidget(cloudPixelScale_);cloudTools->addWidget(cloudMaximumHeight_);cloudTools->addWidget(cloudInvertHeight_);cloudTools->addWidget(cloudStartColorButton_);cloudTools->addWidget(cloudEndColorButton_);cloudTools->addWidget(generateCloudButton_);cloudTools->addStretch();root->addLayout(cloudTools);
 
     mainSplitter_=new QSplitter;mainSplitter_->setObjectName(QStringLiteral("mainSplitter"));
@@ -173,14 +174,16 @@ void MainWindow::connectUi() {
     connect(mergeButton_,&QPushButton::clicked,this,&MainWindow::mergeImages);connect(detectButton_,&QPushButton::clicked,this,&MainWindow::detectSegmentation);connect(exportButton_,&QPushButton::clicked,this,&MainWindow::chooseExportDirectory);
     connect(mergedExportButton_,&QPushButton::clicked,this,&MainWindow::chooseMergedExportPath);
     connect(previousButton_,&QPushButton::clicked,this,[this]{navigate(-1);});connect(nextButton_,&QPushButton::clicked,this,[this]{navigate(1);});
-    connect(fileList_,&QListWidget::itemClicked,this,[this](QListWidgetItem* item){const auto modifiers=QApplication::keyboardModifiers();if(!(modifiers&(Qt::ControlModifier|Qt::ShiftModifier))&&item)loadPath(item->data(Qt::UserRole).toString());});
-    connect(mergedList_,&QListWidget::currentRowChanged,this,&MainWindow::showMergedDocument);connect(cancelButton_,&QPushButton::clicked,tasks_,&TaskManager::cancel);
+    connect(fileList_,&QListWidget::itemDoubleClicked,this,[this](QListWidgetItem* item){if(item)loadPath(item->data(Qt::UserRole).toString());});
+    connect(mergedList_,&QListWidget::itemDoubleClicked,this,[this](QListWidgetItem* item){if(item)showMergedDocument(mergedList_->row(item));});
+    connect(mergedList_,&QListWidget::currentRowChanged,this,[this]{setBusyUi(tasks_->isBusy());});connect(cancelButton_,&QPushButton::clicked,tasks_,&TaskManager::cancel);
     connect(manualPreviewButton_,&QPushButton::clicked,this,&MainWindow::applyManualSegmentation);
     connect(resetParametersButton_,&QPushButton::clicked,this,&MainWindow::resetParameters);
     connect(clearFixedGrayPointsButton_,&QPushButton::clicked,view_,&LargeImageView::clearFixedGrayPoints);
     connect(pathButton_,&QPushButton::toggled,view_,&LargeImageView::setTraversalPathVisible);
     connect(traversal_,qOverload<int>(&QComboBox::currentIndexChanged),this,[this]{view_->setTraversalMode(selectedTraversalMode());updateSelectedCellLabel();scheduleJobPreview(false);});
     connect(view_,&LargeImageView::segmentationCellSelected,this,[this](int row,int column){selectedRow_=row;selectedColumn_=column;updateSelectedCellLabel();selectJobFromImage(row,column);});
+    connect(view_,&LargeImageView::segmentationCellActivated,this,&MainWindow::showElementPointCloud);
     connect(jobView_,&JobPreviewWidget::placeSelected,this,&MainWindow::selectImageFromJob);
     connect(previewTabs_,&QTabBar::currentChanged,this,&MainWindow::showPreviewTab);
     connect(previewLayoutMode_,qOverload<int>(&QComboBox::currentIndexChanged),this,&MainWindow::setPreviewLayoutMode);
@@ -204,25 +207,37 @@ void MainWindow::connectUi() {
     connect(view_,&LargeImageView::tileError,this,[this](const QString& error){
         statusBar()->showMessage(QStringLiteral("图块加载失败：%1").arg(error), 8000);
     });
-    connect(view_,&LargeImageView::tileProgress,this,[this](const QString& phase,qint64 done,qint64 total){
+    connect(view_,&LargeImageView::tileProgress,this,[this](quint64 generation,qint64 completed,qint64 failed,qint64 total){
         if(tasks_->isBusy()||total<=0)return;
+        const qint64 done=completed+failed;
+        if(generation==mergePreviewGeneration_){
+            const qint64 mapped=800+qRound64(200.0*std::clamp(double(done)/double(total),0.0,1.0));
+            if(done<total){setTaskDisplay(QStringLiteral("合并图像"),QStringLiteral("准备首屏预览"),mapped,1000);return;}
+            lastTilePhase_=QStringLiteral("加载可视图块");lastTileCompleted_=done;lastTileTotal_=total;
+            mergePreviewGeneration_=0;
+            if(failed>0){showTerminalTaskDisplay(QStringLiteral("合并预览失败"));statusBar()->showMessage(QStringLiteral("合并结果已保留，但首屏有 %1 个图块加载失败。").arg(failed),8000);}
+            else showTerminalTaskDisplay(QStringLiteral("合并完成"));
+            return;
+        }
+        const QString phase=QStringLiteral("加载可视图块");
         if(phase==lastTilePhase_&&done==lastTileCompleted_&&total==lastTileTotal_)return;
         lastTilePhase_=phase;lastTileCompleted_=done;lastTileTotal_=total;
         if(done<total)setTaskDisplay(QStringLiteral("后台渲染"),phase,done,total);
+        else if(failed>0)showTerminalTaskDisplay(QStringLiteral("可视图块加载失败"));
         else showTerminalTaskDisplay(QStringLiteral("可视图块已加载"));
     });
     connect(tasks_,&TaskManager::taskStarted,this,[this](quint64,const QString& title){setBusyUi(true);setTaskDisplay(title,QStringLiteral("准备中"),0,0);});
     connect(tasks_,&TaskManager::taskProgress,this,[this](quint64,const TaskProgress& p){setTaskDisplay(taskTitle_->property("fullText").toString(),p.phase,p.completed,p.total);});
     connect(tasks_,&TaskManager::taskCancelled,this,[this](quint64){if(pendingAction_==PendingAction::JobPreviewBuild)switchToJobAfterBuild_=false;pendingMergePaths_.clear();pendingAction_=PendingAction::None;setBusyUi(false);showTerminalTaskDisplay(QStringLiteral("已取消"));});
     connect(tasks_,&TaskManager::taskFailed,this,[this](quint64,const QString& error){
-        const auto action=pendingAction_;pendingAction_=PendingAction::None;if(action==PendingAction::Merge)pendingMergePaths_.clear();setBusyUi(false);showTerminalTaskDisplay(QStringLiteral("失败"));
+        const auto action=pendingAction_;pendingAction_=PendingAction::None;if(action==PendingAction::Merge){pendingMergePaths_.clear();mergePreviewGeneration_=0;}setBusyUi(false);showTerminalTaskDisplay(QStringLiteral("失败"));
         if(action==PendingAction::JobPreviewBuild){switchToJobAfterBuild_=false;statusBar()->showMessage(QStringLiteral("Job 预览生成失败：%1").arg(error),8000);}
         else if(action==PendingAction::PointCloudBuild)statusBar()->showMessage(QStringLiteral("PointCloud 生成失败：%1").arg(error),8000);
         else if(action==PendingAction::JobLoad||action==PendingAction::JobLoadExport)QMessageBox::critical(this,QStringLiteral("Job 加载失败"),error);
         else QMessageBox::critical(this,QStringLiteral("操作失败"),error);
     });
     connect(tasks_,&TaskManager::taskFinished,this,[this](quint64,const QVariant& value){
-        const auto action=pendingAction_;pendingAction_=PendingAction::None;setBusyUi(false);showTerminalTaskDisplay(QStringLiteral("完成"));
+        const auto action=pendingAction_;pendingAction_=PendingAction::None;setBusyUi(false);if(action!=PendingAction::Merge)showTerminalTaskDisplay(QStringLiteral("完成"));
         if(action==PendingAction::Scan){directoryPaths_=value.toStringList();fileList_->clear();for(const auto& p:directoryPaths_){auto* item=new QListWidgetItem(QFileInfo(p).fileName(),fileList_);item->setData(Qt::UserRole,p);}if(!directoryPaths_.isEmpty()){fileList_->setCurrentRow(0,QItemSelectionModel::ClearAndSelect);loadCurrentListItem();}else QMessageBox::information(this,QStringLiteral("扫描结果"),QStringLiteral("目录中没有支持的图片。"));}
         else if(action==PendingAction::Load)acceptDocument(value.value<ImageDocumentPtr>());
         else if(action==PendingAction::Merge)acceptMosaicResult(value.value<MosaicBuildResult>());
@@ -584,8 +599,8 @@ void MainWindow::loadPath(const QString& path){if(tasks_->isBusy())return;pendin
 void MainWindow::loadCurrentListItem(){if(auto* item=fileList_->currentItem())loadPath(item->data(Qt::UserRole).toString());}
 void MainWindow::navigate(int delta){if(fileList_->count()==0)return;const int row=std::clamp(fileList_->currentRow()+delta,0,fileList_->count()-1);fileList_->setCurrentRow(row,QItemSelectionModel::ClearAndSelect);loadCurrentListItem();}
 void MainWindow::mergeImages(){if(directoryPaths_.isEmpty()){QMessageBox::information(this,QStringLiteral("图像合并"),QStringLiteral("请先打开包含合并图块的目录。"));return;}QStringList selectedPaths;for(const auto* item:fileList_->selectedItems())selectedPaths<<item->data(Qt::UserRole).toString();pendingMergePaths_=MergeInputSelector::resolve(directoryPaths_,selectedPaths);if(pendingMergePaths_.isEmpty()){QMessageBox::information(this,QStringLiteral("图像合并"),QStringLiteral("当前目录中没有可合并的图片。"));return;}startMosaicBuild(false);}
-void MainWindow::startMosaicBuild(bool allowMissingTiles){if(tasks_->isBusy()||pendingMergePaths_.isEmpty())return;pendingAction_=PendingAction::Merge;const auto paths=pendingMergePaths_;const quint64 gen=generation_++;const MosaicBuildOptions options{allowMissingTiles};if(tasks_->start(QStringLiteral("合并图像"),[paths,gen,options](const auto&t,const auto&p,QString*e){return QVariant::fromValue(MosaicBuilder::build(paths,gen,options,t,p,e));})){setTaskDisplay(QStringLiteral("合并图像"),QStringLiteral("准备合并"),0,paths.size());progress_->setRange(0,static_cast<int>(std::min<qsizetype>(paths.size(),INT_MAX)));progress_->setValue(0);}else pendingAction_=PendingAction::None;}
-void MainWindow::acceptMosaicResult(const MosaicBuildResult& result){if(result.status==MosaicBuildStatus::MissingTiles){QMessageBox warning(this);warning.setIcon(QMessageBox::Warning);warning.setWindowTitle(QStringLiteral("合并图像存在缺块"));QString detail=result.missingCoordinateSamples.join(QStringLiteral("、"));if(result.missingCount>result.missingCoordinateSamples.size())detail+=QStringLiteral(" 等");warning.setText(QStringLiteral("检测到 %1 个缺失坐标：%2\n继续后缺块及未覆盖区域将使用白色填充。").arg(result.missingCount).arg(detail));auto* continueButton=warning.addButton(QStringLiteral("同意并继续"),QMessageBox::AcceptRole);warning.addButton(QStringLiteral("取消"),QMessageBox::RejectRole);warning.exec();if(warning.clickedButton()==continueButton){startMosaicBuild(true);}else{pendingMergePaths_.clear();showTerminalTaskDisplay(QStringLiteral("已取消合并"));setBusyUi(false);}return;}if(!result.document){pendingMergePaths_.clear();return;}auto document=result.document;const int number=mergedDocuments_.size()+1;document->displayName=QStringLiteral("合并结果 %1（%2×%3，%4 张）").arg(number).arg(result.rows).arg(result.columns).arg(result.sourceCount);mergedDocuments_.push_back(document);auto* item=new QListWidgetItem(document->displayName,mergedList_);item->setData(Qt::UserRole,mergedDocuments_.size()-1);pendingMergePaths_.clear();mergedList_->setCurrentRow(mergedList_->count()-1);setBusyUi(false);}
+void MainWindow::startMosaicBuild(bool allowMissingTiles){if(tasks_->isBusy()||pendingMergePaths_.isEmpty())return;pendingAction_=PendingAction::Merge;mergePreviewGeneration_=0;const auto paths=pendingMergePaths_;const quint64 gen=generation_++;const MosaicBuildOptions options{allowMissingTiles};if(tasks_->start(QStringLiteral("合并图像"),[paths,gen,options](const auto&t,const auto&p,QString*e){return QVariant::fromValue(MosaicBuilder::build(paths,gen,options,t,p,e));})){setTaskDisplay(QStringLiteral("合并图像"),QStringLiteral("准备合并"),0,qint64(paths.size())*5);}else pendingAction_=PendingAction::None;}
+void MainWindow::acceptMosaicResult(const MosaicBuildResult& result){if(result.status==MosaicBuildStatus::MissingTiles){QMessageBox warning(this);warning.setIcon(QMessageBox::Warning);warning.setWindowTitle(QStringLiteral("合并图像存在缺块"));QString detail=result.missingCoordinateSamples.join(QStringLiteral("、"));if(result.missingCount>result.missingCoordinateSamples.size())detail+=QStringLiteral(" 等");warning.setText(QStringLiteral("检测到 %1 个缺失坐标：%2\n继续后缺块及未覆盖区域将使用白色填充。").arg(result.missingCount).arg(detail));auto* continueButton=warning.addButton(QStringLiteral("同意并继续"),QMessageBox::AcceptRole);warning.addButton(QStringLiteral("取消"),QMessageBox::RejectRole);warning.exec();if(warning.clickedButton()==continueButton){startMosaicBuild(true);}else{pendingMergePaths_.clear();showTerminalTaskDisplay(QStringLiteral("已取消合并"));setBusyUi(false);}return;}if(!result.document){pendingMergePaths_.clear();return;}auto document=result.document;const int number=mergedDocuments_.size()+1;document->displayName=QStringLiteral("合并结果 %1（%2×%3，%4 张）").arg(number).arg(result.rows).arg(result.columns).arg(result.sourceCount);mergedDocuments_.push_back(document);auto* item=new QListWidgetItem(document->displayName,mergedList_);item->setData(Qt::UserRole,mergedDocuments_.size()-1);pendingMergePaths_.clear();mergedList_->setCurrentRow(mergedList_->count()-1);acceptDocument(document);mergePreviewGeneration_=document->generation;setTaskDisplay(QStringLiteral("合并图像"),QStringLiteral("准备首屏预览"),800,1000);setBusyUi(false);}
 void MainWindow::showMergedDocument(int row){if(row<0||row>=mergedDocuments_.size())return;acceptDocument(mergedDocuments_[row]);setBusyUi(tasks_->isBusy());}
 void MainWindow::chooseMergedExportPath(){const int row=mergedList_->currentRow();if(row<0||row>=mergedDocuments_.size())return;QString defaultName=QStringLiteral("合并结果_%1.bmp").arg(row+1);QString path=QFileDialog::getSaveFileName(this,QStringLiteral("导出合并图"),QDir(lastMergedExportDirectory_).filePath(defaultName),QStringLiteral("8-bit BMP (*.bmp)"));if(path.isEmpty())return;if(QFileInfo(path).suffix().compare(QStringLiteral("bmp"),Qt::CaseInsensitive)!=0)path+=QStringLiteral(".bmp");lastMergedExportDirectory_=QFileInfo(path).absolutePath();const auto document=mergedDocuments_[row];pendingAction_=PendingAction::MosaicExport;tasks_->start(QStringLiteral("导出合并图"),[path,document](const auto&t,const auto&p,QString*e){if(!MergedImageExporter::writeGray8Bmp(path,document,t,p,e))return QVariant{};return QVariant(true);});}
 void MainWindow::detectSegmentation(){if(!document_){QMessageBox::information(this,QStringLiteral("分割预览"),QStringLiteral("请先加载图像。"));return;}pendingAction_=PendingAction::Detect;const auto doc=document_;tasks_->start(QStringLiteral("自动识别分割"),[doc](const auto&t,const auto&p,QString*e){return QVariant::fromValue(PatternDetector::detect(doc,t,p,e));});}
@@ -643,11 +658,13 @@ void MainWindow::showExportPreflight(const ExportPreflightResult& result) {
     }
     startExport({result.conflictCount > 0, true, result.targetFingerprint});
 }
-void MainWindow::acceptDocument(const ImageDocumentPtr& doc){if(!doc)return;document_=doc;segmentation_={};jobDocument_.reset();jobView_->setDocument({});pointCloudDocument_.reset();pointCloudView_->clear();selectedRow_=-1;selectedColumn_=-1;pathButton_->setChecked(false);lastTilePhase_.clear();lastTileCompleted_=-1;lastTileTotal_=-1;const int canvasWidth=static_cast<int>(std::clamp<qint64>(doc->metadata.width,1,INT_MAX));const int canvasHeight=static_cast<int>(std::clamp<qint64>(doc->metadata.height,1,INT_MAX));{const QSignalBlocker blockX(canvasX_);const QSignalBlocker blockY(canvasY_);const QSignalBlocker blockLock(canvasLockCheck_);canvasX_->setValue(canvasWidth);canvasY_->setValue(canvasHeight);canvasLockCheck_->setChecked(doc->metadata.width==doc->metadata.height);}view_->setDocument(doc);showPreviewTab(0);updateSelectedCellLabel();imageInfo_->setText(QStringLiteral("%1 × %2 | %3").arg(doc->metadata.width).arg(doc->metadata.height).arg(pixelDescription(doc->metadata)));updateGridCountLabel();updateSegmentationStatistics();setBusyUi(tasks_->isBusy());}
+void MainWindow::acceptDocument(const ImageDocumentPtr& doc){if(!doc)return;mergePreviewGeneration_=0;if(elementCloudWindow_)elementCloudWindow_->cancelAndClear();document_=doc;segmentation_={};jobDocument_.reset();jobView_->setDocument({});pointCloudDocument_.reset();pointCloudView_->clear();selectedRow_=-1;selectedColumn_=-1;pathButton_->setChecked(false);lastTilePhase_.clear();lastTileCompleted_=-1;lastTileTotal_=-1;const int canvasWidth=static_cast<int>(std::clamp<qint64>(doc->metadata.width,1,INT_MAX));const int canvasHeight=static_cast<int>(std::clamp<qint64>(doc->metadata.height,1,INT_MAX));{const QSignalBlocker blockX(canvasX_);const QSignalBlocker blockY(canvasY_);const QSignalBlocker blockLock(canvasLockCheck_);canvasX_->setValue(canvasWidth);canvasY_->setValue(canvasHeight);canvasLockCheck_->setChecked(doc->metadata.width==doc->metadata.height);}view_->setDocument(doc);showPreviewTab(0);updateSelectedCellLabel();imageInfo_->setText(QStringLiteral("%1 × %2 | %3").arg(doc->metadata.width).arg(doc->metadata.height).arg(pixelDescription(doc->metadata)));updateGridCountLabel();updateSegmentationStatistics();setBusyUi(tasks_->isBusy());}
 
 void MainWindow::chooseJobFile(){const QString path=QFileDialog::getOpenFileName(this,QStringLiteral("选择 Job 文件"),lastJobDirectory_,QStringLiteral("Job 文件 (*.json *.aldl);;JSON (*.json);;ALDL (*.aldl)"));if(!path.isEmpty()){lastJobDirectory_=QFileInfo(path).absolutePath();loadJobFile(path,false);}}
 
 void MainWindow::generatePointCloud(){if(tasks_->isBusy()||!document_)return;if(!ImageLoader::isProcessable(document_->metadata)){statusBar()->showMessage(QStringLiteral("PointCloud 仅支持二值、8-bit 和 16-bit 灰度图。"),6000);return;}if(!pointCloudView_->isVulkanAvailable()){statusBar()->showMessage(QStringLiteral("当前环境没有可用的 Vulkan PointCloud 渲染器。"),6000);return;}const auto source=document_;const PointCloudSettings settings{cloudPixelScale_->value(),cloudMaximumHeight_->value(),cloudInvertHeight_->isChecked(),cloudStartColor_,cloudEndColor_};const quint64 cloudGeneration=generation_++;pointCloudDocument_.reset();pointCloudView_->clear();showPreviewTab(2);pendingAction_=PendingAction::PointCloudBuild;tasks_->start(QStringLiteral("生成 PointCloud"),[source,settings,cloudGeneration](const auto&t,const auto&p,QString*e){return QVariant::fromValue(PointCloudBuilder::build(source,settings,cloudGeneration,t,p,e));});}
+
+void MainWindow::showElementPointCloud(int row, int column){if(!document_||segmentation_.rows<=0||segmentation_.columns<=0)return;const ImageRegion region=segmentationCellRegion(segmentation_,document_->metadata.width,document_->metadata.height,row,column);if(!region.isValid())return;if(!ImageLoader::isProcessable(document_->metadata)){statusBar()->showMessage(QStringLiteral("单要素 PointCloud 仅支持二值、8-bit 和 16-bit 灰度图。"),6000);return;}if(!elementCloudWindow_)elementCloudWindow_=new ElementPointCloudWindow(this);if(!elementCloudWindow_->isVulkanAvailable()){elementCloudWindow_->showElement(document_,region,row,column,SplitExporter::traversalIndex(segmentation_.rows,segmentation_.columns,selectedTraversalMode(),row,column),{},generation_++);statusBar()->showMessage(QStringLiteral("当前环境没有可用的 Vulkan PointCloud 渲染器。"),6000);return;}const PointCloudSettings settings{cloudPixelScale_->value(),cloudMaximumHeight_->value(),cloudInvertHeight_->isChecked(),cloudStartColor_,cloudEndColor_};const qint64 index=SplitExporter::traversalIndex(segmentation_.rows,segmentation_.columns,selectedTraversalMode(),row,column);elementCloudWindow_->showElement(document_,region,row,column,index,settings,generation_++);}
 
 void MainWindow::chooseCloudColor(bool startColor){QColor& current=startColor?cloudStartColor_:cloudEndColor_;QColorDialog dialog(current,this);dialog.setObjectName(QStringLiteral("cloudColorDialog"));dialog.setWindowTitle(startColor?QStringLiteral("选择 PointCloud 起色"):QStringLiteral("选择 PointCloud 终色"));dialog.setOption(QColorDialog::DontUseNativeDialog);if(dialog.exec()!=QDialog::Accepted)return;const QColor selected=dialog.selectedColor();if(!selected.isValid())return;current=selected;updateCloudColorButton(startColor?cloudStartColorButton_:cloudEndColorButton_,current,startColor?QStringLiteral("起色"):QStringLiteral("终色"));}
 
