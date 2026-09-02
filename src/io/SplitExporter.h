@@ -2,6 +2,7 @@
 
 #include "domain/Models.h"
 #include "io/ExportTypes.h"
+#include "io/LayeredPackageTypes.h"
 #include <QPointF>
 #include <QVector>
 #include <functional>
@@ -18,6 +19,9 @@ public:
                                   const SegmentationResult& segmentation,
                                   const QPoint& cell,
                                   const PrintExportOptions& options);
+    static QPointF physicalPosition(const SegmentationResult& segmentation,
+                                    const QPoint& cell,
+                                    const JobPlacementOptions& options);
     static QString selectedTileFileName(const ImageDocumentPtr& document,
                                         qint64 traversalIndex);
     static bool exportTiles(const QString& outputDirectory, const ImageDocumentPtr& document,

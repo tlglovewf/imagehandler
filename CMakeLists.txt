@@ -44,6 +44,8 @@ add_library(image_handler_core
     src/io/MergedImageExporter.h src/io/MergedImageExporter.cpp
     src/io/MaskSliceExporter.h src/io/MaskSliceExporter.cpp
     src/io/ExportTypes.h
+    src/io/LayeredPackageTypes.h
+    src/io/LayeredPackageExporter.h src/io/LayeredPackageExporter.cpp
     src/io/ExportPreflight.h src/io/ExportPreflight.cpp
     src/io/SplitExporter.h src/io/SplitExporter.cpp
     src/io/JobFileLoader.h src/io/JobFileLoader.cpp
@@ -148,6 +150,7 @@ qt_add_executable(ImageHandler WIN32
     src/ui/LargeImageView.h src/ui/LargeImageView.cpp
     src/ui/ElementPointCloudWindow.h src/ui/ElementPointCloudWindow.cpp
     src/ui/MaskSliceWindow.h src/ui/MaskSliceWindow.cpp
+    src/ui/LayeredExportDialog.h src/ui/LayeredExportDialog.cpp
     src/ui/MainWindow.h src/ui/MainWindow.cpp
 )
 target_include_directories(ImageHandler PRIVATE
@@ -214,6 +217,7 @@ qt_add_executable(MainWindowTests
     src/ui/LargeImageView.h src/ui/LargeImageView.cpp
     src/ui/ElementPointCloudWindow.h src/ui/ElementPointCloudWindow.cpp
     src/ui/MaskSliceWindow.h src/ui/MaskSliceWindow.cpp
+    src/ui/LayeredExportDialog.h src/ui/LayeredExportDialog.cpp
 )
 target_include_directories(MainWindowTests PRIVATE
     "${VIPS_ROOT}/include"

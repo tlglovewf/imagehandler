@@ -17,6 +17,7 @@
 #include <QSet>
 #include <QUuid>
 #include <algorithm>
+#include <cmath>
 #include <climits>
 #include <limits>
 #include <new>
@@ -368,6 +369,24 @@ QPointF SplitExporter::canvasPosition(const ImageMetadata& metadata,
                      static_cast<double>(metadata.width) * options.canvasX;
     double y = static_cast<double>(qint64(cell.y()) * segmentation.settings.cellHeight) /
                static_cast<double>(metadata.height) * options.canvasY;
+    if (options.reverseY) y = -y;
+    return {x, y == 0.0 ? 0.0 : y};
+}
+
+QPointF SplitExporter::physicalPosition(const SegmentationResult& segmentation,
+                                        const QPoint& cell,
+                                        const JobPlacementOptions& options) {
+    if (cell.x() < 0 || cell.y() < 0 ||
+        segmentation.settings.cellWidth <= 0 || segmentation.settings.cellHeight <= 0 ||
+        !std::isfinite(options.pixelScale) || options.pixelScale <= 0.0) {
+        return {};
+    }
+    const double x = static_cast<double>(qint64(cell.x()) *
+                                         segmentation.settings.cellWidth) *
+                     options.pixelScale;
+    double y = static_cast<double>(qint64(cell.y()) *
+                                   segmentation.settings.cellHeight) *
+               options.pixelScale;
     if (options.reverseY) y = -y;
     return {x, y == 0.0 ? 0.0 : y};
 }

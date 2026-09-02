@@ -13,6 +13,7 @@ class JobPreviewWidget;
 class PointCloudWidget;
 class ElementPointCloudWindow;
 class MaskSliceWindow;
+class LayeredExportDialog;
 class TaskManager;
 struct MosaicBuildResult;
 class QListWidget;
@@ -43,8 +44,8 @@ protected:
     void dropEvent(QDropEvent* event) override;
 
 private:
-    enum class PendingAction { None, Scan, Load, Merge, Detect, Grid, ExportPreflight,
-                               SplitExport, SelectedBlocksExport, MosaicExport,
+    enum class PendingAction { None, Scan, Load, Merge, Detect, Grid,
+                               SelectedBlocksExport, MosaicExport,
                                JobLoad, JobLoadExport, JobPreviewBuild, PointCloudBuild };
     void buildUi();
     void connectUi();
@@ -62,7 +63,6 @@ private:
     void detectSegmentation();
     void applyManualSegmentation();
     void chooseExportDirectory();
-    void startExport(const ExportExecutionOptions& execution);
     void chooseSelectedBlocksExportDirectory();
     void chooseJobFile();
     void loadJobFile(const QString& path, bool exported);
@@ -91,12 +91,10 @@ private:
 
 private Q_SLOTS:
     void acceptDocument(const ImageDocumentPtr& document);
-    void showExportPreflight(const ExportPreflightResult& result);
 
 private:
     void setBusyUi(bool busy);
     void updateGridCountLabel();
-    void updateSegmentationStatistics();
     void updateElementPhysicalSize();
     void setTaskDisplay(const QString& title, const QString& phase,
                         qint64 completed, qint64 total);
@@ -128,18 +126,13 @@ private:
     QPushButton* generateCloudButton_ = nullptr;
     QPushButton *cloudStartColorButton_=nullptr,*cloudEndColorButton_=nullptr;
     QSpinBox *cellWidth_=nullptr,*cellHeight_=nullptr,*threshold_=nullptr;
-    QSpinBox *canvasX_=nullptr,*canvasY_=nullptr,*repeatTimes_=nullptr;
     QDoubleSpinBox *cloudPixelScale_=nullptr,*cloudMaximumHeight_=nullptr;
-    QCheckBox *printModeCheck_=nullptr,*canvasLockCheck_=nullptr,*reverseYCheck_=nullptr;
     QCheckBox* autoJumpCheck_=nullptr;
     QCheckBox* cloudInvertHeight_ = nullptr;
-    QWidget* printOptionsContainer_=nullptr;
     QComboBox *polarity_=nullptr,*traversal_=nullptr,*previewLayoutMode_=nullptr;
     QLabel *gridCountLabel_=nullptr,*selectedCellLabel_=nullptr,*taskTitle_=nullptr,*taskPhase_=nullptr,*progressPercent_=nullptr,*imageInfo_=nullptr,*zoomInfo_=nullptr;
     QLabel* pixelProbeLabel_ = nullptr;
     QLabel* elementPhysicalSizeLabel_ = nullptr;
-    QLabel *statisticsStatus_=nullptr,*statisticsMode_=nullptr,*statisticsGrid_=nullptr;
-    QLabel *statisticsFileCount_=nullptr,*statisticsOutputSize_=nullptr,*statisticsRequiredSpace_=nullptr;
     QProgressBar* progress_=nullptr;
     QTimer* taskResetTimer_=nullptr;
     QTimer* jobPreviewTimer_=nullptr;
@@ -153,13 +146,11 @@ private:
     QStringList directoryPaths_;
     QStringList pendingMergePaths_;
     QVector<ImageDocumentPtr> mergedDocuments_;
-    QString exportDirectory_;
     QString lastImageDirectory_;
     QString lastDirectoryDirectory_;
     QString lastJobDirectory_;
     QString lastMergedExportDirectory_;
     QString lastSplitExportDirectory_;
-    ExportRequest pendingExportRequest_;
     PendingAction pendingAction_ = PendingAction::None;
     quint64 generation_ = 1;
     QString lastTilePhase_;
@@ -167,7 +158,7 @@ private:
     qint64 lastTileTotal_ = -1;
     quint64 mergePreviewGeneration_ = 0;
     bool switchToJobAfterBuild_ = false;
-    bool lastExportWasPrint_ = false;
+    bool reverseYSetting_ = false;
     int selectedRow_ = -1;
     int selectedColumn_ = -1;
 };

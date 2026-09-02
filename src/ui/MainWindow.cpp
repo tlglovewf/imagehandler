@@ -4,11 +4,10 @@
 #include "ui/PointCloudWidget.h"
 #include "ui/ElementPointCloudWindow.h"
 #include "ui/MaskSliceWindow.h"
+#include "ui/LayeredExportDialog.h"
 #include "tasks/TaskManager.h"
 #include "domain/MergeInputSelector.h"
-#include "domain/StorageSizeFormatter.h"
 #include "io/DirectoryScanner.h"
-#include "io/ExportPreflight.h"
 #include "io/MergedImageExporter.h"
 #include "io/SplitExporter.h"
 #include "io/JobFileLoader.h"
@@ -26,7 +25,6 @@
 #include <QCloseEvent>
 #include <QColorDialog>
 #include <QDir>
-#include <QDesktopServices>
 #include <QDragEnterEvent>
 #include <QDoubleSpinBox>
 #include <QDropEvent>
@@ -34,7 +32,6 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
-#include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QListWidget>
@@ -132,28 +129,9 @@ void MainWindow::buildUi() {
     form->addRow(QStringLiteral("导出路径"),traversalRow);
     manualPreviewButton_=new QPushButton(QStringLiteral("应用参数并预览分割线"));
     manualPreviewButton_->setObjectName(QStringLiteral("manualSegmentationPreviewButton"));
-    printModeCheck_=new QCheckBox(QStringLiteral("输入打印"));printModeCheck_->setObjectName(QStringLiteral("chk_o_print"));
-    printOptionsContainer_=new QWidget;printOptionsContainer_->setObjectName(QStringLiteral("printOptionsContainer"));
-    auto* printForm=new QFormLayout(printOptionsContainer_);printForm->setContentsMargins(0,0,0,0);
-    canvasX_=new QSpinBox;canvasX_->setObjectName(QStringLiteral("canvasX"));canvasX_->setRange(1,INT_MAX);canvasX_->setValue(1);
-    canvasY_=new QSpinBox;canvasY_->setObjectName(QStringLiteral("canvasY"));canvasY_->setRange(1,INT_MAX);canvasY_->setValue(1);
-    canvasLockCheck_=new QCheckBox(QStringLiteral("联动 X/Y"));canvasLockCheck_->setObjectName(QStringLiteral("lock"));canvasLockCheck_->setChecked(true);
-    reverseYCheck_=new QCheckBox(QStringLiteral("Y方向相反"));reverseYCheck_->setObjectName(QStringLiteral("chk_y_reverse"));
-    repeatTimes_=new QSpinBox;repeatTimes_->setObjectName(QStringLiteral("repeat_times"));repeatTimes_->setRange(1,INT_MAX);repeatTimes_->setSingleStep(1);repeatTimes_->setValue(10);
-    printForm->addRow(QStringLiteral("Canvas X"),canvasX_);printForm->addRow(QStringLiteral("Canvas Y"),canvasY_);printForm->addRow(canvasLockCheck_);printForm->addRow(reverseYCheck_);printForm->addRow(QStringLiteral("重复次数"),repeatTimes_);
-    printOptionsContainer_->hide();
     resetParametersButton_=new QPushButton(QStringLiteral("恢复默认参数"));resetParametersButton_->setObjectName(QStringLiteral("resetParametersButton"));
     selectedBlocksExportButton_=new QPushButton(QStringLiteral("导出选中块"));selectedBlocksExportButton_->setObjectName(QStringLiteral("selectedBlocksExportButton"));selectedBlocksExportButton_->setToolTip(QStringLiteral("按块编号导出，并保持原图文件格式、位深和像素内容"));
-    auto* statisticsGroup=new QGroupBox(QStringLiteral("分割统计"));statisticsGroup->setObjectName(QStringLiteral("segmentationStatistics"));
-    auto* statisticsForm=new QFormLayout(statisticsGroup);statisticsForm->setContentsMargins(8,8,8,8);
-    statisticsStatus_=new QLabel(QStringLiteral("请先完成分割计算。"));statisticsStatus_->setObjectName(QStringLiteral("segmentationStatisticsStatus"));statisticsStatus_->setWordWrap(true);
-    statisticsMode_=new QLabel(QStringLiteral("--"));statisticsMode_->setObjectName(QStringLiteral("segmentationStatisticsMode"));
-    statisticsGrid_=new QLabel(QStringLiteral("--"));statisticsGrid_->setObjectName(QStringLiteral("segmentationStatisticsGrid"));
-    statisticsFileCount_=new QLabel(QStringLiteral("--"));statisticsFileCount_->setObjectName(QStringLiteral("segmentationStatisticsFileCount"));
-    statisticsOutputSize_=new QLabel(QStringLiteral("--"));statisticsOutputSize_->setObjectName(QStringLiteral("segmentationStatisticsOutputSize"));
-    statisticsRequiredSpace_=new QLabel(QStringLiteral("--"));statisticsRequiredSpace_->setObjectName(QStringLiteral("segmentationStatisticsRequiredSpace"));
-    statisticsForm->addRow(statisticsStatus_);statisticsForm->addRow(QStringLiteral("当前模式"),statisticsMode_);statisticsForm->addRow(QStringLiteral("分割网格"),statisticsGrid_);statisticsForm->addRow(QStringLiteral("BMP 文件"),statisticsFileCount_);statisticsForm->addRow(QStringLiteral("预计输出"),statisticsOutputSize_);statisticsForm->addRow(QStringLiteral("建议空间"),statisticsRequiredSpace_);
-    panelLayout->addWidget(new QLabel(QStringLiteral("分割参数")));panelLayout->addLayout(form);panelLayout->addWidget(manualPreviewButton_);panelLayout->addWidget(printModeCheck_);panelLayout->addWidget(printOptionsContainer_);panelLayout->addWidget(exportButton_);panelLayout->addWidget(selectedBlocksExportButton_);panelLayout->addWidget(resetParametersButton_);panelLayout->addWidget(statisticsGroup);panelLayout->addStretch();mainSplitter_->addWidget(panel);mainSplitter_->setStretchFactor(1,1);root->addWidget(mainSplitter_,1);
+    panelLayout->addWidget(new QLabel(QStringLiteral("分割参数")));panelLayout->addLayout(form);panelLayout->addWidget(manualPreviewButton_);panelLayout->addWidget(exportButton_);panelLayout->addWidget(selectedBlocksExportButton_);panelLayout->addWidget(resetParametersButton_);panelLayout->addStretch();mainSplitter_->addWidget(panel);mainSplitter_->setStretchFactor(1,1);root->addWidget(mainSplitter_,1);
 
     auto* taskBar=new QHBoxLayout;taskBar->setContentsMargins(4,2,4,2);taskBar->setSpacing(10);
     taskTitle_=new QLabel;taskTitle_->setObjectName(QStringLiteral("taskTitle"));taskTitle_->setMinimumWidth(120);taskTitle_->setMaximumWidth(240);taskTitle_->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Fixed);taskTitle_->installEventFilter(this);
@@ -202,19 +180,11 @@ void MainWindow::connectUi() {
     connect(previewTabs_,&QTabBar::currentChanged,this,&MainWindow::showPreviewTab);
     connect(previewLayoutMode_,qOverload<int>(&QComboBox::currentIndexChanged),this,&MainWindow::setPreviewLayoutMode);
     connect(jobPreviewTimer_,&QTimer::timeout,this,&MainWindow::rebuildJobPreview);
-    connect(cellWidth_,qOverload<int>(&QSpinBox::valueChanged),this,[this]{updateGridCountLabel();updateSegmentationStatistics();updateElementPhysicalSize();});
-    connect(cellHeight_,qOverload<int>(&QSpinBox::valueChanged),this,[this]{updateGridCountLabel();updateSegmentationStatistics();updateElementPhysicalSize();});
-    connect(cloudPixelScale_,qOverload<double>(&QDoubleSpinBox::valueChanged),this,[this]{updateElementPhysicalSize();syncMaskSliceMapping();});
+    connect(cellWidth_,qOverload<int>(&QSpinBox::valueChanged),this,[this]{updateGridCountLabel();updateElementPhysicalSize();});
+    connect(cellHeight_,qOverload<int>(&QSpinBox::valueChanged),this,[this]{updateGridCountLabel();updateElementPhysicalSize();});
+    connect(cloudPixelScale_,qOverload<double>(&QDoubleSpinBox::valueChanged),this,[this]{updateElementPhysicalSize();syncMaskSliceMapping();scheduleJobPreview(false);});
     connect(cloudMaximumHeight_,qOverload<double>(&QDoubleSpinBox::valueChanged),this,[this]{syncMaskSliceMapping();});
     connect(cloudInvertHeight_,&QCheckBox::toggled,this,[this]{syncMaskSliceMapping();});
-    connect(printModeCheck_,&QCheckBox::toggled,this,[this](bool checked){printOptionsContainer_->setVisible(checked);updateSegmentationStatistics();});
-    connect(repeatTimes_,qOverload<int>(&QSpinBox::valueChanged),this,[this]{updateSegmentationStatistics();});
-    connect(canvasX_,qOverload<int>(&QSpinBox::valueChanged),this,[this](int value){if(canvasLockCheck_->isChecked()){const QSignalBlocker blocker(canvasY_);canvasY_->setValue(value);}});
-    connect(canvasY_,qOverload<int>(&QSpinBox::valueChanged),this,[this](int value){if(canvasLockCheck_->isChecked()){const QSignalBlocker blocker(canvasX_);canvasX_->setValue(value);}});
-    connect(canvasLockCheck_,&QCheckBox::toggled,this,[this](bool checked){if(!checked)return;const int value=std::max(canvasX_->value(),canvasY_->value());const QSignalBlocker blockX(canvasX_);const QSignalBlocker blockY(canvasY_);canvasX_->setValue(value);canvasY_->setValue(value);});
-    connect(canvasX_,qOverload<int>(&QSpinBox::valueChanged),this,[this]{scheduleJobPreview(false);});
-    connect(canvasY_,qOverload<int>(&QSpinBox::valueChanged),this,[this]{scheduleJobPreview(false);});
-    connect(reverseYCheck_,&QCheckBox::toggled,this,[this]{scheduleJobPreview(false);});
     connect(taskResetTimer_,&QTimer::timeout,this,&MainWindow::setIdleTaskDisplay);
     connect(view_,&LargeImageView::viewStatusChanged,this,[this](double z,qint64,qint64){zoomInfo_->setText(QStringLiteral("%1%").arg(z*100,0,'f',1));});
     connect(view_,&LargeImageView::pixelValueChanged,this,[this](qint64 x,qint64 y,quint32 value,bool valid){pixelProbeLabel_->setText(valid?QStringLiteral("X: %1  Y: %2  灰度: %3").arg(x).arg(y).arg(value):QStringLiteral("X: --  Y: --  灰度: --"));});
@@ -257,9 +227,7 @@ void MainWindow::connectUi() {
         if(action==PendingAction::Scan){directoryPaths_=value.toStringList();fileList_->clear();for(const auto& p:directoryPaths_){auto* item=new QListWidgetItem(QFileInfo(p).fileName(),fileList_);item->setData(Qt::UserRole,p);}if(!directoryPaths_.isEmpty()){fileList_->setCurrentRow(0,QItemSelectionModel::ClearAndSelect);loadCurrentListItem();}else QMessageBox::information(this,QStringLiteral("扫描结果"),QStringLiteral("目录中没有支持的图片。"));}
         else if(action==PendingAction::Load)acceptDocument(value.value<ImageDocumentPtr>());
         else if(action==PendingAction::Merge)acceptMosaicResult(value.value<MosaicBuildResult>());
-        else if(action==PendingAction::Detect){segmentation_=value.value<SegmentationResult>();for(auto*s:{cellWidth_,cellHeight_,threshold_})s->blockSignals(true);polarity_->blockSignals(true);cellWidth_->setValue(segmentation_.settings.cellWidth);cellHeight_->setValue(segmentation_.settings.cellHeight);threshold_->setValue(segmentation_.settings.threshold);polarity_->setCurrentIndex(segmentation_.settings.polarity==ForegroundPolarity::Dark?0:1);for(auto*s:{cellWidth_,cellHeight_,threshold_})s->blockSignals(false);polarity_->blockSignals(false);updateGridCountLabel();updateSegmentationStatistics();updateElementPhysicalSize();const bool valid=segmentation_.rows>0&&segmentation_.columns>0;if(!valid)pathButton_->setChecked(false);view_->setSegmentation(segmentation_);view_->setTraversalMode(selectedTraversalMode());view_->setTraversalPathVisible(pathButton_->isChecked());exportButton_->setEnabled(valid);pathButton_->setEnabled(valid);if(valid)scheduleJobPreview(true);if(!segmentation_.warning.isEmpty())QMessageBox::warning(this,QStringLiteral("识别提示"),segmentation_.warning);}
-        else if(action==PendingAction::ExportPreflight)showExportPreflight(value.value<ExportPreflightResult>());
-        else if(action==PendingAction::SplitExport){const bool opened=QDesktopServices::openUrl(QUrl::fromLocalFile(QDir(exportDirectory_).absolutePath()));if(opened)QMessageBox::information(this,QStringLiteral("导出完成"),QStringLiteral("所有分割图片及 export-report.json 已成功导出。"));else QMessageBox::warning(this,QStringLiteral("导出完成"),QStringLiteral("导出成功，但无法自动打开输出目录。"));if(lastExportWasPrint_)loadJobFile(QDir(exportDirectory_).filePath(QStringLiteral("job.json")),true);}
+        else if(action==PendingAction::Detect){segmentation_=value.value<SegmentationResult>();for(auto*s:{cellWidth_,cellHeight_,threshold_})s->blockSignals(true);polarity_->blockSignals(true);cellWidth_->setValue(segmentation_.settings.cellWidth);cellHeight_->setValue(segmentation_.settings.cellHeight);threshold_->setValue(segmentation_.settings.threshold);polarity_->setCurrentIndex(segmentation_.settings.polarity==ForegroundPolarity::Dark?0:1);for(auto*s:{cellWidth_,cellHeight_,threshold_})s->blockSignals(false);polarity_->blockSignals(false);updateGridCountLabel();updateElementPhysicalSize();const bool valid=segmentation_.rows>0&&segmentation_.columns>0;if(!valid)pathButton_->setChecked(false);view_->setSegmentation(segmentation_);view_->setTraversalMode(selectedTraversalMode());view_->setTraversalPathVisible(pathButton_->isChecked());exportButton_->setEnabled(valid);pathButton_->setEnabled(valid);if(valid)scheduleJobPreview(true);if(!segmentation_.warning.isEmpty())QMessageBox::warning(this,QStringLiteral("识别提示"),segmentation_.warning);}
         else if(action==PendingAction::SelectedBlocksExport)QMessageBox::information(this,QStringLiteral("导出完成"),QStringLiteral("选中的块已成功导出。"));
         else if(action==PendingAction::JobLoad){acceptJobDocument(value.value<JobDocumentPtr>(),false);showPreviewTab(1);}
         else if(action==PendingAction::JobLoadExport){acceptJobDocument(value.value<JobDocumentPtr>(),true);showPreviewTab(1);}
@@ -369,11 +337,7 @@ void MainWindow::restoreSettings() {
                                            polarity_->count()));
     traversal_->setCurrentIndex(indexValue(QStringLiteral("segmentation/traversal"), 0,
                                             traversal_->count()));
-    printModeCheck_->setChecked(settings.value(QStringLiteral("print/enabled"), false).toBool());
-    canvasLockCheck_->setChecked(settings.value(QStringLiteral("print/canvasLock"), true).toBool());
-    reverseYCheck_->setChecked(settings.value(QStringLiteral("print/reverseY"), false).toBool());
-    repeatTimes_->setValue(boundedValue(QStringLiteral("print/repeatTimes"), 10, 1, INT_MAX));
-    printOptionsContainer_->setVisible(printModeCheck_->isChecked());
+    reverseYSetting_ = settings.value(QStringLiteral("print/reverseY"), false).toBool();
     previewLayoutMode_->setCurrentIndex(indexValue(QStringLiteral("preview/layout"), 0,
                                                     previewLayoutMode_->count()));
     autoJumpCheck_->setChecked(settings.value(QStringLiteral("preview/autoJump"), false).toBool());
@@ -402,10 +366,7 @@ void MainWindow::saveSettings() const {
     settings.setValue(QStringLiteral("segmentation/threshold"), threshold_->value());
     settings.setValue(QStringLiteral("segmentation/polarity"), polarity_->currentIndex());
     settings.setValue(QStringLiteral("segmentation/traversal"), traversal_->currentIndex());
-    settings.setValue(QStringLiteral("print/enabled"), printModeCheck_->isChecked());
-    settings.setValue(QStringLiteral("print/canvasLock"), canvasLockCheck_->isChecked());
-    settings.setValue(QStringLiteral("print/reverseY"), reverseYCheck_->isChecked());
-    settings.setValue(QStringLiteral("print/repeatTimes"), repeatTimes_->value());
+    settings.setValue(QStringLiteral("print/reverseY"), reverseYSetting_);
     settings.setValue(QStringLiteral("preview/layout"), previewLayoutMode_->currentIndex());
     settings.setValue(QStringLiteral("preview/autoJump"), autoJumpCheck_->isChecked());
     settings.setValue(QStringLiteral("pointCloud/pixelScale"),cloudPixelScale_->value());
@@ -426,18 +387,11 @@ void MainWindow::resetParameters() {
     const QSignalBlocker thresholdBlock(threshold_);
     const QSignalBlocker polarityBlock(polarity_);
     const QSignalBlocker traversalBlock(traversal_);
-    const QSignalBlocker printBlock(printModeCheck_);
-    const QSignalBlocker lockBlock(canvasLockCheck_);
-    const QSignalBlocker reverseBlock(reverseYCheck_);
-    const QSignalBlocker repeatBlock(repeatTimes_);
     cellWidth_->setValue(220); cellHeight_->setValue(220); threshold_->setValue(128);
     polarity_->setCurrentIndex(0); traversal_->setCurrentIndex(0);
-    printModeCheck_->setChecked(false); canvasLockCheck_->setChecked(true);
-    reverseYCheck_->setChecked(false); repeatTimes_->setValue(10);
-    printOptionsContainer_->hide();
+    reverseYSetting_ = false;
     view_->setTraversalMode(TraversalMode::SnakeZ);
     updateGridCountLabel();
-    updateSegmentationStatistics();
     updateElementPhysicalSize();
     updateSelectedCellLabel();
     scheduleJobPreview(false);
@@ -560,56 +514,7 @@ void MainWindow::updateElementPhysicalSize() {
             .arg(cellHeight_->value()));
 }
 
-void MainWindow::updateSegmentationStatistics() {
-    const auto clearValues = [this] {
-        statisticsMode_->setText(QStringLiteral("--"));
-        statisticsGrid_->setText(QStringLiteral("--"));
-        statisticsFileCount_->setText(QStringLiteral("--"));
-        statisticsOutputSize_->setText(QStringLiteral("--"));
-        statisticsOutputSize_->setToolTip({});
-        statisticsRequiredSpace_->setText(QStringLiteral("--"));
-        statisticsRequiredSpace_->setToolTip({});
-    };
-    if (!document_ || segmentation_.rows <= 0 || segmentation_.columns <= 0) {
-        clearValues();
-        statisticsStatus_->setText(QStringLiteral("请先完成分割计算。"));
-        return;
-    }
-    if (cellWidth_->value() != segmentation_.settings.cellWidth ||
-        cellHeight_->value() != segmentation_.settings.cellHeight) {
-        clearValues();
-        statisticsStatus_->setText(QStringLiteral("分割宽高已修改，请重新应用参数。"));
-        return;
-    }
-
-    const bool printMode = printModeCheck_->isChecked();
-    ExportRequest request{printMode ? ExportMode::PrintPackage : ExportMode::SplitTiles,
-        {}, document_, segmentation_, selectedTraversalMode(),
-        {canvasX_->value(), canvasY_->value(), repeatTimes_->value(),
-         reverseYCheck_->isChecked()}, true};
-    const ExportSizeEstimate estimate = ExportPreflight::estimateOutput(request);
-    statisticsMode_->setText(printMode ? QStringLiteral("打印包") : QStringLiteral("普通分割"));
-    statisticsGrid_->setText(QStringLiteral("%1 × %2")
-                                 .arg(segmentation_.columns).arg(segmentation_.rows));
-    if (!estimate.valid) {
-        statisticsFileCount_->setText(QStringLiteral("--"));
-        statisticsOutputSize_->setText(QStringLiteral("--"));
-        statisticsOutputSize_->setToolTip({});
-        statisticsRequiredSpace_->setText(QStringLiteral("--"));
-        statisticsRequiredSpace_->setToolTip({});
-        statisticsStatus_->setText(QStringLiteral("无法估算：%1").arg(estimate.error));
-        return;
-    }
-    statisticsStatus_->setText(QStringLiteral("已按当前导出选项计算。"));
-    statisticsFileCount_->setText(QStringLiteral("%1 个").arg(estimate.bmpFileCount));
-    statisticsOutputSize_->setText(formatStorageSize(estimate.estimatedTotalBytes));
-    statisticsOutputSize_->setToolTip(QStringLiteral("其中 BMP 数据：%1")
-                                          .arg(formatStorageSize(estimate.estimatedBmpBytes)));
-    statisticsRequiredSpace_->setText(formatStorageSize(estimate.requiredBytes));
-    statisticsRequiredSpace_->setToolTip(QStringLiteral("预计输出加 max(16 MB, 5%) 安全余量"));
-}
-
-void MainWindow::setBusyUi(bool busy) { openButton_->setEnabled(!busy);directoryButton_->setEnabled(!busy);jobImportButton_->setEnabled(!busy&&jobView_->isVulkanAvailable());generateCloudButton_->setEnabled(!busy&&document_&&ImageLoader::isProcessable(document_->metadata)&&pointCloudView_->isVulkanAvailable());cloudPixelScale_->setEnabled(!busy);cloudMaximumHeight_->setEnabled(!busy);cloudInvertHeight_->setEnabled(!busy);cloudStartColorButton_->setEnabled(!busy);cloudEndColorButton_->setEnabled(!busy);mergeButton_->setEnabled(!busy&&!directoryPaths_.isEmpty());detectButton_->setEnabled(!busy&&document_&&ImageLoader::isProcessable(document_->metadata));manualPreviewButton_->setEnabled(!busy&&document_&&ImageLoader::isProcessable(document_->metadata));const bool hasSegmentation=segmentation_.rows>0&&segmentation_.columns>0;exportButton_->setEnabled(!busy&&hasSegmentation);selectedBlocksExportButton_->setEnabled(!busy&&hasSegmentation&&view_&&!view_->selectedCells().isEmpty());pathButton_->setEnabled(!busy&&hasSegmentation);previousButton_->setEnabled(!busy&&!directoryPaths_.isEmpty());nextButton_->setEnabled(!busy&&!directoryPaths_.isEmpty());mergedExportButton_->setEnabled(!busy&&mergedList_->currentRow()>=0);printModeCheck_->setEnabled(!busy);printOptionsContainer_->setEnabled(!busy);fileList_->setEnabled(!busy);mergedList_->setEnabled(!busy);previewLayoutMode_->setEnabled(!busy);autoJumpCheck_->setEnabled(!busy);resetParametersButton_->setEnabled(!busy);clearFixedGrayPointsButton_->setEnabled(!busy&&!view_->fixedGrayPoints().isEmpty());cancelButton_->setEnabled(busy); }
+void MainWindow::setBusyUi(bool busy) { openButton_->setEnabled(!busy);directoryButton_->setEnabled(!busy);jobImportButton_->setEnabled(!busy&&jobView_->isVulkanAvailable());generateCloudButton_->setEnabled(!busy&&document_&&ImageLoader::isProcessable(document_->metadata)&&pointCloudView_->isVulkanAvailable());cloudPixelScale_->setEnabled(!busy);cloudMaximumHeight_->setEnabled(!busy);cloudInvertHeight_->setEnabled(!busy);cloudStartColorButton_->setEnabled(!busy);cloudEndColorButton_->setEnabled(!busy);mergeButton_->setEnabled(!busy&&!directoryPaths_.isEmpty());detectButton_->setEnabled(!busy&&document_&&ImageLoader::isProcessable(document_->metadata));manualPreviewButton_->setEnabled(!busy&&document_&&ImageLoader::isProcessable(document_->metadata));const bool hasSegmentation=segmentation_.rows>0&&segmentation_.columns>0;exportButton_->setEnabled(!busy&&hasSegmentation);selectedBlocksExportButton_->setEnabled(!busy&&hasSegmentation&&view_&&!view_->selectedCells().isEmpty());pathButton_->setEnabled(!busy&&hasSegmentation);previousButton_->setEnabled(!busy&&!directoryPaths_.isEmpty());nextButton_->setEnabled(!busy&&!directoryPaths_.isEmpty());mergedExportButton_->setEnabled(!busy&&mergedList_->currentRow()>=0);fileList_->setEnabled(!busy);mergedList_->setEnabled(!busy);previewLayoutMode_->setEnabled(!busy);autoJumpCheck_->setEnabled(!busy);resetParametersButton_->setEnabled(!busy);clearFixedGrayPointsButton_->setEnabled(!busy&&!view_->fixedGrayPoints().isEmpty());cancelButton_->setEnabled(busy); }
 
 void MainWindow::openImage(){const QString p=QFileDialog::getOpenFileName(this,QStringLiteral("打开图片"),lastImageDirectory_,QStringLiteral("图片 (*.bmp *.png *.jpg *.jpeg *.tif *.tiff)"));if(!p.isEmpty()){lastImageDirectory_=QFileInfo(p).absolutePath();directoryPaths_.clear();fileList_->clear();loadPath(p);}}
 void MainWindow::openDirectory(){const QString d=QFileDialog::getExistingDirectory(this,QStringLiteral("选择图片目录"),lastDirectoryDirectory_);if(d.isEmpty())return;lastDirectoryDirectory_=QFileInfo(d).absoluteFilePath();scanDirectory(d);}
@@ -623,9 +528,8 @@ void MainWindow::acceptMosaicResult(const MosaicBuildResult& result){if(result.s
 void MainWindow::showMergedDocument(int row){if(row<0||row>=mergedDocuments_.size())return;acceptDocument(mergedDocuments_[row]);setBusyUi(tasks_->isBusy());}
 void MainWindow::chooseMergedExportPath(){const int row=mergedList_->currentRow();if(row<0||row>=mergedDocuments_.size())return;QString defaultName=QStringLiteral("合并结果_%1.png").arg(row+1);QString path=QFileDialog::getSaveFileName(this,QStringLiteral("导出合并图"),QDir(lastMergedExportDirectory_).filePath(defaultName),QStringLiteral("PNG 图片 (*.png)"));if(path.isEmpty())return;if(QFileInfo(path).suffix().compare(QStringLiteral("png"),Qt::CaseInsensitive)!=0)path+=QStringLiteral(".png");lastMergedExportDirectory_=QFileInfo(path).absolutePath();const auto document=mergedDocuments_[row];pendingAction_=PendingAction::MosaicExport;tasks_->start(QStringLiteral("导出合并图"),[path,document](const auto&t,const auto&p,QString*e){if(!MergedImageExporter::writePng(path,document,t,p,e))return QVariant{};return QVariant(true);});}
 void MainWindow::detectSegmentation(){if(!document_){QMessageBox::information(this,QStringLiteral("分割预览"),QStringLiteral("请先加载图像。"));return;}pendingAction_=PendingAction::Detect;const auto doc=document_;tasks_->start(QStringLiteral("自动识别分割"),[doc](const auto&t,const auto&p,QString*e){return QVariant::fromValue(PatternDetector::detect(doc,t,p,e));});}
-void MainWindow::applyManualSegmentation(){if(!document_||cellWidth_->value()<=0||cellHeight_->value()<=0)return;const SegmentationSettings settings{cellWidth_->value(),cellHeight_->value(),threshold_->value(),polarity_->currentIndex()==0?ForegroundPolarity::Dark:ForegroundPolarity::Light};const auto grid=PatternDetector::makeManualGrid(document_,settings);updateGridCountLabel();if(grid.rows<=0||grid.columns<=0){segmentation_=grid;updateSegmentationStatistics();pathButton_->setChecked(false);view_->clearSegmentation();exportButton_->setEnabled(false);pathButton_->setEnabled(false);statusBar()->showMessage(grid.warning,8000);return;}segmentation_=grid;updateSegmentationStatistics();view_->setSegmentation(segmentation_);view_->setTraversalMode(selectedTraversalMode());view_->setTraversalPathVisible(pathButton_->isChecked());exportButton_->setEnabled(true);pathButton_->setEnabled(true);scheduleJobPreview(true);if(grid.warning.isEmpty())statusBar()->clearMessage();else statusBar()->showMessage(grid.warning,8000);}
-void MainWindow::chooseExportDirectory(){if(!document_||segmentation_.rows<=0||segmentation_.columns<=0){QMessageBox::information(this,QStringLiteral("导出"),QStringLiteral("请先完成分割预览。"));return;}exportDirectory_=QFileDialog::getExistingDirectory(this,QStringLiteral("选择导出目录"),lastSplitExportDirectory_);if(exportDirectory_.isEmpty())return;lastSplitExportDirectory_=QFileInfo(exportDirectory_).absoluteFilePath();const bool printMode=printModeCheck_->isChecked();pendingExportRequest_={printMode?ExportMode::PrintPackage:ExportMode::SplitTiles,exportDirectory_,document_,segmentation_,selectedTraversalMode(),{canvasX_->value(),canvasY_->value(),repeatTimes_->value(),reverseYCheck_->isChecked()},true};pendingAction_=PendingAction::ExportPreflight;const auto request=pendingExportRequest_;tasks_->start(QStringLiteral("导出预检"),[request](const auto&t,const auto&p,QString*){return QVariant::fromValue(ExportPreflight::inspect(request,t,p));});}
-void MainWindow::startExport(const ExportExecutionOptions& execution){pendingAction_=PendingAction::SplitExport;const auto request=pendingExportRequest_;lastExportWasPrint_=request.mode==ExportMode::PrintPackage;tasks_->start(lastExportWasPrint_?QStringLiteral("导出输入打印包"):QStringLiteral("导出分割图片"),[request,execution](const auto&t,const auto&p,QString*e){const bool ok=request.mode==ExportMode::PrintPackage?SplitExporter::exportPrintPackage(request.outputDirectory,request.document,request.segmentation,request.traversalMode,request.printOptions,execution,t,p,e):SplitExporter::exportTiles(request.outputDirectory,request.document,request.segmentation,request.traversalMode,execution,t,p,e);return ok?QVariant(true):QVariant{};});}
+void MainWindow::applyManualSegmentation(){if(!document_||cellWidth_->value()<=0||cellHeight_->value()<=0)return;const SegmentationSettings settings{cellWidth_->value(),cellHeight_->value(),threshold_->value(),polarity_->currentIndex()==0?ForegroundPolarity::Dark:ForegroundPolarity::Light};const auto grid=PatternDetector::makeManualGrid(document_,settings);updateGridCountLabel();if(grid.rows<=0||grid.columns<=0){segmentation_=grid;pathButton_->setChecked(false);view_->clearSegmentation();exportButton_->setEnabled(false);pathButton_->setEnabled(false);statusBar()->showMessage(grid.warning,8000);return;}segmentation_=grid;view_->setSegmentation(segmentation_);view_->setTraversalMode(selectedTraversalMode());view_->setTraversalPathVisible(pathButton_->isChecked());exportButton_->setEnabled(true);pathButton_->setEnabled(true);scheduleJobPreview(true);if(grid.warning.isEmpty())statusBar()->clearMessage();else statusBar()->showMessage(grid.warning,8000);}
+void MainWindow::chooseExportDirectory(){if(!document_||segmentation_.rows<=0||segmentation_.columns<=0){QMessageBox::information(this,QStringLiteral("导出"),QStringLiteral("请先完成分割预览。"));return;}LayeredExportDialog dialog(this);dialog.configure(document_,segmentation_,selectedTraversalMode(),cloudPixelScale_->value(),cloudMaximumHeight_->value(),cloudInvertHeight_->isChecked(),reverseYSetting_,lastSplitExportDirectory_);if(dialog.exec()!=QDialog::Accepted)return;reverseYSetting_=dialog.reverseY();lastSplitExportDirectory_=dialog.outputDirectory();scheduleJobPreview(false);loadJobFile(QDir(lastSplitExportDirectory_).filePath(QStringLiteral("job.json")),true);}
 
 void MainWindow::chooseSelectedBlocksExportDirectory() {
     const QVector<QPoint> cells = view_ ? view_->selectedCells() : QVector<QPoint>{};
@@ -687,57 +591,7 @@ void MainWindow::chooseSelectedBlocksExportDirectory() {
     }
 }
 
-void MainWindow::showExportPreflight(const ExportPreflightResult& result) {
-    QMessageBox box(this);
-    box.setObjectName(QStringLiteral("exportPreflightDialog"));
-    box.setWindowTitle(result.valid ? QStringLiteral("确认导出") : QStringLiteral("导出预检未通过"));
-    box.setIcon(result.valid ? (result.conflictCount > 0 ? QMessageBox::Warning : QMessageBox::Question)
-                             : QMessageBox::Critical);
-    const QString mode = pendingExportRequest_.mode == ExportMode::PrintPackage
-        ? QStringLiteral("输入打印包") : QStringLiteral("普通分割图片");
-    box.setText(QStringLiteral("模式：%1\n网格：%2 × %3\nBMP 文件：%4 个\n命名样例：%5 … %6")
-        .arg(mode).arg(pendingExportRequest_.segmentation.columns)
-        .arg(pendingExportRequest_.segmentation.rows).arg(result.bmpFileCount)
-        .arg(result.firstOutput, result.lastOutput));
-    QStringList details;
-    details << QStringLiteral("预计 BMP 数据：%1").arg(formatStorageSize(result.estimatedBmpBytes));
-    details << QStringLiteral("含安全余量所需空间：%1").arg(formatStorageSize(result.requiredBytes));
-    details << QStringLiteral("可用空间：%1").arg(result.spaceKnown
-        ? formatStorageSize(result.availableBytes) : QStringLiteral("未知"));
-    details << QStringLiteral("已有受管目标：%1 个").arg(result.conflictCount);
-    if (!result.blockingError.isEmpty()) details << QStringLiteral("阻断原因：%1").arg(result.blockingError);
-    details << result.warnings;
-    box.setInformativeText(details.join(QLatin1Char('\n')));
-    if (!result.conflictSamples.isEmpty()) {
-        box.setDetailedText(QStringLiteral("冲突样例：\n%1")
-                                .arg(result.conflictSamples.join(QLatin1Char('\n'))));
-    }
-    if (!result.valid) {
-        box.addButton(QMessageBox::Close);
-        box.exec();
-        return;
-    }
-
-    auto* startButton = box.addButton(QStringLiteral("开始导出"), QMessageBox::AcceptRole);
-    startButton->setObjectName(QStringLiteral("exportPreflightAcceptButton"));
-    box.addButton(QStringLiteral("取消"), QMessageBox::RejectRole);
-    QCheckBox* overwriteCheck = nullptr;
-    if (result.conflictCount > 0) {
-        overwriteCheck = new QCheckBox(
-            QStringLiteral("我确认覆盖上述 %1 个受管目标").arg(result.conflictCount), &box);
-        overwriteCheck->setObjectName(QStringLiteral("exportOverwriteCheck"));
-        box.setCheckBox(overwriteCheck);
-        startButton->setEnabled(false);
-        connect(overwriteCheck, &QCheckBox::toggled, startButton, &QWidget::setEnabled);
-    }
-    box.exec();
-    if (box.clickedButton() != startButton) {
-        showTerminalTaskDisplay(QStringLiteral("已取消导出"));
-        return;
-    }
-    startExport({result.conflictCount > 0, true, result.targetFingerprint});
-}
-void MainWindow::acceptDocument(const ImageDocumentPtr& doc){if(!doc)return;mergePreviewGeneration_=0;if(elementCloudWindow_)elementCloudWindow_->cancelAndClear();if(maskSliceWindow_)maskSliceWindow_->cancelAndClear();document_=doc;segmentation_={};jobDocument_.reset();jobView_->setDocument({});pointCloudDocument_.reset();pointCloudView_->clear();selectedRow_=-1;selectedColumn_=-1;pathButton_->setChecked(false);lastTilePhase_.clear();lastTileCompleted_=-1;lastTileTotal_=-1;const int canvasWidth=static_cast<int>(std::clamp<qint64>(doc->metadata.width,1,INT_MAX));const int canvasHeight=static_cast<int>(std::clamp<qint64>(doc->metadata.height,1,INT_MAX));{const QSignalBlocker blockX(canvasX_);const QSignalBlocker blockY(canvasY_);const QSignalBlocker blockLock(canvasLockCheck_);canvasX_->setValue(canvasWidth);canvasY_->setValue(canvasHeight);canvasLockCheck_->setChecked(doc->metadata.width==doc->metadata.height);}view_->setDocument(doc);showPreviewTab(0);updateSelectedCellLabel();imageInfo_->setText(QStringLiteral("%1 × %2 | %3").arg(doc->metadata.width).arg(doc->metadata.height).arg(pixelDescription(doc->metadata)));updateGridCountLabel();updateSegmentationStatistics();setBusyUi(tasks_->isBusy());}
+void MainWindow::acceptDocument(const ImageDocumentPtr& doc){if(!doc)return;mergePreviewGeneration_=0;if(elementCloudWindow_)elementCloudWindow_->cancelAndClear();if(maskSliceWindow_)maskSliceWindow_->cancelAndClear();document_=doc;segmentation_={};jobDocument_.reset();jobView_->setDocument({});pointCloudDocument_.reset();pointCloudView_->clear();selectedRow_=-1;selectedColumn_=-1;pathButton_->setChecked(false);lastTilePhase_.clear();lastTileCompleted_=-1;lastTileTotal_=-1;view_->setDocument(doc);showPreviewTab(0);updateSelectedCellLabel();imageInfo_->setText(QStringLiteral("%1 × %2 | %3").arg(doc->metadata.width).arg(doc->metadata.height).arg(pixelDescription(doc->metadata)));updateGridCountLabel();setBusyUi(tasks_->isBusy());}
 
 void MainWindow::chooseJobFile(){const QString path=QFileDialog::getOpenFileName(this,QStringLiteral("选择 Job 文件"),lastJobDirectory_,QStringLiteral("Job 文件 (*.json *.aldl);;JSON (*.json);;ALDL (*.aldl)"));if(!path.isEmpty()){lastJobDirectory_=QFileInfo(path).absolutePath();loadJobFile(path,false);}}
 
@@ -804,7 +658,7 @@ void MainWindow::loadJobFile(const QString& path,bool exported){if(path.isEmpty(
 
 void MainWindow::scheduleJobPreview(bool switchToJob){if(!jobView_->isVulkanAvailable()||!document_||segmentation_.rows<=0||segmentation_.columns<=0)return;switchToJobAfterBuild_=switchToJobAfterBuild_||switchToJob;if(switchToJob){jobDocument_.reset();jobView_->setDocument({});showPreviewTab(1);}jobPreviewTimer_->start();}
 
-void MainWindow::rebuildJobPreview(){if(!document_||segmentation_.rows<=0||segmentation_.columns<=0)return;if(tasks_->isBusy()){jobPreviewTimer_->start();return;}const auto metadata=document_->metadata;const auto segmentation=segmentation_;const auto mode=selectedTraversalMode();const PrintExportOptions options{canvasX_->value(),canvasY_->value(),repeatTimes_->value(),reverseYCheck_->isChecked()};pendingAction_=PendingAction::JobPreviewBuild;if(!tasks_->start(QStringLiteral("生成 Job 预览"),[metadata,segmentation,mode,options](const auto&t,const auto&p,QString*e){return QVariant::fromValue(JobPreviewBuilder::build(metadata,segmentation,mode,options,t,p,e));})){pendingAction_=PendingAction::None;jobPreviewTimer_->start();}}
+void MainWindow::rebuildJobPreview(){if(!document_||segmentation_.rows<=0||segmentation_.columns<=0)return;if(tasks_->isBusy()){jobPreviewTimer_->start();return;}const auto metadata=document_->metadata;const auto segmentation=segmentation_;const auto mode=selectedTraversalMode();const JobPlacementOptions options{cloudPixelScale_->value(),reverseYSetting_};pendingAction_=PendingAction::JobPreviewBuild;if(!tasks_->start(QStringLiteral("生成 Job 预览"),[metadata,segmentation,mode,options](const auto&t,const auto&p,QString*e){return QVariant::fromValue(JobPreviewBuilder::build(metadata,segmentation,mode,options,t,p,e));})){pendingAction_=PendingAction::None;jobPreviewTimer_->start();}}
 
 void MainWindow::acceptJobDocument(const JobDocumentPtr& document,bool preserveLink){if(!document)return;if(preserveLink){document->source=JobDocumentSource::ExportedFile;if(jobDocument_&&jobDocument_->isLinked()&&jobDocument_->points.size()==document->points.size())document->linkedCells=jobDocument_->linkedCells;else{const auto order=SplitExporter::traversal(segmentation_.rows,segmentation_.columns,selectedTraversalMode());if(order.size()==document->points.size())document->linkedCells=order;}}jobDocument_=document;jobView_->setDocument(jobDocument_);if(jobDocument_->isLinked()&&selectedRow_>=0&&selectedColumn_>=0)selectJobFromImage(selectedRow_,selectedColumn_);else jobView_->clearSelection();}
 

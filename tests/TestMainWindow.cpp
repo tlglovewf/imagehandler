@@ -1,10 +1,14 @@
 #include "imaging/VipsSupport.h"
 #include "imaging/ImageLoader.h"
+#include "imaging/PatternDetector.h"
+#include "io/SplitExporter.h"
+#include "io/LayeredPackageExporter.h"
 #include "ui/LargeImageView.h"
 #include "ui/JobPreviewWidget.h"
 #include "ui/PointCloudWidget.h"
 #include "ui/ElementPointCloudWindow.h"
 #include "ui/MaskSliceWindow.h"
+#include "ui/LayeredExportDialog.h"
 #include "ui/MaskStackWidget.h"
 #include "ui/MainWindow.h"
 
@@ -15,6 +19,7 @@
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QDoubleSpinBox>
+#include <QDir>
 #include <QListWidget>
 #include <QLabel>
 #include <QMessageBox>
@@ -87,17 +92,15 @@ void TestMainWindow::listModesAndMergedExportControl() {
     const auto* pathButton = window.findChild<QPushButton*>(QStringLiteral("traversalPathButton"));
     const auto* splitExportButton = window.findChild<QPushButton*>(QStringLiteral("splitExportButton"));
     const auto* selectedCell = window.findChild<QLabel*>(QStringLiteral("selectedSegmentationCell"));
-    auto* printMode = window.findChild<QCheckBox*>(QStringLiteral("chk_o_print"));
-    auto* printOptions = window.findChild<QWidget*>(QStringLiteral("printOptionsContainer"));
-    auto* canvasX = window.findChild<QSpinBox*>(QStringLiteral("canvasX"));
-    auto* canvasY = window.findChild<QSpinBox*>(QStringLiteral("canvasY"));
-    auto* canvasLock = window.findChild<QCheckBox*>(QStringLiteral("lock"));
-    auto* reverseY = window.findChild<QCheckBox*>(QStringLiteral("chk_y_reverse"));
-    auto* repeatTimes = window.findChild<QSpinBox*>(QStringLiteral("repeat_times"));
     QVERIFY(directoryList); QVERIFY(mergedList); QVERIFY(exportButton);QVERIFY(previewButton);
     QVERIFY(taskTitle);QVERIFY(progress);QVERIFY(percent);QVERIFY(gridCount);
     QVERIFY(cellWidth);QVERIFY(cellHeight);QVERIFY(traversal);QVERIFY(pathButton);QVERIFY(splitExportButton);QVERIFY(selectedCell);
-    QVERIFY(printMode);QVERIFY(printOptions);QVERIFY(canvasX);QVERIFY(canvasY);QVERIFY(canvasLock);QVERIFY(reverseY);QVERIFY(repeatTimes);
+    QVERIFY(!window.findChild<QObject*>(QStringLiteral("chk_o_print")));
+    QVERIFY(!window.findChild<QObject*>(QStringLiteral("printOptionsContainer")));
+    QVERIFY(!window.findChild<QObject*>(QStringLiteral("canvasX")));
+    QVERIFY(!window.findChild<QObject*>(QStringLiteral("canvasY")));
+    QVERIFY(!window.findChild<QObject*>(QStringLiteral("lock")));
+    QVERIFY(!window.findChild<QObject*>(QStringLiteral("repeat_times")));
     QCOMPARE(directoryList->selectionMode(), QAbstractItemView::ExtendedSelection);
     QCOMPARE(mergedList->selectionMode(), QAbstractItemView::SingleSelection);
     QVERIFY(!exportButton->isEnabled());
@@ -110,22 +113,10 @@ void TestMainWindow::listModesAndMergedExportControl() {
     QCOMPARE(cellWidth->value(),220);QCOMPARE(cellHeight->value(),220);
     QVERIFY(pathButton->isCheckable());QVERIFY(!pathButton->isEnabled());QVERIFY(!pathButton->isChecked());
     QVERIFY(!splitExportButton->isEnabled());QCOMPARE(selectedCell->text(),QStringLiteral("未选择"));
-    QVERIFY(!printMode->isChecked());QVERIFY(printOptions->isHidden());
-    QCOMPARE(canvasX->minimum(),1);QCOMPARE(canvasX->maximum(),INT_MAX);QCOMPARE(canvasX->value(),1);
-    QCOMPARE(canvasY->minimum(),1);QCOMPARE(canvasY->maximum(),INT_MAX);QCOMPARE(canvasY->value(),1);
-    QVERIFY(canvasLock->isChecked());QVERIFY(!reverseY->isChecked());QCOMPARE(repeatTimes->value(),10);QCOMPARE(repeatTimes->singleStep(),1);
-    canvasX->setValue(7);QCOMPARE(canvasY->value(),7);
-    canvasY->setValue(8);QCOMPARE(canvasX->value(),8);
-    canvasLock->setChecked(false);canvasX->setValue(4);canvasY->setValue(9);QCOMPARE(canvasX->value(),4);QCOMPARE(canvasY->value(),9);
-    canvasLock->setChecked(true);QCOMPARE(canvasX->value(),9);QCOMPARE(canvasY->value(),9);
     QVERIFY(qobject_cast<LargeImageView*>(selectedCell->parentWidget()));
     QVERIFY(selectedCell->testAttribute(Qt::WA_TransparentForMouseEvents));
     QCOMPARE(splitExportButton->parentWidget(),previewButton->parentWidget());
     window.show();QTest::qWait(20);
-    printMode->setChecked(true);QVERIFY(printOptions->isVisible());QTest::qWait(10);
-    QVERIFY(printMode->geometry().bottom()<=printOptions->geometry().top());
-    QVERIFY(printOptions->geometry().bottom()<=splitExportButton->geometry().top());
-    printMode->setChecked(false);QVERIFY(printOptions->isHidden());QCOMPARE(canvasX->value(),9);QCOMPARE(canvasY->value(),9);
     QVERIFY(splitExportButton->geometry().top()>=previewButton->geometry().bottom());
     const auto* imageView=qobject_cast<LargeImageView*>(selectedCell->parentWidget());
     QVERIFY(std::abs(selectedCell->geometry().center().x()-imageView->rect().center().x())<=2);
@@ -133,21 +124,13 @@ void TestMainWindow::listModesAndMergedExportControl() {
 }
 
 void TestMainWindow::printCanvasFollowsDocument() {
-    QTemporaryDir directory;QVERIFY(directory.isValid());
-    QImage square(6,6,QImage::Format_Grayscale8);square.fill(20);
-    QImage rectangle(8,4,QImage::Format_Grayscale8);rectangle.fill(30);
-    const QString squarePath=directory.filePath("square.bmp");const QString rectanglePath=directory.filePath("rectangle.bmp");
-    QVERIFY(square.save(squarePath,"BMP"));QVERIFY(rectangle.save(rectanglePath,"BMP"));
-    QString error;const auto squareDocument=ImageLoader::load(squarePath,101,&error);QVERIFY2(squareDocument,qPrintable(error));
-    const auto rectangleDocument=ImageLoader::load(rectanglePath,102,&error);QVERIFY2(rectangleDocument,qPrintable(error));
-    MainWindow window;
-    auto* canvasX=window.findChild<QSpinBox*>(QStringLiteral("canvasX"));auto* canvasY=window.findChild<QSpinBox*>(QStringLiteral("canvasY"));auto* canvasLock=window.findChild<QCheckBox*>(QStringLiteral("lock"));
-    QVERIFY(canvasX);QVERIFY(canvasY);QVERIFY(canvasLock);
-    QVERIFY(QMetaObject::invokeMethod(&window,"acceptDocument",Qt::DirectConnection,Q_ARG(ImageDocumentPtr,squareDocument)));
-    QCOMPARE(canvasX->value(),6);QCOMPARE(canvasY->value(),6);QVERIFY(canvasLock->isChecked());
-    canvasX->setValue(99);
-    QVERIFY(QMetaObject::invokeMethod(&window,"acceptDocument",Qt::DirectConnection,Q_ARG(ImageDocumentPtr,rectangleDocument)));
-    QCOMPARE(canvasX->value(),8);QCOMPARE(canvasY->value(),4);QVERIFY(!canvasLock->isChecked());
+    SegmentationResult segmentation;
+    segmentation.settings.cellWidth=4;segmentation.settings.cellHeight=3;
+    segmentation.rows=2;segmentation.columns=2;
+    QCOMPARE(SplitExporter::physicalPosition(segmentation,QPoint(1,1),{0.25,false}),
+             QPointF(1.0,0.75));
+    QCOMPARE(SplitExporter::physicalPosition(segmentation,QPoint(1,1),{0.25,true}),
+             QPointF(1.0,-0.75));
 }
 
 void TestMainWindow::jobPreviewWorkspaceAndLinking() {
@@ -331,13 +314,10 @@ void TestMainWindow::settingsPersistenceAndReset() {
         auto* height=window.findChild<QSpinBox*>(QStringLiteral("segmentationCellHeight"));
         auto* threshold=window.findChild<QSpinBox*>(QStringLiteral("segmentationThreshold"));
         auto* traversal=window.findChild<QComboBox*>(QStringLiteral("segmentationTraversal"));
-        auto* printMode=window.findChild<QCheckBox*>(QStringLiteral("chk_o_print"));
-        auto* reverseY=window.findChild<QCheckBox*>(QStringLiteral("chk_y_reverse"));
-        auto* repeat=window.findChild<QSpinBox*>(QStringLiteral("repeat_times"));
         auto* cloudInvert=window.findChild<QCheckBox*>(QStringLiteral("cloudInvertHeight"));
-        QVERIFY(width);QVERIFY(height);QVERIFY(threshold);QVERIFY(traversal);QVERIFY(printMode);QVERIFY(reverseY);QVERIFY(repeat);QVERIFY(cloudInvert);
+        QVERIFY(width);QVERIFY(height);QVERIFY(threshold);QVERIFY(traversal);QVERIFY(cloudInvert);
         width->setValue(321);height->setValue(123);threshold->setValue(77);traversal->setCurrentIndex(1);
-        printMode->setChecked(true);reverseY->setChecked(true);repeat->setValue(4);cloudInvert->setChecked(false);
+        cloudInvert->setChecked(false);
         window.show();QTest::qWait(10);window.close();
     }
     MainWindow restored;
@@ -345,23 +325,17 @@ void TestMainWindow::settingsPersistenceAndReset() {
     auto* height=restored.findChild<QSpinBox*>(QStringLiteral("segmentationCellHeight"));
     auto* threshold=restored.findChild<QSpinBox*>(QStringLiteral("segmentationThreshold"));
     auto* traversal=restored.findChild<QComboBox*>(QStringLiteral("segmentationTraversal"));
-    auto* printMode=restored.findChild<QCheckBox*>(QStringLiteral("chk_o_print"));
-    auto* reverseY=restored.findChild<QCheckBox*>(QStringLiteral("chk_y_reverse"));
-    auto* repeat=restored.findChild<QSpinBox*>(QStringLiteral("repeat_times"));
     auto* reset=restored.findChild<QPushButton*>(QStringLiteral("resetParametersButton"));
-    auto* canvasX=restored.findChild<QSpinBox*>(QStringLiteral("canvasX"));
     auto* cloudInvert=restored.findChild<QCheckBox*>(QStringLiteral("cloudInvertHeight"));auto* cloudStart=restored.findChild<QPushButton*>(QStringLiteral("cloudStartColorButton"));auto* cloudEnd=restored.findChild<QPushButton*>(QStringLiteral("cloudEndColorButton"));
-    QVERIFY(width);QVERIFY(height);QVERIFY(threshold);QVERIFY(traversal);QVERIFY(printMode);QVERIFY(reverseY);QVERIFY(repeat);QVERIFY(reset);QVERIFY(canvasX);QVERIFY(cloudInvert);QVERIFY(cloudStart);QVERIFY(cloudEnd);
+    QVERIFY(width);QVERIFY(height);QVERIFY(threshold);QVERIFY(traversal);QVERIFY(reset);QVERIFY(cloudInvert);QVERIFY(cloudStart);QVERIFY(cloudEnd);
     QCOMPARE(width->value(),321);QCOMPARE(height->value(),123);QCOMPARE(threshold->value(),77);
-    QCOMPARE(traversal->currentIndex(),1);QVERIFY(printMode->isChecked());QVERIFY(reverseY->isChecked());
-    QCOMPARE(repeat->value(),4);QCOMPARE(canvasX->value(),1);QVERIFY(!cloudInvert->isChecked());QCOMPARE(cloudStart->property("cloudColor").value<QColor>(),QColor(0,0,255));QCOMPARE(cloudEnd->property("cloudColor").value<QColor>(),QColor(0,255,0));
+    QCOMPARE(traversal->currentIndex(),1);QVERIFY(!cloudInvert->isChecked());QCOMPARE(cloudStart->property("cloudColor").value<QColor>(),QColor(0,0,255));QCOMPARE(cloudEnd->property("cloudColor").value<QColor>(),QColor(0,255,0));
     const auto restoredLabels=restored.findChildren<QLabel*>();
     QVERIFY(std::any_of(restoredLabels.cbegin(),restoredLabels.cend(),
         [](const QLabel* label){return label->text()==QStringLiteral("未加载图像");}));
     QTest::mouseClick(reset,Qt::LeftButton);
     QCOMPARE(width->value(),220);QCOMPARE(height->value(),220);QCOMPARE(threshold->value(),128);
-    QCOMPARE(traversal->currentIndex(),0);QVERIFY(!printMode->isChecked());QVERIFY(!reverseY->isChecked());
-    QCOMPARE(repeat->value(),10);
+    QCOMPARE(traversal->currentIndex(),0);
 
     QSettings settings;settings.setValue(QStringLiteral("segmentation/cellWidth"),-5);
     settings.setValue(QStringLiteral("segmentation/threshold"),999);
@@ -392,27 +366,18 @@ void TestMainWindow::multipleImageDropIsSortedAndSelected() {
 }
 
 void TestMainWindow::preflightDialogRequiresExplicitOverwrite() {
-    MainWindow window;
-    ExportPreflightResult result;result.valid=true;result.bmpFileCount=4;
-    result.estimatedBmpBytes=4096;result.requiredBytes=16*1024*1024;
-    result.spaceKnown=true;result.availableBytes=100*1024*1024;
-    result.conflictCount=1;result.conflictSamples={QStringLiteral("1.bmp")};
-    result.firstOutput=QStringLiteral("1.bmp");result.lastOutput=QStringLiteral("4.bmp");
-    result.targetFingerprint=QStringLiteral("fingerprint");
-    bool dialogSeen=false;bool initiallyDisabled=false;bool enabledAfterCheck=false;
-    QTimer::singleShot(0,&window,[&]{
-        auto* box=window.findChild<QMessageBox*>(QStringLiteral("exportPreflightDialog"));
-        if(!box)return;dialogSeen=true;
-        auto* accept=box->findChild<QPushButton*>(QStringLiteral("exportPreflightAcceptButton"));
-        auto* check=box->findChild<QCheckBox*>(QStringLiteral("exportOverwriteCheck"));
-        initiallyDisabled=accept&&!accept->isEnabled();
-        if(check)check->setChecked(true);
-        enabledAfterCheck=accept&&accept->isEnabled();
-        for(QAbstractButton* button:box->buttons())if(box->buttonRole(button)==QMessageBox::RejectRole){button->click();break;}
-    });
-    QVERIFY(QMetaObject::invokeMethod(&window,"showExportPreflight",Qt::DirectConnection,
-                                      Q_ARG(ExportPreflightResult,result)));
-    QVERIFY(dialogSeen);QVERIFY(initiallyDisabled);QVERIFY(enabledAfterCheck);
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QImage source(2,1,QImage::Format_Grayscale8);source.fill(0);
+    const QString path=directory.filePath("preflight.bmp");QVERIFY(source.save(path,"BMP"));
+    QString error;const auto document=ImageLoader::load(path,402,&error);QVERIFY2(document,qPrintable(error));
+    const auto grid=PatternDetector::makeManualGrid(document,{1,1,128,ForegroundPolarity::Dark});
+    const QString output=directory.filePath("output");QVERIFY(QDir().mkpath(QDir(output).filePath("0")));
+    LayeredPackageRequest request{output,document,grid,TraversalMode::SnakeZ,
+        {0.25,1.0,0.1,1,1,false,false,false,LayerCountStrategy::RoundUp},true};
+    const auto result=LayeredPackageExporter::inspect(request);
+    QVERIFY(result.valid);QCOMPARE(result.conflictCount,qint64(1));
+    QCOMPARE(result.firstOutput,QStringLiteral("0/1.bmp"));
+    QCOMPARE(result.lastOutput,QStringLiteral("1/10.bmp"));
 }
 
 void TestMainWindow::segmentationStatisticsUpdates() {
@@ -420,43 +385,26 @@ void TestMainWindow::segmentationStatisticsUpdates() {
     QImage source(5,3,QImage::Format_Grayscale8);source.fill(42);
     const QString path=directory.filePath("statistics.bmp");QVERIFY(source.save(path,"BMP"));
     QString error;const auto document=ImageLoader::load(path,401,&error);QVERIFY2(document,qPrintable(error));
-    MainWindow window;
-    auto* status=window.findChild<QLabel*>(QStringLiteral("segmentationStatisticsStatus"));
-    auto* mode=window.findChild<QLabel*>(QStringLiteral("segmentationStatisticsMode"));
-    auto* grid=window.findChild<QLabel*>(QStringLiteral("segmentationStatisticsGrid"));
-    auto* files=window.findChild<QLabel*>(QStringLiteral("segmentationStatisticsFileCount"));
-    auto* output=window.findChild<QLabel*>(QStringLiteral("segmentationStatisticsOutputSize"));
-    auto* required=window.findChild<QLabel*>(QStringLiteral("segmentationStatisticsRequiredSpace"));
-    auto* width=window.findChild<QSpinBox*>(QStringLiteral("segmentationCellWidth"));
-    auto* height=window.findChild<QSpinBox*>(QStringLiteral("segmentationCellHeight"));
-    auto* preview=window.findChild<QPushButton*>(QStringLiteral("manualSegmentationPreviewButton"));
-    auto* printMode=window.findChild<QCheckBox*>(QStringLiteral("chk_o_print"));
-    auto* repeat=window.findChild<QSpinBox*>(QStringLiteral("repeat_times"));
-    QVERIFY(status);QVERIFY(mode);QVERIFY(grid);QVERIFY(files);QVERIFY(output);QVERIFY(required);
-    QVERIFY(width);QVERIFY(height);QVERIFY(preview);QVERIFY(printMode);QVERIFY(repeat);
-    QCOMPARE(status->text(),QStringLiteral("请先完成分割计算。"));
-    QCOMPARE(output->text(),QStringLiteral("--"));
-
-    QVERIFY(QMetaObject::invokeMethod(&window,"acceptDocument",Qt::DirectConnection,
-                                      Q_ARG(ImageDocumentPtr,document)));
-    QCOMPARE(status->text(),QStringLiteral("请先完成分割计算。"));
-    width->setValue(4);height->setValue(2);preview->click();
-    QCOMPARE(status->text(),QStringLiteral("已按当前导出选项计算。"));
-    QCOMPARE(mode->text(),QStringLiteral("普通分割"));QCOMPARE(grid->text(),QStringLiteral("2 × 2"));
-    QCOMPARE(files->text(),QStringLiteral("4 个"));QCOMPARE(output->text(),QStringLiteral("12.23 KB"));
-    QCOMPARE(required->text(),QStringLiteral("16.01 MB"));
-
-    width->setValue(3);
-    QVERIFY(status->text().contains(QStringLiteral("请重新应用参数")));
-    QCOMPARE(output->text(),QStringLiteral("--"));
-    width->setValue(4);printMode->setChecked(true);repeat->setValue(3);
-    QCOMPARE(mode->text(),QStringLiteral("打印包"));QCOMPARE(files->text(),QStringLiteral("12 个"));
-    QCOMPARE(output->text(),QStringLiteral("21.56 KB"));QCOMPARE(required->text(),QStringLiteral("16.02 MB"));
-
-    QVERIFY(QMetaObject::invokeMethod(&window,"acceptDocument",Qt::DirectConnection,
-                                      Q_ARG(ImageDocumentPtr,document)));
-    QCOMPARE(status->text(),QStringLiteral("请先完成分割计算。"));
-    QCOMPARE(files->text(),QStringLiteral("--"));QCOMPARE(output->text(),QStringLiteral("--"));
+    const auto grid=PatternDetector::makeManualGrid(document,{4,2,128,ForegroundPolarity::Dark});
+    LayeredExportDialog dialog;
+    dialog.configure(document,grid,TraversalMode::SnakeZ,0.25,1.0,true,true,directory.path());
+    auto* layer=dialog.findChild<QDoubleSpinBox*>(QStringLiteral("layeredExportLayerHeight"));
+    auto* maximum=dialog.findChild<QDoubleSpinBox*>(QStringLiteral("layeredExportMaximumHeight"));
+    auto* strategy=dialog.findChild<QComboBox*>(QStringLiteral("layeredExportLayerStrategy"));
+    auto* width=dialog.findChild<QSpinBox*>(QStringLiteral("layeredExportOutputWidth"));
+    auto* height=dialog.findChild<QSpinBox*>(QStringLiteral("layeredExportOutputHeight"));
+    auto* invert=dialog.findChild<QCheckBox*>(QStringLiteral("layeredExportInvertMask"));
+    auto* reverse=dialog.findChild<QCheckBox*>(QStringLiteral("layeredExportReverseY"));
+    auto* summary=dialog.findChild<QLabel*>(QStringLiteral("layeredExportSummary"));
+    auto* start=dialog.findChild<QPushButton*>(QStringLiteral("layeredExportStart"));
+    QVERIFY(layer);QVERIFY(maximum);QVERIFY(strategy);QVERIFY(width);QVERIFY(height);
+    QVERIFY(invert);QVERIFY(reverse);QVERIFY(summary);QVERIFY(start);
+    QCOMPARE(layer->value(),0.1);QCOMPARE(maximum->value(),1.0);
+    QCOMPARE(width->value(),4);QCOMPARE(height->value(),2);QVERIFY(!invert->isChecked());
+    QVERIFY(reverse->isChecked());QVERIFY(summary->text().contains(QStringLiteral("10 层")));
+    maximum->setValue(1.05);QVERIFY(summary->text().contains(QStringLiteral("11 层")));
+    strategy->setCurrentIndex(1);QVERIFY(!start->isEnabled());
+    QVERIFY(summary->text().contains(QStringLiteral("整除")));
 }
 
 void TestMainWindow::maskSliceWindowDefaultsAndReuse() {

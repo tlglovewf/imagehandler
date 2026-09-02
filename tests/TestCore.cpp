@@ -5,6 +5,7 @@
 #include "io/MergedImageExporter.h"
 #include "io/MaskSliceExporter.h"
 #include "io/ExportPreflight.h"
+#include "io/LayeredPackageExporter.h"
 #include "io/SplitExporter.h"
 #include "imaging/ImageLoader.h"
 #include "imaging/MosaicBuilder.h"
@@ -76,6 +77,7 @@ private Q_SLOTS:
     void exportRollbackRestoresOriginal();
     void printCanvasCoordinates();
     void printPackageExportAndReplacement();
+    void layeredPackageUsesPhysicalCoordinatesAndUniformLayers();
     void exportPreflightEstimatesAndSpacePolicy();
     void storageSizeFormatting();
     void exportPreflightConflictsAndPortableReports();
@@ -1159,6 +1161,83 @@ void TestCore::exportReportFailureLeavesTargetsUntouched() {
     QVERIFY(original.open(QIODevice::ReadOnly));QCOMPARE(original.readAll(),originalBytes);
     QCOMPARE(QDir(outputPath).entryList({QStringLiteral(".image_handler_*")},
         QDir::Dirs|QDir::Hidden|QDir::NoDotAndDotDot).size(),0);
+}
+void TestCore::layeredPackageUsesPhysicalCoordinatesAndUniformLayers() {
+    LayeredPackageOptions options{0.5,1.0,0.3,4,2,false,false,true,
+                                  LayerCountStrategy::RoundUp};
+    QString error;
+    QCOMPARE(LayeredPackageExporter::layerCount(options,&error),4);
+    QVERIFY(error.isEmpty());
+    options.layerCountStrategy=LayerCountStrategy::RequireExact;
+    QCOMPARE(LayeredPackageExporter::layerCount(options,&error),0);
+    QVERIFY(error.contains(QStringLiteral("整除")));
+    options.maximumHeight=1.2;
+    QCOMPARE(LayeredPackageExporter::layerCount(options,&error),4);
+    options.maximumHeight=100.1;options.layerHeight=0.1;
+    QCOMPARE(LayeredPackageExporter::layerCount(options,&error),0);
+    QVERIFY(error.contains(QStringLiteral("1000")));
+
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QImage source(3,2,QImage::Format_Grayscale8);
+    source.setPixel(0,0,0);source.setPixel(1,0,32);source.setPixel(2,0,255);
+    source.setPixel(0,1,64);source.setPixel(1,1,128);source.setPixel(2,1,255);
+    const QString sourcePath=directory.filePath("layered.bmp");QVERIFY(source.save(sourcePath,"BMP"));
+    const auto document=ImageLoader::load(sourcePath,1201,&error);QVERIFY2(document,qPrintable(error));
+    const auto grid=PatternDetector::makeManualGrid(document,{2,1,128,ForegroundPolarity::Dark});
+    QCOMPARE(grid.columns,2);QCOMPARE(grid.rows,2);
+    const QString output=directory.filePath("package");QVERIFY(QDir().mkpath(output));
+    LayeredPackageRequest request{output,document,grid,TraversalMode::SnakeZ,
+        {0.5,1.0,0.2,4,2,false,false,true,LayerCountStrategy::RoundUp},true};
+    const auto estimate=LayeredPackageExporter::estimateOutput(request);
+    QVERIFY2(estimate.valid,qPrintable(estimate.error));QCOMPARE(estimate.bmpFileCount,qint64(20));
+    const auto preflight=LayeredPackageExporter::inspect(request);
+    QVERIFY2(preflight.valid,qPrintable(preflight.blockingError));
+    QVERIFY2(LayeredPackageExporter::exportPackage(request,
+        {false,true,preflight.targetFingerprint},std::make_shared<CancellationToken>(),{},&error),
+        qPrintable(error));
+    for(int block=0;block<4;++block){
+        QDir blockDirectory(QDir(output).filePath(QString::number(block)));
+        QCOMPARE(blockDirectory.entryList({QStringLiteral("*.bmp")},QDir::Files).size(),5);
+        const auto first=ImageLoader::load(blockDirectory.filePath("1.bmp"),1210+block,&error);
+        QVERIFY2(first,qPrintable(error));QCOMPARE(first->metadata.kind,PixelKind::Binary1);
+        QCOMPARE(first->metadata.height,qint64(2));
+        QCOMPARE(first->metadata.width,qint64(block==1||block==2?2:4));
+    }
+    const auto padded=ImageLoader::load(QDir(output).filePath("0/5.bmp"),1220,&error);
+    QVERIFY2(padded,qPrintable(error));
+    const QImage paddedPixels=VipsSupport::renderRegion(padded,0,0,
+        padded->metadata.width,padded->metadata.height,1.0,&error);
+    QVERIFY2(!paddedPixels.isNull(),qPrintable(error));
+    for(int y=0;y<paddedPixels.height();++y)for(int x=0;x<paddedPixels.width();++x)
+        QCOMPARE(paddedPixels.pixelColor(x,y),QColor(Qt::black));
+
+    QFile job(QDir(output).filePath("job.json"));QVERIFY(job.open(QIODevice::ReadOnly));
+    const QByteArray jobBytes=job.readAll();job.close();
+    QVERIFY(jobBytes.contains("\"path\": \"0\""));
+    QVERIFY(jobBytes.contains("\"by\": [1.0, 0.0, 0.0]"));
+    QVERIFY(jobBytes.contains("\"by\": [1.0, -0.5, 0.0]"));
+    QFile report(QDir(output).filePath("export-report.json"));QVERIFY(report.open(QIODevice::ReadOnly));
+    QCOMPARE(QJsonDocument::fromJson(report.readAll()).object().value("mode").toString(),
+             QStringLiteral("layered_package"));
+
+    const auto replacementPreflight=LayeredPackageExporter::inspect(request);
+    QVERIFY(replacementPreflight.valid);QCOMPARE(replacementPreflight.conflictCount,qint64(6));
+    error.clear();
+    QVERIFY(!LayeredPackageExporter::exportPackage(request,{false,true,{}},
+        std::make_shared<CancellationToken>(),{},&error));
+    QVERIFY(error.startsWith(QStringLiteral("LAYERED_TARGETS_EXIST:")));
+    auto cancelled=std::make_shared<CancellationToken>();cancelled->cancel();error.clear();
+    QVERIFY(!LayeredPackageExporter::exportPackage(request,
+        {true,true,replacementPreflight.targetFingerprint},cancelled,{},&error));
+    QFile unchangedJob(QDir(output).filePath("job.json"));QVERIFY(unchangedJob.open(QIODevice::ReadOnly));
+    QCOMPARE(unchangedJob.readAll(),jobBytes);
+
+    const QString unsafeOutput=directory.filePath("unsafe-package");
+    QVERIFY(QDir().mkpath(unsafeOutput));QFile unsafe(QDir(unsafeOutput).filePath("0"));
+    QVERIFY(unsafe.open(QIODevice::WriteOnly));unsafe.write("not a directory");unsafe.close();
+    request.outputDirectory=unsafeOutput;
+    const auto unsafePreflight=LayeredPackageExporter::inspect(request);
+    QVERIFY(!unsafePreflight.valid);QVERIFY(unsafePreflight.blockingError.contains(QStringLiteral("不安全")));
 }
 void TestCore::realPatternImageFromEnvironment() {
     const QString path=qEnvironmentVariable("IMAGE_HANDLER_REAL_TEST_IMAGE");
