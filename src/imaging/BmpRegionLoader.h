@@ -17,7 +17,7 @@ public:
         QString error;
     };
 
-    // Creates a lazy, region-readable one-band image for uncompressed 1-bit
-    // and grayscale 8-bit BMP files. No full-size pixel buffer is allocated.
+    // Creates a lazy, region-readable one-band image for uncompressed 1-bit,
+    // grayscale 8-bit and ImageHandler Gray16 BMP files.
     static Result load(const QString& path);
 };

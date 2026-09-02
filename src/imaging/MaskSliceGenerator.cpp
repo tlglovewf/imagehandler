@@ -73,7 +73,8 @@ QSize stackSizeFor(const MaskSliceRequest& request) {
 }
 
 quint16 quantizedLayer(double height, double layerHeight, int layerCount) {
-    if (!(height > 0.0) || !(layerHeight > 0.0) || layerCount <= 0) return 0;
+    if (!std::isfinite(height) || height < 0.0 || !(layerHeight > 0.0) ||
+        layerCount <= 0) return 0;
     const double count = std::ceil(height / layerHeight - 1e-12);
     return static_cast<quint16>(std::clamp<int>(
         static_cast<int>(std::max(1.0, count)), 1, layerCount));
@@ -239,13 +240,13 @@ MaskSliceAnalysis MaskSliceGenerator::analyze(
             return {};
         }
         QImage thumbnail(result.previewSize, QImage::Format_Grayscale8);
-        const double lowerHeight = layer * request.settings.layerHeight;
         for (int y = 0; y < thumbnail.height(); ++y) {
             uchar* destination = thumbnail.scanLine(y);
             for (int x = 0; x < thumbnail.width(); ++x) {
                 const qsizetype index = qsizetype(y) * thumbnail.width() + x;
-                const bool active = PointCloudMath::heightForRaw(
-                                        values[index], divisor, request.mapping) > lowerHeight;
+                const bool active = PointCloudMath::maskLayerActive(
+                    PointCloudMath::heightForRaw(values[index], divisor, request.mapping),
+                    layer, request.settings.layerHeight);
                 const bool white = request.settings.invertMask ? !active : active;
                 destination[x] = white ? 255 : 0;
             }

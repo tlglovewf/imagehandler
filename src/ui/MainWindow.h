@@ -44,7 +44,7 @@ protected:
 
 private:
     enum class PendingAction { None, Scan, Load, Merge, Detect, Grid, ExportPreflight,
-                               SplitExport, MosaicExport,
+                               SplitExport, SelectedBlocksExport, MosaicExport,
                                JobLoad, JobLoadExport, JobPreviewBuild, PointCloudBuild };
     void buildUi();
     void connectUi();
@@ -63,6 +63,7 @@ private:
     void applyManualSegmentation();
     void chooseExportDirectory();
     void startExport(const ExportExecutionOptions& execution);
+    void chooseSelectedBlocksExportDirectory();
     void chooseJobFile();
     void loadJobFile(const QString& path, bool exported);
     void scheduleJobPreview(bool switchToJob);
@@ -122,6 +123,7 @@ private:
     QPushButton *detectButton_=nullptr,*exportButton_=nullptr,*previousButton_=nullptr,*nextButton_=nullptr;
     QPushButton *manualPreviewButton_=nullptr,*pathButton_=nullptr,*cancelButton_=nullptr;
     QPushButton *mergedExportButton_=nullptr,*jobImportButton_=nullptr,*resetParametersButton_=nullptr;
+    QPushButton* selectedBlocksExportButton_ = nullptr;
     QPushButton* clearFixedGrayPointsButton_ = nullptr;
     QPushButton* generateCloudButton_ = nullptr;
     QPushButton *cloudStartColorButton_=nullptr,*cloudEndColorButton_=nullptr;

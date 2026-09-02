@@ -1,4 +1,5 @@
 #include "io/BmpStreamWriter.h"
+#include "io/BmpFormat.h"
 #include "imaging/VipsSupport.h"
 
 #include <QDataStream>
@@ -11,9 +12,10 @@ bool BmpStreamWriter::write(const QString& path, const ImageDocumentPtr& documen
                             const SegmentationSettings& settings,
                             const RowProgress& progress, QString* error) {
     if (!document || !document->image || width <= 0 || height <= 0) return false;
-    const int bits = document->metadata.kind == PixelKind::Binary1 ? 1 : 8;
+    const int bits = document->metadata.kind == PixelKind::Binary1 ? 1
+                   : document->metadata.kind == PixelKind::Gray16 ? 16 : 8;
     const quint64 stride = ((quint64(width) * bits + 31) / 32) * 4;
-    const quint32 paletteBytes = bits == 1 ? 8 : 1024;
+    const quint32 paletteBytes = bits == 1 ? 8 : bits == 8 ? 1024 : 0;
     const quint32 pixelOffset = 14 + 40 + paletteBytes;
     const quint64 fileSize64 = quint64(pixelOffset) + stride * quint64(height);
     if (fileSize64 > std::numeric_limits<quint32>::max()) {
@@ -28,13 +30,16 @@ bool BmpStreamWriter::write(const QString& path, const ImageDocumentPtr& documen
     }
     QDataStream out(&file); out.setByteOrder(QDataStream::LittleEndian);
     out.writeRawData("BM", 2);
-    out << quint32(fileSize64) << quint16(0) << quint16(0) << pixelOffset;
+    out << quint32(fileSize64)
+        << quint16(bits == 16 ? BmpFormat::kGray16Reserved1 : 0)
+        << quint16(bits == 16 ? BmpFormat::kGray16Reserved2 : 0)
+        << pixelOffset;
     out << quint32(40) << qint32(width) << qint32(-height) << quint16(1) << quint16(bits)
         << quint32(0) << quint32(stride * height) << qint32(2835) << qint32(2835)
-        << quint32(bits == 1 ? 2 : 256) << quint32(0);
+        << quint32(bits == 1 ? 2 : bits == 8 ? 256 : 0) << quint32(0);
     if (bits == 1) {
         out << quint32(0x00000000) << quint32(0x00ffffff);
-    } else {
+    } else if (bits == 8) {
         for (quint32 i = 0; i < 256; ++i) out << quint32(i | (i << 8) | (i << 16));
     }
 
@@ -43,11 +48,23 @@ bool BmpStreamWriter::write(const QString& path, const ImageDocumentPtr& documen
     else if (vips_extract_band(document->image.get(), &gray, 0, nullptr) != 0) {
         if (error) *error = VipsSupport::lastError(); return false;
     }
-    auto ucharImage = VipsSupport::toUchar(
-        gray, document->metadata.kind == PixelKind::Gray16, error);
-    g_object_unref(gray);
-    if (!ucharImage) return false;
-    VipsRegion* region = vips_region_new(ucharImage.get());
+    VipsImagePtr prepared;
+    if (bits == 16 && gray->BandFmt == VIPS_FORMAT_USHORT) {
+        prepared = VipsSupport::adopt(gray);
+        gray = nullptr;
+    } else if (bits == 16) {
+        VipsImage* ushortRaw = nullptr;
+        if (vips_cast(gray, &ushortRaw, VIPS_FORMAT_USHORT, nullptr) != 0) {
+            if (error) *error = VipsSupport::lastError();
+        } else {
+            prepared = VipsSupport::adopt(ushortRaw);
+        }
+    } else {
+        prepared = VipsSupport::toUchar(gray, false, error);
+    }
+    if (gray) g_object_unref(gray);
+    if (!prepared) return false;
+    VipsRegion* region = vips_region_new(prepared.get());
     QByteArray row(static_cast<qsizetype>(stride), '\0');
     for (int iy = 0; iy < height; ++iy) {
         if (progress && !progress(iy, height)) { g_object_unref(region); file.close(); return false; }
@@ -58,11 +75,21 @@ bool BmpStreamWriter::write(const QString& path, const ImageDocumentPtr& documen
         }
         const uchar* src = VIPS_REGION_ADDR(region, x, y + iy);
         row.fill('\0');
-        if (bits == 8) {
+        if (bits == 16) {
+            const auto* values = reinterpret_cast<const quint16*>(src);
+            for (int ix = 0; ix < width; ++ix) {
+                row[ix * 2] = char(values[ix] & 0xffu);
+                row[ix * 2 + 1] = char(values[ix] >> 8);
+            }
+        } else if (bits == 8) {
             memcpy(row.data(), src, static_cast<size_t>(width));
         } else {
             for (int ix = 0; ix < width; ++ix) {
-                const bool white = src[ix] > settings.threshold;
+                // A Binary1 document is already decoded to exact black/white samples.
+                // Reapplying the segmentation threshold here changes source pixels when
+                // the user edits that threshold (for example, threshold == 255 turns
+                // every exported bit black).  Export the stored binary sample directly.
+                const bool white = src[ix] != 0;
                 if (white) row[ix / 8] = char(uchar(row[ix / 8]) | uchar(0x80u >> (ix % 8)));
             }
         }

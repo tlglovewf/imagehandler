@@ -1,4 +1,5 @@
 #include "imaging/BmpRegionLoader.h"
+#include "io/BmpFormat.h"
 
 #include <QFile>
 #include <array>
@@ -55,10 +56,13 @@ int bmpGenerate(VipsRegion* output, void* sequenceOpaque, void* sourceOpaque,
     auto* sequence = static_cast<BmpSequence*>(sequenceOpaque);
     const auto* source = static_cast<const BmpSource*>(sourceOpaque);
     const VipsRect rect = output->valid;
-    const int firstByte = source->bits == 1 ? rect.left / 8 : rect.left;
+    const int firstByte = source->bits == 1 ? rect.left / 8
+                        : source->bits == 16 ? rect.left * 2 : rect.left;
     const int lastByte = source->bits == 1
                              ? (rect.left + rect.width - 1) / 8
-                             : rect.left + rect.width - 1;
+                             : source->bits == 16
+                                   ? (rect.left + rect.width) * 2 - 1
+                                   : rect.left + rect.width - 1;
     const qint64 byteCount = qint64(lastByte) - firstByte + 1;
     QByteArray packed(static_cast<qsizetype>(byteCount), Qt::Uninitialized);
 
@@ -72,7 +76,11 @@ int bmpGenerate(VipsRegion* output, void* sequenceOpaque, void* sourceOpaque,
         }
 
         auto* destination = VIPS_REGION_ADDR(output, rect.left, y);
-        if (source->bits == 8) {
+        if (source->bits == 16) {
+            auto* values = reinterpret_cast<quint16*>(destination);
+            for (int x = 0; x < rect.width; ++x)
+                values[x] = readLe16(packed, x * 2);
+        } else if (source->bits == 8) {
             for (int x = 0; x < rect.width; ++x)
                 destination[x] = source->palette[uchar(packed[x])];
         } else {
@@ -120,6 +128,8 @@ BmpRegionLoader::Result BmpRegionLoader::load(const QString& path) {
     const qint32 signedHeight = readLeS32(header, 22);
     const quint16 planes = readLe16(header, 26);
     const quint16 bits = readLe16(header, 28);
+    const quint16 reserved1 = readLe16(header, 6);
+    const quint16 reserved2 = readLe16(header, 8);
     const quint32 compression = readLe32(header, 30);
     const quint32 pixelOffset = readLe32(header, 10);
     result.sourceBitsPerPixel = bits;
@@ -130,44 +140,48 @@ BmpRegionLoader::Result BmpRegionLoader::load(const QString& path) {
         result.error = QStringLiteral("不支持或损坏的 BMP 文件头。");
         return result;
     }
-    if (bits != 1 && bits != 8) {
+    const bool gray16 = bits == 16 && reserved1 == BmpFormat::kGray16Reserved1 &&
+                        reserved2 == BmpFormat::kGray16Reserved2;
+    if (bits != 1 && bits != 8 && !gray16) {
         result.status = Status::UseGenericLoader;
-        return result;
-    }
-
-    const int paletteCapacity = 1 << bits;
-    quint32 colorCount = readLe32(header, 46);
-    if (colorCount == 0) colorCount = static_cast<quint32>(paletteCapacity);
-    if (colorCount > static_cast<quint32>(paletteCapacity)) {
-        result.status = Status::Error;
-        result.error = QStringLiteral("BMP 调色板大小无效。");
-        return result;
-    }
-
-    const quint64 paletteOffset = 14ull + dibSize;
-    const quint64 paletteBytes = quint64(colorCount) * 4;
-    if (paletteOffset + paletteBytes > pixelOffset || paletteOffset > std::numeric_limits<qint64>::max() ||
-        !file.seek(static_cast<qint64>(paletteOffset))) {
-        result.status = Status::Error;
-        result.error = QStringLiteral("BMP 调色板或像素偏移无效。");
-        return result;
-    }
-    const QByteArray palette = file.read(static_cast<qint64>(paletteBytes));
-    if (palette.size() != static_cast<qsizetype>(paletteBytes)) {
-        result.status = Status::Error;
-        result.error = QStringLiteral("BMP 调色板不完整。");
         return result;
     }
 
     auto source = std::make_unique<BmpSource>();
     for (int i = 0; i < 256; ++i) source->palette[static_cast<size_t>(i)] = static_cast<uchar>(i);
-    bool grayscale = true;
-    for (quint32 i = 0; i < colorCount; ++i) {
-        const uchar blue = uchar(palette[static_cast<qsizetype>(i * 4)]);
-        const uchar green = uchar(palette[static_cast<qsizetype>(i * 4 + 1)]);
-        const uchar red = uchar(palette[static_cast<qsizetype>(i * 4 + 2)]);
-        grayscale = grayscale && red == green && green == blue;
-        source->palette[static_cast<size_t>(i)] = red;
+    bool grayscale = gray16;
+    if (!gray16) {
+        const int paletteCapacity = 1 << bits;
+        quint32 colorCount = readLe32(header, 46);
+        if (colorCount == 0) colorCount = static_cast<quint32>(paletteCapacity);
+        if (colorCount > static_cast<quint32>(paletteCapacity)) {
+            result.status = Status::Error;
+            result.error = QStringLiteral("BMP 调色板大小无效。");
+            return result;
+        }
+        const quint64 paletteOffset = 14ull + dibSize;
+        const quint64 paletteBytes = quint64(colorCount) * 4;
+        if (paletteOffset + paletteBytes > pixelOffset ||
+            paletteOffset > std::numeric_limits<qint64>::max() ||
+            !file.seek(static_cast<qint64>(paletteOffset))) {
+            result.status = Status::Error;
+            result.error = QStringLiteral("BMP 调色板或像素偏移无效。");
+            return result;
+        }
+        const QByteArray palette = file.read(static_cast<qint64>(paletteBytes));
+        if (palette.size() != static_cast<qsizetype>(paletteBytes)) {
+            result.status = Status::Error;
+            result.error = QStringLiteral("BMP 调色板不完整。");
+            return result;
+        }
+        grayscale = true;
+        for (quint32 i = 0; i < colorCount; ++i) {
+            const uchar blue = uchar(palette[static_cast<qsizetype>(i * 4)]);
+            const uchar green = uchar(palette[static_cast<qsizetype>(i * 4 + 1)]);
+            const uchar red = uchar(palette[static_cast<qsizetype>(i * 4 + 2)]);
+            grayscale = grayscale && red == green && green == blue;
+            source->palette[static_cast<size_t>(i)] = red;
+        }
     }
     result.grayscalePalette = grayscale;
     if (!grayscale || compression != 0) {
@@ -196,7 +210,7 @@ BmpRegionLoader::Result BmpRegionLoader::load(const QString& path) {
         return result;
     }
     vips_image_init_fields(image, source->width, source->height, 1,
-                           VIPS_FORMAT_UCHAR, VIPS_CODING_NONE,
+                           gray16 ? VIPS_FORMAT_USHORT : VIPS_FORMAT_UCHAR, VIPS_CODING_NONE,
                            VIPS_INTERPRETATION_B_W, 1.0, 1.0);
     vips_image_set_int(image, VIPS_META_BITS_PER_SAMPLE, bits);
     if (vips_image_pipelinev(image, VIPS_DEMAND_STYLE_SMALLTILE,

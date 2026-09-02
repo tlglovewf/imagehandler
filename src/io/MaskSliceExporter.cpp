@@ -183,7 +183,6 @@ bool MaskSliceExporter::exportAll(
         QFile file(staged.filePath(QString::number(layer + 1) + QStringLiteral(".bmp")));
         if (!writeHeader(&file, request.settings.outputWidth, request.settings.outputHeight,
                          singleSize, error)) { writeSucceeded = false; break; }
-        const double lowerHeight = layer * request.settings.layerHeight;
         for (int outputY = 0; outputY < request.settings.outputHeight; ++outputY) {
             if (token && token->isCancelled()) { writeSucceeded = false; break; }
             const int sourceY = std::min(floatImage->Ysize - 1,
@@ -199,9 +198,10 @@ bool MaskSliceExporter::exportAll(
                 VIPS_REGION_ADDR(sourceRegion, 0, sourceY));
             packedRow.fill('\0');
             for (int outputX = 0; outputX < request.settings.outputWidth; ++outputX) {
-                const bool active = PointCloudMath::heightForRaw(
-                                        values[sourceColumns[outputX]], divisor,
-                                        request.mapping) > lowerHeight;
+                const bool active = PointCloudMath::maskLayerActive(
+                    PointCloudMath::heightForRaw(values[sourceColumns[outputX]], divisor,
+                                                 request.mapping),
+                    layer, request.settings.layerHeight);
                 const bool white = request.settings.invertMask ? !active : active;
                 if (white) {
                     packedRow[outputX / 8] = char(uchar(packedRow[outputX / 8]) |

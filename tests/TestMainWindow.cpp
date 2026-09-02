@@ -469,10 +469,17 @@ void TestMainWindow::maskSliceWindowDefaultsAndReuse() {
     auto* width=window.findChild<QSpinBox*>(QStringLiteral("segmentationCellWidth"));
     auto* height=window.findChild<QSpinBox*>(QStringLiteral("segmentationCellHeight"));
     auto* preview=window.findChild<QPushButton*>(QStringLiteral("manualSegmentationPreviewButton"));
+    auto* selectedExport=window.findChild<QPushButton*>(QStringLiteral("selectedBlocksExportButton"));
     auto* imageView=window.findChild<LargeImageView*>();
-    QVERIFY(width);QVERIFY(height);QVERIFY(preview);QVERIFY(imageView);
+    QVERIFY(width);QVERIFY(height);QVERIFY(preview);QVERIFY(selectedExport);QVERIFY(imageView);
+    QVERIFY(!selectedExport->isEnabled());
     QVERIFY(QMetaObject::invokeMethod(&window,"acceptDocument",Qt::DirectConnection,Q_ARG(ImageDocumentPtr,document)));
     width->setValue(2);height->setValue(2);preview->click();
+    QVERIFY(!selectedExport->isEnabled());
+    imageView->setSelectedCell(0,1);
+    QVERIFY(QMetaObject::invokeMethod(imageView,"segmentationCellsSelected",Qt::DirectConnection,
+        Q_ARG(QVector<QPoint>,imageView->selectedCells()),Q_ARG(QPoint,QPoint(1,0))));
+    QVERIFY(selectedExport->isEnabled());
     QVERIFY(QMetaObject::invokeMethod(imageView,"segmentationCellSliceActivated",Qt::DirectConnection,Q_ARG(int,0),Q_ARG(int,1)));
     auto* sliceWindow=window.findChild<MaskSliceWindow*>(QStringLiteral("maskSliceWindow"));QVERIFY(sliceWindow);QVERIFY(sliceWindow->isVisible());
     auto* layerHeight=sliceWindow->findChild<QDoubleSpinBox*>(QStringLiteral("maskSliceLayerHeight"));

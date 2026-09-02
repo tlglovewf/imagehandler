@@ -7,6 +7,10 @@ namespace PointCloudMath {
                                          const PointCloudSettings& settings);
 [[nodiscard]] double heightForRaw(double rawGray, double pixelMaximum,
                                   const PointCloudSettings& settings);
+// The first reconstructed slice represents the physical base plane and is
+// inclusive at zero. Higher cumulative slices retain their strict threshold.
+[[nodiscard]] bool maskLayerActive(double height, int zeroBasedLayer,
+                                   double layerHeight);
 [[nodiscard]] QColor interpolateColor(double normalizedGray, const QColor& start,
                                       const QColor& end);
 // Returns the physical extent/boundary shown on the axis (pixelCount * pixelScale).

@@ -3,6 +3,7 @@
 #include "domain/Models.h"
 #include "io/ExportTypes.h"
 #include <QPointF>
+#include <QVector>
 #include <functional>
 
 class SplitExporter {
@@ -17,6 +18,8 @@ public:
                                   const SegmentationResult& segmentation,
                                   const QPoint& cell,
                                   const PrintExportOptions& options);
+    static QString selectedTileFileName(const ImageDocumentPtr& document,
+                                        qint64 traversalIndex);
     static bool exportTiles(const QString& outputDirectory, const ImageDocumentPtr& document,
                             const SegmentationResult& segmentation, TraversalMode mode,
                             bool overwrite, const CancellationTokenPtr& token,
@@ -26,6 +29,12 @@ public:
                             const ExportExecutionOptions& execution,
                             const CancellationTokenPtr& token, const Progress& progress,
                             QString* error);
+    static bool exportSelectedTiles(const QString& outputDirectory,
+                                    const ImageDocumentPtr& document,
+                                    const SegmentationResult& segmentation,
+                                    TraversalMode mode, const QVector<QPoint>& cells,
+                                    bool overwrite, const CancellationTokenPtr& token,
+                                    const Progress& progress, QString* error);
     static bool exportPrintPackage(const QString& outputDirectory,
                                    const ImageDocumentPtr& document,
                                    const SegmentationResult& segmentation, TraversalMode mode,

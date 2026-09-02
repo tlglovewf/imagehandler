@@ -10,4 +10,7 @@ public:
     static bool writeGray8Bmp(const QString& path, const ImageDocumentPtr& document,
                               const CancellationTokenPtr& token, const Progress& progress,
                               QString* error);
+    static bool writePng(const QString& path, const ImageDocumentPtr& document,
+                         const CancellationTokenPtr& token, const Progress& progress,
+                         QString* error);
 };

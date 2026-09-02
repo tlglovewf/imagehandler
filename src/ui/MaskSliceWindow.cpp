@@ -637,8 +637,11 @@ void MaskSliceWindow::updateStackLayerSelection(int row) {
     const double lower = row * layerHeight_->value();
     const double upper = layer * layerHeight_->value();
     stackView_->setSelectedLayer(layer);
-    stackLayerLabel_->setText(QStringLiteral("当前第 %1 层 | 判断高度 > %2 μm | 重建区间 (%2, %3] μm")
-        .arg(layer).arg(lower, 0, 'f', 6).arg(upper, 0, 'f', 6));
+    stackLayerLabel_->setText(row == 0
+        ? QStringLiteral("当前第 1 层 | 判断高度 >= 0.000000 μm | 重建区间 [0.000000, %1] μm")
+              .arg(upper, 0, 'f', 6)
+        : QStringLiteral("当前第 %1 层 | 判断高度 > %2 μm | 重建区间 (%2, %3] μm")
+              .arg(layer).arg(lower, 0, 'f', 6).arg(upper, 0, 'f', 6));
 }
 
 void MaskSliceWindow::updateStackZScale() {

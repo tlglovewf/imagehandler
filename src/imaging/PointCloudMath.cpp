@@ -15,6 +15,12 @@ double heightForRaw(double rawGray, double pixelMaximum, const PointCloudSetting
     return heightForNormalized(rawGray / pixelMaximum, settings);
 }
 
+bool maskLayerActive(double height, int zeroBasedLayer, double layerHeight) {
+    if (!std::isfinite(height) || height < 0.0 || zeroBasedLayer < 0 ||
+        !std::isfinite(layerHeight) || layerHeight <= 0.0) return false;
+    return zeroBasedLayer == 0 || height > zeroBasedLayer * layerHeight;
+}
+
 QColor interpolateColor(double normalizedGray, const QColor& start, const QColor& end) {
     const double t = std::clamp(normalizedGray, 0.0, 1.0);
     const auto channel = [t](int first, int last) {

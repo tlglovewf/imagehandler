@@ -48,10 +48,10 @@ bool safeTarget(const QFileInfo& info, bool expectDirectory) {
 
 qint64 ExportPreflight::bmpFileSize(PixelKind kind, qint64 width, qint64 height) {
     if (width <= 0 || height <= 0) return -1;
-    const qint64 bits = kind == PixelKind::Binary1 ? 1 : 8;
+    const qint64 bits = kind == PixelKind::Binary1 ? 1 : kind == PixelKind::Gray16 ? 16 : 8;
     if (width > (std::numeric_limits<qint64>::max() - 31) / bits) return -1;
     const qint64 stride = ((width * bits + 31) / 32) * 4;
-    const qint64 palette = bits == 1 ? 8 : 1024;
+    const qint64 palette = bits == 1 ? 8 : bits == 8 ? 1024 : 0;
     qint64 pixels = 0;
     if (!checkedMultiply(stride, height, &pixels)) return -1;
     qint64 size = 0;

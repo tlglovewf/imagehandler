@@ -1,6 +1,8 @@
 #include "io/SplitExporter.h"
 #include "io/BmpStreamWriter.h"
 #include "io/ExportPreflight.h"
+#include "io/PngWriter.h"
+#include "imaging/VipsSupport.h"
 
 #include <QCoreApplication>
 #include <QDateTime>
@@ -12,11 +14,13 @@
 #include <QLocale>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QSet>
 #include <QUuid>
 #include <algorithm>
 #include <climits>
 #include <limits>
 #include <new>
+#include <vips/vips.h>
 
 namespace {
 
@@ -206,6 +210,53 @@ bool isSafeManagedTarget(const QFileInfo& info, bool expectDirectory) {
     return expectDirectory ? info.isDir() : info.isFile();
 }
 
+QString selectedTileSuffix(const ImageDocumentPtr& document) {
+    if (document) {
+        const QString suffix = QFileInfo(document->sourcePath).suffix().toLower();
+        static const QSet<QString> supportedSuffixes{
+            QStringLiteral("bmp"), QStringLiteral("png"),
+            QStringLiteral("tif"), QStringLiteral("tiff"),
+            QStringLiteral("jpg"), QStringLiteral("jpeg")};
+        if (supportedSuffixes.contains(suffix)) return QLatin1Char('.') + suffix;
+        if (document->metadata.kind == PixelKind::Gray16) return QStringLiteral(".png");
+    }
+    return QStringLiteral(".bmp");
+}
+
+bool writeSelectedTile(const QString& path, const ImageDocumentPtr& document,
+                       const ImageRegion& region, const SegmentationSettings& settings,
+                       const CancellationTokenPtr& token,
+                       const BmpStreamWriter::RowProgress& progress, QString* error) {
+    const QString suffix = QFileInfo(path).suffix();
+    if (suffix.compare(QStringLiteral("bmp"), Qt::CaseInsensitive) == 0) {
+        return BmpStreamWriter::write(
+            path, document, static_cast<int>(region.x), static_cast<int>(region.y),
+            static_cast<int>(region.width), static_cast<int>(region.height), settings,
+            progress, error);
+    }
+    if (suffix.compare(QStringLiteral("png"), Qt::CaseInsensitive) == 0) {
+        return PngWriter::write(
+            path, document, static_cast<int>(region.x), static_cast<int>(region.y),
+            static_cast<int>(region.width), static_cast<int>(region.height), token,
+            progress, error);
+    }
+
+    VipsImage* croppedRaw = nullptr;
+    if (vips_crop(document->image.get(), &croppedRaw,
+                  static_cast<int>(region.x), static_cast<int>(region.y),
+                  static_cast<int>(region.width), static_cast<int>(region.height), nullptr) != 0) {
+        if (error) *error = VipsSupport::lastError();
+        return false;
+    }
+    const auto cropped = VipsSupport::adopt(croppedRaw);
+    const QByteArray encodedPath = QFile::encodeName(path);
+    if (vips_image_write_to_file(cropped.get(), encodedPath.constData(), nullptr) != 0) {
+        if (error) *error = VipsSupport::lastError();
+        return false;
+    }
+    return !progress || progress(1, 1);
+}
+
 } // namespace
 
 std::vector<QPoint> SplitExporter::traversal(int rows, int columns, TraversalMode mode) {
@@ -319,6 +370,12 @@ QPointF SplitExporter::canvasPosition(const ImageMetadata& metadata,
                static_cast<double>(metadata.height) * options.canvasY;
     if (options.reverseY) y = -y;
     return {x, y == 0.0 ? 0.0 : y};
+}
+
+QString SplitExporter::selectedTileFileName(const ImageDocumentPtr& document,
+                                             qint64 traversalIndex) {
+    if (traversalIndex < 0) return {};
+    return QString::number(traversalIndex + 1) + selectedTileSuffix(document);
 }
 
 bool SplitExporter::exportTiles(const QString& outputDirectory, const ImageDocumentPtr& document,
@@ -493,6 +550,165 @@ rollback:
                 *error += QStringLiteral("\n回滚已完成，但临时目录未能删除：%1").arg(temp.absolutePath());
         } else if (error) {
             *error += QStringLiteral("\n回滚未完全成功：%1。备份已保留在：%2")
+                          .arg(rollbackErrors.join(QStringLiteral("；")), temp.absolutePath());
+        }
+        return false;
+    }
+}
+
+bool SplitExporter::exportSelectedTiles(
+    const QString& outputDirectory, const ImageDocumentPtr& document,
+    const SegmentationResult& segmentation, TraversalMode mode,
+    const QVector<QPoint>& cells, bool overwrite, const CancellationTokenPtr& token,
+    const Progress& progress, QString* error) {
+    if (!document || !document->image || !token || cells.isEmpty() ||
+        segmentation.settings.cellWidth <= 0 || segmentation.settings.cellHeight <= 0 ||
+        segmentation.rows <= 0 || segmentation.columns <= 0) {
+        if (error) *error = QStringLiteral("选中块导出参数无效。");
+        return false;
+    }
+    const qint64 expectedColumns =
+        (document->metadata.width + segmentation.settings.cellWidth - 1) /
+        segmentation.settings.cellWidth;
+    const qint64 expectedRows =
+        (document->metadata.height + segmentation.settings.cellHeight - 1) /
+        segmentation.settings.cellHeight;
+    if (segmentation.columns != expectedColumns || segmentation.rows != expectedRows) {
+        if (error) *error = QStringLiteral("分割网格与当前图像尺寸不匹配。");
+        return false;
+    }
+
+    struct SelectedTarget {
+        qint64 traversalIndex = -1;
+        ImageRegion region;
+        QString name;
+    };
+    QVector<SelectedTarget> targets;
+    targets.reserve(cells.size());
+    QSet<QPoint> uniqueCells;
+    for (const QPoint& cell : cells) {
+        if (uniqueCells.contains(cell)) continue;
+        uniqueCells.insert(cell);
+        const qint64 index = traversalIndex(segmentation.rows, segmentation.columns, mode,
+                                            cell.y(), cell.x());
+        const ImageRegion region = segmentationCellRegion(
+            segmentation, document->metadata.width, document->metadata.height,
+            cell.y(), cell.x());
+        if (index < 0 || !region.isValid() || region.x > INT_MAX || region.y > INT_MAX ||
+            region.width > INT_MAX || region.height > INT_MAX) {
+            if (error) *error = QStringLiteral("选中的块坐标或尺寸无效。");
+            return false;
+        }
+        targets.push_back({index, region, selectedTileFileName(document, index)});
+    }
+    std::sort(targets.begin(), targets.end(), [](const SelectedTarget& left,
+                                                  const SelectedTarget& right) {
+        return left.traversalIndex < right.traversalIndex;
+    });
+    if (targets.isEmpty()) {
+        if (error) *error = QStringLiteral("没有可导出的选中块。");
+        return false;
+    }
+
+    QDir output(outputDirectory);
+    if (!output.exists() && !output.mkpath(QStringLiteral("."))) {
+        if (error) *error = QStringLiteral("无法创建输出目录。");
+        return false;
+    }
+    const QString tempName = QStringLiteral(".image_handler_selected_%1")
+        .arg(QUuid::createUuid().toString(QUuid::Id128));
+    if (!output.mkdir(tempName)) {
+        if (error) *error = QStringLiteral("无法创建选中块导出临时目录。");
+        return false;
+    }
+    QDir temp(output.filePath(tempName));
+    const auto cleanup = [&] { return temp.removeRecursively(); };
+    const qint64 totalWork = qint64(targets.size()) * 1001;
+    qint64 lastProgress = -1;
+    const auto reportProgress = [&](const QString& phase, qint64 completed) {
+        if (!progress || completed == lastProgress) return;
+        lastProgress = completed;
+        progress({phase, completed, totalWork});
+    };
+
+    for (qsizetype i = 0; i < targets.size(); ++i) {
+        if (token->isCancelled()) { cleanup(); return false; }
+        const SelectedTarget& target = targets[i];
+        QString writeError;
+        const bool written = writeSelectedTile(
+            temp.filePath(target.name), document, target.region, segmentation.settings, token,
+            [&](int row, int rowTotal) {
+                if (token->isCancelled()) return false;
+                reportProgress(QStringLiteral("导出 %1").arg(target.name),
+                    qint64(i) * 1000 + qint64(row) * 1000 / std::max(1, rowTotal));
+                return true;
+            }, &writeError);
+        if (!written) {
+            cleanup();
+            if (!token->isCancelled() && error) *error = writeError;
+            return false;
+        }
+        reportProgress(QStringLiteral("导出 %1").arg(target.name), qint64(i + 1) * 1000);
+    }
+
+    if (token->isCancelled()) { cleanup(); return false; }
+    temp.mkdir(QStringLiteral("backup"));
+    QDir backup(temp.filePath(QStringLiteral("backup")));
+    QStringList committed;
+    QStringList backedUp;
+    for (qsizetype i = 0; i < targets.size(); ++i) {
+        const QString name = targets[i].name;
+        if (token->isCancelled()) {
+            if (error) *error = QStringLiteral("提交阶段已取消。");
+            goto rollbackSelected;
+        }
+        const QString targetPath = output.filePath(name);
+        const QFileInfo targetInfo(targetPath);
+        if (targetInfo.exists() || targetInfo.isSymLink() || targetInfo.isJunction()) {
+            if (!targetInfo.isFile() || targetInfo.isSymLink() || targetInfo.isJunction()) {
+                if (error) *error = QStringLiteral("目标路径不是可替换的普通文件：%1").arg(name);
+                goto rollbackSelected;
+            }
+            if (!overwrite) {
+                if (error) *error = QStringLiteral("目标文件已存在：%1").arg(name);
+                goto rollbackSelected;
+            }
+            if (!QFile::rename(targetPath, backup.filePath(name))) {
+                if (error) *error = QStringLiteral("无法备份已有文件：%1").arg(name);
+                goto rollbackSelected;
+            }
+            backedUp << name;
+        }
+        if (!QFile::rename(temp.filePath(name), targetPath)) {
+            if (error) *error = QStringLiteral("无法提交文件：%1").arg(name);
+            goto rollbackSelected;
+        }
+        committed << name;
+        reportProgress(QStringLiteral("提交文件"), qint64(targets.size()) * 1000 + i + 1);
+    }
+    cleanup();
+    return true;
+
+rollbackSelected:
+    {
+        QStringList rollbackErrors;
+        for (auto it = committed.crbegin(); it != committed.crend(); ++it) {
+            const QString path = output.filePath(*it);
+            if (QFile::exists(path) && !QFile::remove(path))
+                rollbackErrors << QStringLiteral("无法移除已提交文件 %1").arg(*it);
+        }
+        for (auto it = backedUp.crbegin(); it != backedUp.crend(); ++it) {
+            const QString path = output.filePath(*it);
+            const QString saved = backup.filePath(*it);
+            if (QFile::exists(path) || !QFile::rename(saved, path))
+                rollbackErrors << QStringLiteral("无法恢复原文件 %1").arg(*it);
+        }
+        if (rollbackErrors.isEmpty()) {
+            if (!cleanup() && error)
+                *error += QStringLiteral("\n回滚完成，但临时目录未能删除：%1")
+                              .arg(temp.absolutePath());
+        } else if (error) {
+            *error += QStringLiteral("\n回滚未完全成功：%1。备份保留在：%2")
                           .arg(rollbackErrors.join(QStringLiteral("；")), temp.absolutePath());
         }
         return false;

@@ -38,7 +38,9 @@ add_library(image_handler_core
     src/imaging/MaskSliceGenerator.h src/imaging/MaskSliceGenerator.cpp
     src/imaging/MaskStackMeshBuilder.h src/imaging/MaskStackMeshBuilder.cpp
     src/io/DirectoryScanner.h src/io/DirectoryScanner.cpp
+    src/io/BmpFormat.h
     src/io/BmpStreamWriter.h src/io/BmpStreamWriter.cpp
+    src/io/PngWriter.h src/io/PngWriter.cpp
     src/io/MergedImageExporter.h src/io/MergedImageExporter.cpp
     src/io/MaskSliceExporter.h src/io/MaskSliceExporter.cpp
     src/io/ExportTypes.h

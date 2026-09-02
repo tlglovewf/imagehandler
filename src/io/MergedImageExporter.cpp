@@ -1,8 +1,13 @@
 #include "io/MergedImageExporter.h"
+#include "io/PngWriter.h"
 #include "imaging/VipsSupport.h"
 
 #include <QDataStream>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QSaveFile>
+#include <QUuid>
 #include <limits>
 #include <vips/vips.h>
 
@@ -139,5 +144,67 @@ bool MergedImageExporter::writeGray8Bmp(const QString& path, const ImageDocument
         if (error) *error = file.errorString();
         return false;
     }
+    return true;
+}
+
+bool MergedImageExporter::writePng(const QString& path, const ImageDocumentPtr& document,
+                                   const CancellationTokenPtr& token,
+                                   const Progress& progress, QString* error) {
+    if (!document || !document->image || document->metadata.width <= 0 ||
+        document->metadata.height <= 0 ||
+        document->metadata.width > std::numeric_limits<int>::max() ||
+        document->metadata.height > std::numeric_limits<int>::max()) {
+        if (error) *error = QStringLiteral("合并图像或尺寸无效。");
+        return false;
+    }
+    if (token && token->isCancelled()) return false;
+
+    const QFileInfo targetInfo(path);
+    QDir parent = targetInfo.dir();
+    if (!parent.exists() && !parent.mkpath(QStringLiteral("."))) {
+        if (error) *error = QStringLiteral("无法创建合并图输出目录。");
+        return false;
+    }
+    const QString id = QUuid::createUuid().toString(QUuid::Id128);
+    const QString temporaryPath = parent.filePath(
+        QStringLiteral(".image_handler_merged_%1.png").arg(id));
+    const auto cleanup = [&] { if (QFileInfo::exists(temporaryPath)) QFile::remove(temporaryPath); };
+    if (!PngWriter::write(
+            temporaryPath, document, 0, 0,
+            static_cast<int>(document->metadata.width),
+            static_cast<int>(document->metadata.height), token,
+            [&](int completed, int total) {
+                if (progress) progress({QStringLiteral("写入 PNG"), completed, total});
+                return !token || !token->isCancelled();
+            }, error)) {
+        cleanup();
+        return false;
+    }
+    if (token && token->isCancelled()) { cleanup(); return false; }
+
+    QString backupPath;
+    const QFileInfo existing(path);
+    if (existing.exists() || existing.isSymLink() || existing.isJunction()) {
+        if (!existing.isFile() || existing.isSymLink() || existing.isJunction()) {
+            cleanup();
+            if (error) *error = QStringLiteral("合并图目标不是可替换的普通文件。");
+            return false;
+        }
+        backupPath = parent.filePath(QStringLiteral(".image_handler_merged_backup_%1.png").arg(id));
+        if (!QFile::rename(path, backupPath)) {
+            cleanup();
+            if (error) *error = QStringLiteral("无法备份已有合并图。");
+            return false;
+        }
+    }
+    if (!QFile::rename(temporaryPath, path)) {
+        const bool restored = backupPath.isEmpty() || QFile::rename(backupPath, path);
+        cleanup();
+        if (error) *error = restored
+            ? QStringLiteral("无法提交 PNG 合并图，原文件已恢复。")
+            : QStringLiteral("无法提交 PNG 合并图，原文件备份保留在：%1").arg(backupPath);
+        return false;
+    }
+    if (!backupPath.isEmpty()) QFile::remove(backupPath);
     return true;
 }
