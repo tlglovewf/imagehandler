@@ -4,6 +4,7 @@
 
 #include <QImage>
 #include <QMetaType>
+#include <QRectF>
 #include <QSize>
 #include <QSizeF>
 #include <QVector>
@@ -25,6 +26,30 @@ struct MaskSliceRequest {
     ImageRegion region;
     PointCloudSettings mapping;
     MaskSliceSettings settings;
+    quint64 requestGeneration = 0;
+    bool generateStackPreview = true;
+};
+
+struct MaskSliceElement {
+    ImageRegion region;
+    int row = -1;
+    int column = -1;
+    qint64 traversalIndex = -1;
+};
+
+struct MaskStackGroupRequest {
+    ImageDocumentPtr source;
+    QVector<MaskSliceElement> elements;
+    PointCloudSettings mapping;
+    double layerHeight = 0.1;
+    double outputScaleX = 1.0;
+    double outputScaleY = 1.0;
+    quint64 requestGeneration = 0;
+};
+
+struct MaskStackBlockPlacement {
+    QRectF physicalRect;
+    qint64 traversalIndex = -1;
 };
 
 struct MaskStackVertex {
@@ -52,6 +77,8 @@ struct MaskStackPreviewData {
     double layerHeight = 0.0;
     int layerCount = 0;
     bool downsampled = false;
+    double actualMaximumHeight = 0.0;
+    QVector<MaskStackBlockPlacement> blocks;
     std::shared_ptr<const MaskStackGeometry> solidGeometry;
     std::shared_ptr<const MaskStackGeometry> explodedGeometry;
 };
@@ -59,6 +86,7 @@ struct MaskStackPreviewData {
 using MaskStackPreviewDataPtr = std::shared_ptr<const MaskStackPreviewData>;
 
 struct MaskSliceAnalysis {
+    quint64 requestGeneration = 0;
     double actualMaximumHeight = 0.0;
     int layerCount = 0;
     QSize sourceSize;
@@ -67,4 +95,17 @@ struct MaskSliceAnalysis {
     MaskStackPreviewDataPtr stackPreview;
 };
 
+struct MaskStackGroupAnalysis {
+    quint64 requestGeneration = 0;
+    MaskStackPreviewDataPtr preview;
+    struct ElementLayers {
+        qint64 traversalIndex = -1;
+        double actualMaximumHeight = 0.0;
+        int layerCount = 0;
+    };
+    QVector<ElementLayers> elements;
+    int commonLayerCount = 0;
+};
+
 Q_DECLARE_METATYPE(MaskSliceAnalysis)
+Q_DECLARE_METATYPE(MaskStackGroupAnalysis)

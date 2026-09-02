@@ -128,6 +128,12 @@ public:
         rebuildLinesLocked();
         requestUpdate();
     }
+    void setActiveBlock(qint64 traversalIndex) {
+        QMutexLocker lock(&mutex_);
+        activeBlock_ = traversalIndex;
+        rebuildLinesLocked();
+        requestUpdate();
+    }
     void setZScale(double scale) {
         {
             QMutexLocker lock(&mutex_);
@@ -316,6 +322,24 @@ private:
         addLine(width,height,0,0,height,0,grid,grid,grid);
         addLine(0,height,0,0,0,0,grid,grid,grid);
 
+        const auto active = std::find_if(preview_->blocks.cbegin(), preview_->blocks.cend(),
+            [this](const MaskStackBlockPlacement& block) {
+                return block.traversalIndex == activeBlock_;
+            });
+        if (active != preview_->blocks.cend()) {
+            const float x0 = static_cast<float>(active->physicalRect.left());
+            const float x1 = static_cast<float>(active->physicalRect.right());
+            const float y0 = static_cast<float>(active->physicalRect.top());
+            const float y1 = static_cast<float>(active->physicalRect.bottom());
+            constexpr float r = 1.0F, g = 0.82F, b = 0.05F;
+            addLine(x0,y0,0,x1,y0,0,r,g,b); addLine(x1,y0,0,x1,y1,0,r,g,b);
+            addLine(x1,y1,0,x0,y1,0,r,g,b); addLine(x0,y1,0,x0,y0,0,r,g,b);
+            addLine(x0,y0,0,x0,y0,stackHeight,r,g,b);
+            addLine(x1,y0,0,x1,y0,stackHeight,r,g,b);
+            addLine(x1,y1,0,x1,y1,stackHeight,r,g,b);
+            addLine(x0,y1,0,x0,y1,stackHeight,r,g,b);
+        }
+
         if (selectedLayer_ < 1 || selectedLayer_ > preview_->layerCount) return;
         const int gridWidth = preview_->gridSize.width();
         const int gridHeight = preview_->gridSize.height();
@@ -342,6 +366,7 @@ private:
     QColor startColor_{0,0,255};
     QColor endColor_{0,255,0};
     int selectedLayer_ = 1;
+    qint64 activeBlock_ = -1;
     float zScale_ = 1.0F;
     QVector3D origin_;
     JobTerrainCamera camera_;
@@ -446,6 +471,13 @@ public:
         Q_UNUSED(layer);
 #endif
     }
+    void setActiveBlock(qint64 traversalIndex) {
+#if IMAGE_HANDLER_HAS_VULKAN_PREVIEW
+        if(window_)window_->setActiveBlock(traversalIndex);
+#else
+        Q_UNUSED(traversalIndex);
+#endif
+    }
     void setZScale(double scale) {
 #if IMAGE_HANDLER_HAS_VULKAN_PREVIEW
         if(window_)window_->setZScale(scale);
@@ -513,8 +545,9 @@ void MaskStackWidget::setPreview(const MaskStackPreviewDataPtr& preview){preview
 void MaskStackWidget::setColors(const QColor& start,const QColor& end){startColor_=start;endColor_=end;backend_->setColors(start,end);}
 void MaskStackWidget::setDisplayMode(MaskStackDisplayMode mode){mode_=mode;backend_->setMode(mode);}
 void MaskStackWidget::setSelectedLayer(int layer){selectedLayer_=std::max(1,layer);backend_->setSelectedLayer(selectedLayer_);}
+void MaskStackWidget::setActiveBlock(qint64 traversalIndex){activeBlock_=traversalIndex;backend_->setActiveBlock(traversalIndex);}
 void MaskStackWidget::setZScale(double scale){zScale_=std::clamp(scale,1.0,100.0);backend_->setZScale(zScale_);}
-void MaskStackWidget::clear(){preview_.reset();backend_->setPreview({});}
+void MaskStackWidget::clear(){preview_.reset();activeBlock_=-1;backend_->setPreview({});backend_->setActiveBlock(-1);}
 void MaskStackWidget::fitAll(){backend_->fitAll();}
 void MaskStackWidget::viewTop(){backend_->top();}
 void MaskStackWidget::viewFront(){backend_->front();}

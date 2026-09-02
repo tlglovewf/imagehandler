@@ -205,6 +205,73 @@ void TestCore::maskStackGeometryAndSampling() {
     const auto sampled=MaskSliceGenerator::analyze(request,token,{},&error);QVERIFY2(sampled.stackPreview,qPrintable(error));
     QCOMPARE(sampled.stackPreview->gridSize,QSize(512,128));QVERIFY(sampled.stackPreview->downsampled);
     QCOMPARE(sampled.stackPreview->requestedOutputSize,QSize(1024,256));
+
+    QImage groupSource(6,2,QImage::Format_Grayscale8);groupSource.fill(0);
+    for(int y=0;y<2;++y){groupSource.scanLine(y)[0]=255;groupSource.scanLine(y)[1]=255;
+        groupSource.scanLine(y)[4]=128;groupSource.scanLine(y)[5]=128;}
+    const QString groupPath=directory.filePath("stack-group.bmp");QVERIFY(groupSource.save(groupPath,"BMP"));
+    const auto groupDocument=ImageLoader::load(groupPath,981,&error);QVERIFY2(groupDocument,qPrintable(error));
+    MaskStackGroupRequest groupRequest{groupDocument,
+        {{{0,0,2,2},0,0,0},{{4,0,2,2},0,2,2}},
+        {0.5,1.0,false},0.1,1.0,1.0,7};
+    error.clear();const auto group=MaskSliceGenerator::analyzeStackGroup(groupRequest,token,{},&error);
+    QVERIFY2(group.preview,qPrintable(error));QCOMPARE(group.requestGeneration,quint64(7));
+    QCOMPARE(group.commonLayerCount,10);QCOMPARE(group.elements.size(),2);
+    QCOMPARE(group.elements[0].layerCount,10);QCOMPARE(group.elements[1].layerCount,6);
+    QCOMPARE(group.preview->gridSize,QSize(6,2));QCOMPARE(group.preview->physicalSize,QSizeF(3.0,1.0));
+    QCOMPARE(group.preview->layerCount,10);
+    QCOMPARE(group.preview->blocks.size(),2);QCOMPARE(group.preview->blocks[0].physicalRect,QRectF(0,0,1,1));
+    QCOMPARE(group.preview->blocks[1].physicalRect,QRectF(2,0,1,1));
+    QCOMPARE(group.preview->columnLayers,QVector<quint16>({10,10,0,0,6,6,10,10,0,0,6,6}));
+    QVERIFY(std::abs(group.preview->actualMaximumHeight-1.0)<0.000001);
+    MaskStackGroupRequest zeroGroupRequest=groupRequest;
+    zeroGroupRequest.elements={{{2,0,2,2},0,1,1},{{4,0,2,2},0,2,2}};
+    zeroGroupRequest.requestGeneration=9;
+    error.clear();const auto zeroGroup=MaskSliceGenerator::analyzeStackGroup(
+        zeroGroupRequest,token,{},&error);
+    QVERIFY2(zeroGroup.preview,qPrintable(error));QCOMPARE(zeroGroup.commonLayerCount,10);
+    QCOMPARE(zeroGroup.elements[0].layerCount,10);QCOMPARE(zeroGroup.elements[1].layerCount,6);
+    QCOMPARE(zeroGroup.elements[0].actualMaximumHeight,0.0);
+    zeroGroupRequest.layerHeight=0.0009;zeroGroupRequest.requestGeneration=10;
+    error.clear();const auto excessiveGroup=MaskSliceGenerator::analyzeStackGroup(
+        zeroGroupRequest,token,{},&error);
+    QVERIFY(!excessiveGroup.preview);QVERIFY(error.contains(QStringLiteral("1000")));
+    groupRequest.outputScaleX=200.0;groupRequest.outputScaleY=200.0;groupRequest.requestGeneration=8;
+    error.clear();const auto reduced=MaskSliceGenerator::analyzeStackGroup(groupRequest,token,{},&error);
+    QVERIFY2(reduced.preview,qPrintable(error));QCOMPARE(reduced.preview->requestedOutputSize,QSize(1200,400));
+    QCOMPARE(reduced.preview->gridSize,QSize(512,171));QVERIFY(reduced.preview->downsampled);
+
+    MaskSliceRequest lowRequest{groupDocument,{4,0,2,2},{0.5,1.0,false},{0.1,2,2,false}};
+    error.clear();const auto lowAnalysis=MaskSliceGenerator::analyze(lowRequest,token,{},&error);
+    QVERIFY2(error.isEmpty(),qPrintable(error));QCOMPARE(lowAnalysis.layerCount,6);
+    const QString paddedPath=directory.filePath("padded-masks");QVERIFY(QDir().mkpath(paddedPath));
+    QVERIFY2(MaskSliceExporter::exportAll(paddedPath,lowRequest,group.commonLayerCount,
+                                          false,token,{},&error),qPrintable(error));
+    QCOMPARE(QDir(paddedPath).entryList({QStringLiteral("*.bmp")},QDir::Files).size(),10);
+    const auto padded=ImageLoader::load(QDir(paddedPath).filePath("7.bmp"),982,&error);
+    QVERIFY2(padded,qPrintable(error));
+    const QImage paddedPixels=VipsSupport::renderRegion(padded,0,0,2,2,1.0,&error);
+    QVERIFY2(!paddedPixels.isNull(),qPrintable(error));
+    for(int y=0;y<2;++y)for(int x=0;x<2;++x)
+        QCOMPARE(paddedPixels.pixelColor(x,y),QColor(Qt::black));
+
+    lowRequest.settings.invertMask=true;
+    const QString invertedPaddedPath=directory.filePath("padded-masks-inverted");
+    QVERIFY(QDir().mkpath(invertedPaddedPath));
+    error.clear();QVERIFY2(MaskSliceExporter::exportAll(invertedPaddedPath,lowRequest,
+        group.commonLayerCount,false,token,{},&error),qPrintable(error));
+    const auto invertedPadded=ImageLoader::load(
+        QDir(invertedPaddedPath).filePath("7.bmp"),983,&error);
+    QVERIFY2(invertedPadded,qPrintable(error));
+    const QImage invertedPaddedPixels=VipsSupport::renderRegion(
+        invertedPadded,0,0,2,2,1.0,&error);
+    QVERIFY2(!invertedPaddedPixels.isNull(),qPrintable(error));
+    for(int y=0;y<2;++y)for(int x=0;x<2;++x)
+        QCOMPARE(invertedPaddedPixels.pixelColor(x,y),QColor(Qt::white));
+
+    request.generateStackPreview=false;error.clear();
+    const auto masksOnly=MaskSliceGenerator::analyze(request,token,{},&error);
+    QVERIFY2(error.isEmpty(),qPrintable(error));QVERIFY(!masksOnly.stackPreview);
 }
 
 void TestCore::pointCloudCoordinatesAndLodAverage() {

@@ -51,6 +51,7 @@ private Q_SLOTS:
     void listActivationRequiresDoubleClick();
     void elementPointCloudWindowIsReused();
     void maskSliceWindowDefaultsAndReuse();
+    void maskSliceMultiSelectionAndStackPlacement();
 
 private:
     QTemporaryDir settingsDirectory_;
@@ -494,7 +495,8 @@ void TestMainWindow::maskSliceWindowDefaultsAndReuse() {
     QCOMPARE(layerHeight->value(),0.1);QCOMPARE(layerHeight->singleStep(),0.1);
     QCOMPARE(outputWidth->value(),2);QCOMPARE(outputHeight->value(),2);QVERIFY(lock->isChecked());QVERIFY(!invert->isChecked());
     QTRY_VERIFY_WITH_TIMEOUT(sliceWindow->analysis().has_value(),5000);
-    QVERIFY(sliceWindow->analysis()->stackPreview);QVERIFY(stack->preview());
+    QTRY_VERIFY_WITH_TIMEOUT(sliceWindow->stackAnalysis().has_value(),5000);
+    QVERIFY(sliceWindow->stackAnalysis()->preview);QVERIFY(stack->preview());
     QCOMPARE(list->count(),sliceWindow->analysis()->layerCount);
     QCOMPARE(total->text(),QStringLiteral("掩模总数：%1").arg(list->count()));
     QCOMPARE(list->currentRow(),0);QCOMPARE(stack->selectedLayer(),1);
@@ -509,7 +511,89 @@ void TestMainWindow::maskSliceWindowDefaultsAndReuse() {
     outputWidth->setValue(4);QCOMPARE(outputHeight->value(),4);
     QVERIFY(QMetaObject::invokeMethod(imageView,"segmentationCellSliceActivated",Qt::DirectConnection,Q_ARG(int,1),Q_ARG(int,0)));
     QCOMPARE(window.findChildren<MaskSliceWindow*>().size(),1);QVERIFY(sliceWindow->isVisible());
-    QCOMPARE(outputWidth->value(),2);QCOMPARE(outputHeight->value(),2);
+    QCOMPARE(outputWidth->value(),4);QCOMPARE(outputHeight->value(),4);
+}
+
+void TestMainWindow::maskSliceMultiSelectionAndStackPlacement() {
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QImage source(6,2,QImage::Format_Grayscale8);source.fill(0);
+    for(int y=0;y<2;++y){source.scanLine(y)[0]=255;source.scanLine(y)[1]=255;
+        source.scanLine(y)[4]=128;source.scanLine(y)[5]=128;}
+    const QString path=directory.filePath("slice-multi-ui.bmp");QVERIFY(source.save(path,"BMP"));
+    QString error;const auto document=ImageLoader::load(path,990,&error);QVERIFY2(document,qPrintable(error));
+    MainWindow window;
+    auto* width=window.findChild<QSpinBox*>(QStringLiteral("segmentationCellWidth"));
+    auto* height=window.findChild<QSpinBox*>(QStringLiteral("segmentationCellHeight"));
+    auto* preview=window.findChild<QPushButton*>(QStringLiteral("manualSegmentationPreviewButton"));
+    auto* maximumHeight=window.findChild<QDoubleSpinBox*>(QStringLiteral("cloudMaximumHeight"));
+    auto* invertHeight=window.findChild<QCheckBox*>(QStringLiteral("cloudInvertHeight"));
+    auto* imageView=window.findChild<LargeImageView*>();QVERIFY(width);QVERIFY(height);QVERIFY(preview);QVERIFY(imageView);
+    QVERIFY(maximumHeight);QVERIFY(invertHeight);maximumHeight->setValue(1.0);invertHeight->setChecked(false);
+    QVERIFY(QMetaObject::invokeMethod(&window,"acceptDocument",Qt::DirectConnection,Q_ARG(ImageDocumentPtr,document)));
+    width->setValue(2);height->setValue(2);preview->click();
+    const QVector<QPoint> cells{QPoint(0,0),QPoint(2,0)};
+    QVERIFY(QMetaObject::invokeMethod(imageView,"segmentationCellsSliceActivated",Qt::DirectConnection,
+        Q_ARG(QVector<QPoint>,cells),Q_ARG(QPoint,QPoint(2,0))));
+    auto* sliceWindow=window.findChild<MaskSliceWindow*>(QStringLiteral("maskSliceWindow"));
+    QVERIFY(sliceWindow);QVERIFY(sliceWindow->isVisible());
+    auto* elementList=sliceWindow->findChild<QListWidget*>(QStringLiteral("maskSliceElementList"));
+    auto* elementContainer=sliceWindow->findChild<QWidget*>(QStringLiteral("maskSliceElementListContainer"));
+    auto* outputWidth=sliceWindow->findChild<QSpinBox*>(QStringLiteral("maskSliceOutputWidth"));
+    auto* outputHeight=sliceWindow->findChild<QSpinBox*>(QStringLiteral("maskSliceOutputHeight"));
+    auto* elementInfo=sliceWindow->findChild<QLabel*>(QStringLiteral("maskSliceElementInfo"));
+    auto* stack=sliceWindow->findChild<MaskStackWidget*>(QStringLiteral("maskStackWidget"));
+    auto* layerList=sliceWindow->findChild<QListWidget*>(QStringLiteral("maskSliceList"));
+    auto* total=sliceWindow->findChild<QLabel*>(QStringLiteral("maskSliceTotal"));
+    auto* invert=sliceWindow->findChild<QCheckBox*>(QStringLiteral("maskSliceInvertMask"));
+    QVERIFY(elementList);QVERIFY(elementContainer);QVERIFY(outputWidth);QVERIFY(outputHeight);
+    QVERIFY(elementInfo);QVERIFY(stack);QVERIFY(layerList);QVERIFY(total);QVERIFY(invert);
+    QVERIFY(elementContainer->isVisible());QCOMPARE(elementList->count(),2);
+    QCOMPARE(elementList->item(0)->text(),QStringLiteral("1.bmp"));
+    QCOMPARE(elementList->item(1)->text(),QStringLiteral("3.bmp"));
+    QTRY_VERIFY_WITH_TIMEOUT(sliceWindow->analysis().has_value(),5000);
+    QTRY_VERIFY_WITH_TIMEOUT(sliceWindow->stackAnalysis().has_value(),5000);
+    const auto groupPreview=sliceWindow->stackAnalysis()->preview;QVERIFY(groupPreview);
+    QCOMPARE(sliceWindow->stackAnalysis()->commonLayerCount,10);
+    QCOMPARE(sliceWindow->stackAnalysis()->elements.size(),2);
+    QCOMPARE(sliceWindow->stackAnalysis()->elements[0].layerCount,10);
+    QCOMPARE(sliceWindow->stackAnalysis()->elements[1].layerCount,6);
+    QTRY_COMPARE_WITH_TIMEOUT(layerList->count(),10,5000);
+    QVERIFY(total->text().contains(QStringLiteral("统一总层数：10")));
+    QVERIFY(total->text().contains(QStringLiteral("本块计算：6")));
+    QVERIFY(total->text().contains(QStringLiteral("补齐：4")));
+    QVERIFY(layerList->item(6)->toolTip().contains(QStringLiteral("补齐底色层")));
+    const QImage blackPadding=layerList->item(6)->icon().pixmap(16,16).toImage();
+    QVERIFY(!blackPadding.isNull());QCOMPARE(blackPadding.pixelColor(
+        blackPadding.width()/2,blackPadding.height()/2).rgb(),qRgb(0,0,0));
+    invert->setChecked(true);
+    QTRY_VERIFY_WITH_TIMEOUT(sliceWindow->analysis().has_value(),5000);
+    QTRY_COMPARE_WITH_TIMEOUT(layerList->count(),10,5000);
+    const QImage whitePadding=layerList->item(6)->icon().pixmap(16,16).toImage();
+    QVERIFY(!whitePadding.isNull());QCOMPARE(whitePadding.pixelColor(
+        whitePadding.width()/2,whitePadding.height()/2).rgb(),qRgb(255,255,255));
+    invert->setChecked(false);
+    QTRY_VERIFY_WITH_TIMEOUT(sliceWindow->analysis().has_value(),5000);
+    QCOMPARE(groupPreview->blocks.size(),2);QCOMPARE(groupPreview->physicalSize,QSizeF(1.5,0.5));
+    QCOMPARE(groupPreview->blocks[0].physicalRect,QRectF(0,0,0.5,0.5));
+    QCOMPARE(groupPreview->blocks[1].physicalRect,QRectF(1.0,0,0.5,0.5));
+
+    outputWidth->setValue(4);QCOMPARE(outputHeight->value(),4);
+    QTRY_VERIFY_WITH_TIMEOUT(sliceWindow->stackAnalysis().has_value(),5000);
+    const auto stackBeforeSwitch=stack->preview();QVERIFY(stackBeforeSwitch);
+    Q_EMIT elementList->itemDoubleClicked(elementList->item(0));
+    QCOMPARE(outputWidth->value(),4);QCOMPARE(outputHeight->value(),4);
+    QCOMPARE(stack->preview(),stackBeforeSwitch);QVERIFY(elementInfo->text().contains(QStringLiteral("1.bmp")));
+    QTRY_VERIFY_WITH_TIMEOUT(sliceWindow->analysis().has_value(),5000);
+    QTRY_COMPARE_WITH_TIMEOUT(layerList->count(),10,5000);
+    QVERIFY(total->text().contains(QStringLiteral("本块计算：10")));
+    QVERIFY(total->text().contains(QStringLiteral("补齐：0")));
+
+    const QVector<QPoint> oneCell{QPoint(0,0)};
+    QVERIFY(QMetaObject::invokeMethod(imageView,"segmentationCellsSelected",Qt::DirectConnection,
+        Q_ARG(QVector<QPoint>,oneCell),Q_ARG(QPoint,QPoint(0,0))));
+    QVERIFY(!elementContainer->isVisible());
+    QTRY_VERIFY_WITH_TIMEOUT(sliceWindow->stackAnalysis().has_value(),5000);
+    QCOMPARE(sliceWindow->stackAnalysis()->preview->blocks.size(),1);
 }
 
 QTEST_MAIN(TestMainWindow)

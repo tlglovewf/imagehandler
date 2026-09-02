@@ -108,6 +108,7 @@ MaskSliceAnalysis MaskSliceGenerator::analyze(
     const MaskSliceRequest& request, const CancellationTokenPtr& token,
     const Progress& progress, QString* error) {
     MaskSliceAnalysis result;
+    result.requestGeneration = request.requestGeneration;
     if (!request.source || !ImageLoader::isProcessable(request.source->metadata) ||
         request.settings.outputWidth <= 0 || request.settings.outputHeight <= 0 ||
         !std::isfinite(request.mapping.pixelScale) || request.mapping.pixelScale <= 0.0 ||
@@ -154,6 +155,7 @@ MaskSliceAnalysis MaskSliceGenerator::analyze(
                                    request.settings.layerHeight, error);
     if (result.layerCount <= 0 || (token && token->isCancelled())) return {};
 
+    if (request.generateStackPreview) {
     auto stackPreview = std::make_shared<MaskStackPreviewData>();
     stackPreview->requestedOutputSize = {request.settings.outputWidth,
                                          request.settings.outputHeight};
@@ -163,6 +165,7 @@ MaskSliceAnalysis MaskSliceGenerator::analyze(
         request.region.height * request.mapping.pixelScale};
     stackPreview->layerHeight = request.settings.layerHeight;
     stackPreview->layerCount = result.layerCount;
+    stackPreview->actualMaximumHeight = result.actualMaximumHeight;
     stackPreview->downsampled = stackPreview->gridSize != stackPreview->requestedOutputSize;
 
     VipsImage* stackRaw = nullptr;
@@ -207,6 +210,7 @@ MaskSliceAnalysis MaskSliceGenerator::analyze(
         *stackPreview, token, progress);
     if (!stackPreview->explodedGeometry || (token && token->isCancelled())) return {};
     result.stackPreview = stackPreview;
+    }
 
     result.previewSize = previewSizeFor(request);
     VipsImage* resizedRaw = nullptr;
@@ -251,5 +255,185 @@ MaskSliceAnalysis MaskSliceGenerator::analyze(
                                 result.layerCount});
     }
     g_free(memory);
+    return result;
+}
+
+MaskStackGroupAnalysis MaskSliceGenerator::analyzeStackGroup(
+    const MaskStackGroupRequest& request, const CancellationTokenPtr& token,
+    const Progress& progress, QString* error) {
+    MaskStackGroupAnalysis result;
+    result.requestGeneration = request.requestGeneration;
+    if (!request.source || !ImageLoader::isProcessable(request.source->metadata) ||
+        request.elements.isEmpty() || !std::isfinite(request.layerHeight) ||
+        request.layerHeight <= 0.0 || !std::isfinite(request.outputScaleX) ||
+        request.outputScaleX <= 0.0 || !std::isfinite(request.outputScaleY) ||
+        request.outputScaleY <= 0.0 || !std::isfinite(request.mapping.pixelScale) ||
+        request.mapping.pixelScale <= 0.0 || !std::isfinite(request.mapping.maximumHeight) ||
+        request.mapping.maximumHeight <= 0.0) {
+        if (error) *error = QStringLiteral("多块三维预览请求无效。");
+        return result;
+    }
+
+    qint64 left = std::numeric_limits<qint64>::max();
+    qint64 top = std::numeric_limits<qint64>::max();
+    qint64 right = 0;
+    qint64 bottom = 0;
+    for (const MaskSliceElement& element : request.elements) {
+        if (!element.region.isValid() || element.region.x < 0 || element.region.y < 0 ||
+            element.region.x + element.region.width > request.source->metadata.width ||
+            element.region.y + element.region.height > request.source->metadata.height) {
+            if (error) *error = QStringLiteral("多选块区域无效或超出源图范围。");
+            return result;
+        }
+        left = std::min(left, element.region.x);
+        top = std::min(top, element.region.y);
+        right = std::max(right, element.region.x + element.region.width);
+        bottom = std::max(bottom, element.region.y + element.region.height);
+    }
+    const qint64 boundingWidth = right - left;
+    const qint64 boundingHeight = bottom - top;
+    if (boundingWidth <= 0 || boundingHeight <= 0 || boundingWidth > INT_MAX ||
+        boundingHeight > INT_MAX || left > INT_MAX || top > INT_MAX) {
+        if (error) *error = QStringLiteral("多选块包围区域过大。");
+        return result;
+    }
+
+    auto preview = std::make_shared<MaskStackPreviewData>();
+    const auto requestedDimension = [](qint64 sourcePixels, double scale) {
+        const long double value = std::round(static_cast<long double>(sourcePixels) * scale);
+        return static_cast<int>(std::clamp<long double>(value, 1.0L, INT_MAX));
+    };
+    preview->requestedOutputSize = {
+        requestedDimension(boundingWidth, request.outputScaleX),
+        requestedDimension(boundingHeight, request.outputScaleY)};
+    constexpr double kMaximumSide = 512.0;
+    const double previewScale = std::min({1.0,
+        kMaximumSide / preview->requestedOutputSize.width(),
+        kMaximumSide / preview->requestedOutputSize.height()});
+    preview->gridSize = {
+        std::max(1, static_cast<int>(std::lround(
+            preview->requestedOutputSize.width() * previewScale))),
+        std::max(1, static_cast<int>(std::lround(
+            preview->requestedOutputSize.height() * previewScale)))};
+    preview->physicalSize = {boundingWidth * request.mapping.pixelScale,
+                             boundingHeight * request.mapping.pixelScale};
+    preview->layerHeight = request.layerHeight;
+    preview->downsampled = preview->gridSize != preview->requestedOutputSize;
+    preview->blocks.reserve(request.elements.size());
+    for (const MaskSliceElement& element : request.elements) {
+        preview->blocks.push_back({
+            QRectF((element.region.x - left) * request.mapping.pixelScale,
+                   (bottom - element.region.y - element.region.height) * request.mapping.pixelScale,
+                   element.region.width * request.mapping.pixelScale,
+                   element.region.height * request.mapping.pixelScale),
+            element.traversalIndex});
+    }
+
+    const double divisor = storedMaximum(request.source->metadata.kind);
+    result.elements.reserve(request.elements.size());
+    if (progress) progress({QStringLiteral("扫描多选块最高点"), 0,
+                            request.elements.size()});
+    for (qsizetype index = 0; index < request.elements.size(); ++index) {
+        if (token && token->isCancelled()) return {};
+        MaskSliceRequest single{request.source, request.elements[index].region,
+                                request.mapping, {request.layerHeight, 1, 1, false}};
+        const auto image = prepareFloatRegion(single, error);
+        if (!image) return result;
+        double rawExtreme = 0.0;
+        const int status = request.mapping.invertHeight
+            ? vips_min(image.get(), &rawExtreme, nullptr)
+            : vips_max(image.get(), &rawExtreme, nullptr);
+        if (status != 0) {
+            if (error) *error = VipsSupport::lastError();
+            return result;
+        }
+        const double elementMaximumHeight = PointCloudMath::heightForRaw(
+            rawExtreme, divisor, request.mapping);
+        QString layerError;
+        const int elementLayerCount = layerCount(
+            elementMaximumHeight, request.mapping.maximumHeight,
+            request.layerHeight, &layerError);
+        if (elementLayerCount <= 0) {
+            if (error) *error = layerError;
+            return result;
+        }
+        result.elements.push_back({request.elements[index].traversalIndex,
+                                   elementMaximumHeight, elementLayerCount});
+        result.commonLayerCount = std::max(result.commonLayerCount, elementLayerCount);
+        preview->actualMaximumHeight = std::max(preview->actualMaximumHeight,
+                                                elementMaximumHeight);
+        if (progress) progress({QStringLiteral("扫描多选块最高点"), index + 1,
+                                request.elements.size()});
+    }
+    preview->layerCount = result.commonLayerCount;
+    if (preview->layerCount <= 0 || (token && token->isCancelled())) return result;
+
+    MaskSliceRequest boundingRequest{request.source, {left, top, boundingWidth, boundingHeight},
+                                     request.mapping, {request.layerHeight, 1, 1, false}};
+    const auto boundingImage = prepareFloatRegion(boundingRequest, error);
+    if (!boundingImage) return result;
+    VipsImage* resizedRaw = nullptr;
+    if (vips_resize(boundingImage.get(), &resizedRaw,
+                    double(preview->gridSize.width()) / boundingImage->Xsize,
+                    "vscale", double(preview->gridSize.height()) / boundingImage->Ysize,
+                    "kernel", VIPS_KERNEL_NEAREST, nullptr) != 0) {
+        if (error) *error = VipsSupport::lastError();
+        return result;
+    }
+    const auto resized = VipsSupport::adopt(resizedRaw);
+    preview->gridSize = {resized->Xsize, resized->Ysize};
+    const qsizetype pixelCount = qsizetype(resized->Xsize) * resized->Ysize;
+    QVector<quint8> selected(pixelCount, 0);
+    const double sourcePerPreviewX = double(boundingWidth) / resized->Xsize;
+    const double sourcePerPreviewY = double(boundingHeight) / resized->Ysize;
+    for (const MaskSliceElement& element : request.elements) {
+        const int xBegin = std::max(0, static_cast<int>(std::floor(
+            double(element.region.x - left) / boundingWidth * resized->Xsize)));
+        const int xEnd = std::min(resized->Xsize, static_cast<int>(std::ceil(
+            double(element.region.x + element.region.width - left) / boundingWidth * resized->Xsize)));
+        const int yBegin = std::max(0, static_cast<int>(std::floor(
+            double(element.region.y - top) / boundingHeight * resized->Ysize)));
+        const int yEnd = std::min(resized->Ysize, static_cast<int>(std::ceil(
+            double(element.region.y + element.region.height - top) / boundingHeight * resized->Ysize)));
+        for (int y = yBegin; y < yEnd; ++y) {
+            const double sourceY = top + (y + 0.5) * sourcePerPreviewY;
+            if (sourceY < element.region.y ||
+                sourceY >= element.region.y + element.region.height) continue;
+            for (int x = xBegin; x < xEnd; ++x) {
+                const double sourceX = left + (x + 0.5) * sourcePerPreviewX;
+                if (sourceX >= element.region.x &&
+                    sourceX < element.region.x + element.region.width)
+                    selected[qsizetype(y) * resized->Xsize + x] = 1;
+            }
+        }
+    }
+
+    size_t byteCount = 0;
+    void* memory = vips_image_write_to_memory(resized.get(), &byteCount);
+    if (!memory) {
+        if (error) *error = VipsSupport::lastError();
+        return result;
+    }
+    const auto* values = static_cast<const float*>(memory);
+    preview->columnLayers.resize(pixelCount);
+    if (progress) progress({QStringLiteral("生成多块三维层高数据"), 0, pixelCount});
+    for (qsizetype index = 0; index < pixelCount; ++index) {
+        if ((index & 0x3fff) == 0 && token && token->isCancelled()) {
+            g_free(memory);
+            return {};
+        }
+        if (!selected[index]) continue;
+        preview->columnLayers[index] = quantizedLayer(
+            PointCloudMath::heightForRaw(values[index], divisor, request.mapping),
+            request.layerHeight, preview->layerCount);
+    }
+    g_free(memory);
+    if (progress) progress({QStringLiteral("生成多块三维层高数据"), pixelCount, pixelCount});
+
+    preview->solidGeometry = MaskStackMeshBuilder::buildSolid(*preview, token, progress);
+    if (!preview->solidGeometry || (token && token->isCancelled())) return {};
+    preview->explodedGeometry = MaskStackMeshBuilder::buildExploded(*preview, token, progress);
+    if (!preview->explodedGeometry || (token && token->isCancelled())) return {};
+    result.preview = preview;
     return result;
 }

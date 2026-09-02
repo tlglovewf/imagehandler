@@ -17,6 +17,7 @@ public:
     void setColors(const QColor& start, const QColor& end);
     void setDisplayMode(MaskStackDisplayMode mode);
     void setSelectedLayer(int layer);
+    void setActiveBlock(qint64 traversalIndex);
     void setZScale(double scale);
     void clear();
     void fitAll();
@@ -39,5 +40,6 @@ private:
     QColor endColor_{0, 255, 0};
     MaskStackDisplayMode mode_ = MaskStackDisplayMode::Solid;
     int selectedLayer_ = 1;
+    qint64 activeBlock_ = -1;
     double zScale_ = 1.0;
 };

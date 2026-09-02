@@ -3,6 +3,7 @@
 #include "domain/Models.h"
 #include "domain/JobModels.h"
 #include "domain/PointCloudModels.h"
+#include "domain/MaskSliceModels.h"
 #include "io/ExportTypes.h"
 #include <QMainWindow>
 #include <QVector>
@@ -70,6 +71,10 @@ private:
     void generatePointCloud();
     void showElementPointCloud(int row, int column);
     void showMaskSlices(int row, int column);
+    void showMaskSlices(const QVector<QPoint>& cells, const QPoint& activeCell);
+    void syncMaskSliceSelection(const QVector<QPoint>& cells, const QPoint& activeCell);
+    [[nodiscard]] QVector<MaskSliceElement> maskSliceElements(
+        const QVector<QPoint>& cells) const;
     void syncMaskSliceMapping();
     void chooseCloudColor(bool startColor);
     void updateCloudColorButton(QPushButton* button, const QColor& color,

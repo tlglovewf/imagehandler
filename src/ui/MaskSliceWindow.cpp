@@ -32,7 +32,8 @@
 
 MaskSliceWindow::MaskSliceWindow(QWidget* parent)
     : QWidget(parent, Qt::Window), tasks_(new TaskManager(this)),
-      analysisTimer_(new QTimer(this)) {
+      stackTasks_(new TaskManager(this)), analysisTimer_(new QTimer(this)),
+      stackTimer_(new QTimer(this)) {
     setObjectName(QStringLiteral("maskSliceWindow"));
     setWindowTitle(QStringLiteral("单元分层切片"));
     resize(1280, 760);
@@ -95,6 +96,20 @@ MaskSliceWindow::MaskSliceWindow(QWidget* parent)
     auto* rightPanel = new QWidget;
     auto* rightLayout = new QVBoxLayout(rightPanel);
     rightLayout->setContentsMargins(0, 0, 0, 0);
+    elementListContainer_ = new QWidget;
+    elementListContainer_->setObjectName(QStringLiteral("maskSliceElementListContainer"));
+    auto* elementListLayout = new QVBoxLayout(elementListContainer_);
+    elementListLayout->setContentsMargins(0, 0, 0, 4);
+    auto* elementListLabel = new QLabel(QStringLiteral("已选块"));
+    elementListLabel->setObjectName(QStringLiteral("maskSliceElementListLabel"));
+    elementList_ = new QListWidget;
+    elementList_->setObjectName(QStringLiteral("maskSliceElementList"));
+    elementList_->setSelectionMode(QAbstractItemView::SingleSelection);
+    elementList_->setMaximumHeight(112);
+    elementListLayout->addWidget(elementListLabel);
+    elementListLayout->addWidget(elementList_);
+    elementListContainer_->hide();
+    rightLayout->addWidget(elementListContainer_);
     auto* form = new QFormLayout;
     layerHeight_ = new QDoubleSpinBox;
     layerHeight_->setObjectName(QStringLiteral("maskSliceLayerHeight"));
@@ -174,10 +189,13 @@ MaskSliceWindow::MaskSliceWindow(QWidget* parent)
 
     analysisTimer_->setSingleShot(true);
     analysisTimer_->setInterval(150);
+    stackTimer_->setSingleShot(true);
+    stackTimer_->setInterval(150);
     connect(analysisTimer_, &QTimer::timeout, this, &MaskSliceWindow::startAnalysis);
+    connect(stackTimer_, &QTimer::timeout, this, &MaskSliceWindow::startStackAnalysis);
     connect(layerHeight_, qOverload<double>(&QDoubleSpinBox::valueChanged),
             this, [this] { scheduleAnalysis(); });
-    connect(invertMask_, &QCheckBox::toggled, this, [this] { scheduleAnalysis(); });
+    connect(invertMask_, &QCheckBox::toggled, this, [this] { scheduleActiveAnalysis(); });
     connect(outputWidth_, qOverload<int>(&QSpinBox::valueChanged), this, [this](int width) {
         if (!updatingDimensions_ && lockAspect_->isChecked() && region_.isValid()) {
             updatingDimensions_ = true;
@@ -227,13 +245,20 @@ MaskSliceWindow::MaskSliceWindow(QWidget* parent)
             [this] { if (!automaticZScale_->isChecked()) updateStackZScale(); });
     connect(layerList_, &QListWidget::currentRowChanged,
             this, &MaskSliceWindow::updateStackLayerSelection);
+    connect(elementList_, &QListWidget::itemDoubleClicked, this,
+            [this](QListWidgetItem* item) {
+        if (item) activateElement(item->data(Qt::UserRole).toInt());
+    });
     connect(fitStack, &QPushButton::clicked, stackView_, &MaskStackWidget::fitAll);
     connect(topStack, &QPushButton::clicked, stackView_, &MaskStackWidget::viewTop);
     connect(frontStack, &QPushButton::clicked, stackView_, &MaskStackWidget::viewFront);
     connect(rightStack, &QPushButton::clicked, stackView_, &MaskStackWidget::viewRight);
     connect(exportButton_, &QPushButton::clicked, this,
             &MaskSliceWindow::chooseExportDirectory);
-    connect(cancelButton_, &QPushButton::clicked, tasks_, &TaskManager::cancel);
+    connect(cancelButton_, &QPushButton::clicked, this, [this] {
+        tasks_->cancel();
+        stackTasks_->cancel();
+    });
     connect(tasks_, &TaskManager::taskStarted, this, [this](quint64, const QString&) {
         progressBar_->setRange(0, 0);
         progressBar_->show();
@@ -252,7 +277,8 @@ MaskSliceWindow::MaskSliceWindow(QWidget* parent)
         if (clearing_) { updateControls(); return; }
         if (completedAction == Action::Analyze) {
             const MaskSliceAnalysis result = value.value<MaskSliceAnalysis>();
-            if (!pendingAnalysis_ && result.layerCount > 0) {
+            if (!pendingAnalysis_ && result.requestGeneration == analysisRevision_ &&
+                result.layerCount > 0) {
                 analysis_ = result;
                 populateLayers(result);
                 statusLabel_->setText(QStringLiteral("生成完成，实际最高 %1 μm")
@@ -286,37 +312,131 @@ MaskSliceWindow::MaskSliceWindow(QWidget* parent)
         updateControls();
         if (pendingAnalysis_ && !clearing_) analysisTimer_->start(0);
     });
+    connect(stackTasks_, &TaskManager::taskStarted, this,
+            [this](quint64, const QString&) {
+        stackSamplingLabel_->setText(QStringLiteral("三维预览：正在生成全部已选块…"));
+        updateControls();
+    });
+    connect(stackTasks_, &TaskManager::taskProgress, this,
+            [this](quint64, const TaskProgress& value) {
+        if (!clearing_) stackSamplingLabel_->setText(value.phase);
+    });
+    connect(stackTasks_, &TaskManager::taskFinished, this,
+            [this](quint64, const QVariant& value) {
+        if (clearing_) { updateControls(); return; }
+        const MaskStackGroupAnalysis result = value.value<MaskStackGroupAnalysis>();
+        if (!pendingStackAnalysis_ && result.requestGeneration == stackRevision_ &&
+            result.preview) {
+            stackAnalysis_ = result;
+            stackView_->setColors(mapping_.startColor, mapping_.endColor);
+            stackView_->setPreview(result.preview);
+            stackView_->setActiveBlock(traversalIndex_);
+            updateStackZScale();
+            updateStackInformation();
+            if (analysis_) populateLayers(*analysis_);
+        }
+        updateControls();
+        if (pendingStackAnalysis_) stackTimer_->start(0);
+    });
+    connect(stackTasks_, &TaskManager::taskCancelled, this, [this](quint64) {
+        updateControls();
+        if (pendingStackAnalysis_ && !clearing_) stackTimer_->start(0);
+    });
+    connect(stackTasks_, &TaskManager::taskFailed, this,
+            [this](quint64, const QString& error) {
+        if (!clearing_ && !pendingStackAnalysis_)
+            stackSamplingLabel_->setText(QStringLiteral("三维预览失败：%1").arg(error));
+        updateControls();
+        if (pendingStackAnalysis_ && !clearing_) stackTimer_->start(0);
+    });
     updateControls();
 }
 
 void MaskSliceWindow::showElement(
     const ImageDocumentPtr& source, const ImageRegion& region, int row, int column,
     qint64 traversalIndex, const PointCloudSettings& mapping) {
-    clearing_ = false;
-    source_ = source;
-    region_ = region;
-    mapping_ = mapping;
-    row_ = row;
-    column_ = column;
-    traversalIndex_ = traversalIndex;
-    analysis_.reset();
-    layerList_->clear();
-    totalLabel_->setText(QStringLiteral("掩模总数：0"));
-    elementLabel_->setText(QStringLiteral("第 %1 行，第 %2 列 | %3.bmp | %4 × %5 像素 | %6 × %7 μm")
-        .arg(row + 1).arg(column + 1).arg(traversalIndex + 1)
-        .arg(region.width).arg(region.height)
-        .arg(region.width * mapping.pixelScale, 0, 'f', 6)
-        .arg(region.height * mapping.pixelScale, 0, 'f', 6));
-    setWindowTitle(QStringLiteral("单元分层切片 - %1.bmp").arg(traversalIndex + 1));
-    updatingDimensions_ = true;
-    outputWidth_->setValue(static_cast<int>(std::clamp<qint64>(region.width, 1, INT_MAX)));
-    outputHeight_->setValue(static_cast<int>(std::clamp<qint64>(region.height, 1, INT_MAX)));
-    updatingDimensions_ = false;
-    updateDimensionMapping();
+    showElements(source, {{region, row, column, traversalIndex}}, QPoint(column, row), mapping);
+}
+
+void MaskSliceWindow::showElements(
+    const ImageDocumentPtr& source, const QVector<MaskSliceElement>& elements,
+    const QPoint& activeCell, const PointCloudSettings& mapping) {
+    setElements(source, elements, activeCell, mapping);
+    if (!source_ || elements_.isEmpty()) return;
     show();
     raise();
     activateWindow();
-    scheduleAnalysis();
+}
+
+void MaskSliceWindow::setElements(
+    const ImageDocumentPtr& source, const QVector<MaskSliceElement>& elements,
+    const QPoint& activeCell, const PointCloudSettings& mapping) {
+    if (!source || elements.isEmpty()) {
+        cancelAndClear();
+        return;
+    }
+    clearing_ = false;
+    const bool sameSource = source_ == source;
+    const double previousScaleX = sameSource && region_.isValid()
+        ? double(outputWidth_->value()) / region_.width : 1.0;
+    const double previousScaleY = sameSource && region_.isValid()
+        ? double(outputHeight_->value()) / region_.height : 1.0;
+    const bool geometryMappingChanged = mapping_.pixelScale != mapping.pixelScale ||
+        mapping_.maximumHeight != mapping.maximumHeight ||
+        mapping_.invertHeight != mapping.invertHeight;
+
+    QVector<MaskSliceElement> sorted = elements;
+    std::sort(sorted.begin(), sorted.end(), [](const auto& leftElement,
+                                               const auto& rightElement) {
+        return leftElement.traversalIndex < rightElement.traversalIndex;
+    });
+    const bool collectionChanged = !sameSource || sorted.size() != elements_.size() ||
+        !std::equal(sorted.cbegin(), sorted.cend(), elements_.cbegin(),
+            [](const auto& leftElement, const auto& rightElement) {
+        return leftElement.row == rightElement.row &&
+               leftElement.column == rightElement.column &&
+               leftElement.traversalIndex == rightElement.traversalIndex &&
+               leftElement.region.x == rightElement.region.x &&
+               leftElement.region.y == rightElement.region.y &&
+               leftElement.region.width == rightElement.region.width &&
+               leftElement.region.height == rightElement.region.height;
+    });
+    int nextActive = 0;
+    for (int index = 0; index < sorted.size(); ++index) {
+        if (sorted[index].row == activeCell.y() && sorted[index].column == activeCell.x()) {
+            nextActive = index;
+            break;
+        }
+    }
+    const bool activeChanged = collectionChanged || activeElementIndex_ < 0 ||
+        activeElementIndex_ >= elements_.size() ||
+        elements_[activeElementIndex_].row != sorted[nextActive].row ||
+        elements_[activeElementIndex_].column != sorted[nextActive].column;
+
+    source_ = source;
+    mapping_ = mapping;
+    elements_ = std::move(sorted);
+    activeElementIndex_ = nextActive;
+    const MaskSliceElement& active = elements_[activeElementIndex_];
+    region_ = active.region;
+    row_ = active.row;
+    column_ = active.column;
+    traversalIndex_ = active.traversalIndex;
+    {
+        const QSignalBlocker blockWidth(outputWidth_);
+        const QSignalBlocker blockHeight(outputHeight_);
+        outputWidth_->setValue(static_cast<int>(std::clamp<qint64>(
+            qRound64(region_.width * previousScaleX), 1, INT_MAX)));
+        outputHeight_->setValue(static_cast<int>(std::clamp<qint64>(
+            qRound64(region_.height * previousScaleY), 1, INT_MAX)));
+    }
+    populateElementList();
+    updateElementInformation();
+    updateDimensionMapping();
+    stackView_->setColors(mapping_.startColor, mapping_.endColor);
+    stackView_->setActiveBlock(traversalIndex_);
+    if (collectionChanged || geometryMappingChanged) scheduleStackAnalysis();
+    if (activeChanged || geometryMappingChanged || !analysis_) scheduleActiveAnalysis();
 }
 
 void MaskSliceWindow::setPointCloudSettings(const PointCloudSettings& mapping) {
@@ -329,11 +449,7 @@ void MaskSliceWindow::setPointCloudSettings(const PointCloudSettings& mapping) {
     mapping_ = mapping;
     if (colorsChanged) stackView_->setColors(mapping_.startColor, mapping_.endColor);
     if (source_ && region_.isValid()) {
-        elementLabel_->setText(QStringLiteral("第 %1 行，第 %2 列 | %3.bmp | %4 × %5 像素 | %6 × %7 μm")
-            .arg(row_ + 1).arg(column_ + 1).arg(traversalIndex_ + 1)
-            .arg(region_.width).arg(region_.height)
-            .arg(region_.width * mapping_.pixelScale, 0, 'f', 6)
-            .arg(region_.height * mapping_.pixelScale, 0, 'f', 6));
+        updateElementInformation();
         updateDimensionMapping();
         if (geometryChanged) scheduleAnalysis();
     }
@@ -342,17 +458,37 @@ void MaskSliceWindow::setPointCloudSettings(const PointCloudSettings& mapping) {
 MaskSliceRequest MaskSliceWindow::currentRequest() const {
     return {source_, region_, mapping_,
             {layerHeight_->value(), outputWidth_->value(), outputHeight_->value(),
-             invertMask_->isChecked()}};
+             invertMask_->isChecked()}, analysisRevision_, false};
+}
+
+MaskStackGroupRequest MaskSliceWindow::currentStackRequest() const {
+    const double scaleX = region_.isValid()
+        ? double(outputWidth_->value()) / region_.width : 1.0;
+    const double scaleY = region_.isValid()
+        ? double(outputHeight_->value()) / region_.height : 1.0;
+    return {source_, elements_, mapping_, layerHeight_->value(), scaleX, scaleY,
+            stackRevision_};
+}
+
+int MaskSliceWindow::unifiedLayerCount() const {
+    if (!analysis_ || analysis_->layerCount <= 0) return 0;
+    if (elements_.size() <= 1) return analysis_->layerCount;
+    if (!stackAnalysis_ || stackAnalysis_->commonLayerCount <= 0) return 0;
+    return std::max(analysis_->layerCount, stackAnalysis_->commonLayerCount);
 }
 
 void MaskSliceWindow::scheduleAnalysis() {
+    scheduleActiveAnalysis();
+    scheduleStackAnalysis();
+}
+
+void MaskSliceWindow::scheduleActiveAnalysis() {
     if (!source_ || !region_.isValid() || clearing_) return;
+    ++analysisRevision_;
     pendingAnalysis_ = true;
     analysis_.reset();
     layerList_->clear();
-    stackView_->clear();
     stackLayerLabel_->setText(QStringLiteral("当前层：--"));
-    stackSamplingLabel_->setText(QStringLiteral("三维预览：正在重新生成"));
     exportButton_->setEnabled(false);
     totalLabel_->setText(QStringLiteral("掩模总数：0"));
     if (tasks_->isBusy()) {
@@ -360,6 +496,20 @@ void MaskSliceWindow::scheduleAnalysis() {
         return;
     }
     analysisTimer_->start();
+}
+
+void MaskSliceWindow::scheduleStackAnalysis() {
+    if (!source_ || elements_.isEmpty() || clearing_) return;
+    ++stackRevision_;
+    pendingStackAnalysis_ = true;
+    stackAnalysis_.reset();
+    stackView_->clear();
+    stackSamplingLabel_->setText(QStringLiteral("三维预览：正在重新生成全部已选块…"));
+    if (stackTasks_->isBusy()) {
+        stackTasks_->cancel();
+        return;
+    }
+    stackTimer_->start();
 }
 
 void MaskSliceWindow::startAnalysis() {
@@ -380,24 +530,106 @@ void MaskSliceWindow::startAnalysis() {
     }
 }
 
+void MaskSliceWindow::startStackAnalysis() {
+    if (!pendingStackAnalysis_ || stackTasks_->isBusy() || !source_ ||
+        elements_.isEmpty()) return;
+    pendingStackAnalysis_ = false;
+    const MaskStackGroupRequest request = currentStackRequest();
+    if (!stackTasks_->start(QStringLiteral("生成多块三维预览"),
+        [request](const auto& token, const auto& progress, QString* error) {
+            return QVariant::fromValue(MaskSliceGenerator::analyzeStackGroup(
+                request, token, progress, error));
+        })) {
+        pendingStackAnalysis_ = true;
+    }
+}
+
+void MaskSliceWindow::populateElementList() {
+    const QSignalBlocker blocker(elementList_);
+    elementList_->clear();
+    for (int index = 0; index < elements_.size(); ++index) {
+        auto* item = new QListWidgetItem(
+            QString::number(elements_[index].traversalIndex + 1) + QStringLiteral(".bmp"),
+            elementList_);
+        item->setData(Qt::UserRole, index);
+        item->setToolTip(QStringLiteral("第 %1 行，第 %2 列")
+            .arg(elements_[index].row + 1).arg(elements_[index].column + 1));
+    }
+    elementListContainer_->setVisible(elements_.size() > 1);
+    if (activeElementIndex_ >= 0 && activeElementIndex_ < elementList_->count())
+        elementList_->setCurrentRow(activeElementIndex_);
+}
+
+void MaskSliceWindow::updateElementInformation() {
+    if (!region_.isValid()) {
+        elementLabel_->setText(QStringLiteral("未选择单元"));
+        return;
+    }
+    const QString selection = elements_.size() > 1
+        ? QStringLiteral("已选 %1 块 | ").arg(elements_.size()) : QString();
+    elementLabel_->setText(selection +
+        QStringLiteral("当前：第 %1 行，第 %2 列 | %3.bmp | %4 × %5 像素 | %6 × %7 μm")
+            .arg(row_ + 1).arg(column_ + 1).arg(traversalIndex_ + 1)
+            .arg(region_.width).arg(region_.height)
+            .arg(region_.width * mapping_.pixelScale, 0, 'f', 6)
+            .arg(region_.height * mapping_.pixelScale, 0, 'f', 6));
+    setWindowTitle(elements_.size() > 1
+        ? QStringLiteral("多块分层切片 - %1 个块 - 当前 %2.bmp")
+              .arg(elements_.size()).arg(traversalIndex_ + 1)
+        : QStringLiteral("单元分层切片 - %1.bmp").arg(traversalIndex_ + 1));
+}
+
+void MaskSliceWindow::activateElement(int index) {
+    if (index < 0 || index >= elements_.size() || index == activeElementIndex_) return;
+    const double scaleX = region_.isValid() ? double(outputWidth_->value()) / region_.width : 1.0;
+    const double scaleY = region_.isValid() ? double(outputHeight_->value()) / region_.height : 1.0;
+    activeElementIndex_ = index;
+    const MaskSliceElement& active = elements_[index];
+    region_ = active.region;
+    row_ = active.row;
+    column_ = active.column;
+    traversalIndex_ = active.traversalIndex;
+    {
+        const QSignalBlocker blockWidth(outputWidth_);
+        const QSignalBlocker blockHeight(outputHeight_);
+        outputWidth_->setValue(static_cast<int>(std::clamp<qint64>(
+            qRound64(region_.width * scaleX), 1, INT_MAX)));
+        outputHeight_->setValue(static_cast<int>(std::clamp<qint64>(
+            qRound64(region_.height * scaleY), 1, INT_MAX)));
+    }
+    elementList_->setCurrentRow(index);
+    updateElementInformation();
+    updateDimensionMapping();
+    stackView_->setActiveBlock(traversalIndex_);
+    scheduleActiveAnalysis();
+}
+
 void MaskSliceWindow::populateLayers(const MaskSliceAnalysis& analysis) {
     layerList_->clear();
-    for (int index = 0; index < analysis.thumbnails.size(); ++index) {
+    const int totalLayers = std::max(analysis.layerCount, unifiedLayerCount());
+    QImage blankThumbnail(analysis.previewSize, QImage::Format_Grayscale8);
+    blankThumbnail.fill(invertMask_->isChecked() ? 255 : 0);
+    for (int index = 0; index < totalLayers; ++index) {
+        const bool padded = index >= analysis.thumbnails.size();
         auto* item = new QListWidgetItem(
-            QIcon(QPixmap::fromImage(analysis.thumbnails[index])),
+            QIcon(QPixmap::fromImage(padded ? blankThumbnail : analysis.thumbnails[index])),
             QString::number(index + 1) + QStringLiteral(".bmp"), layerList_);
         item->setTextAlignment(Qt::AlignHCenter);
+        if (padded) item->setToolTip(QStringLiteral("补齐底色层"));
     }
-    totalLabel_->setText(QStringLiteral("掩模总数：%1").arg(analysis.layerCount));
-    stackView_->setColors(mapping_.startColor, mapping_.endColor);
-    stackView_->setPreview(analysis.stackPreview);
+    const int padding = std::max(0, totalLayers - analysis.layerCount);
+    totalLabel_->setText(elements_.size() > 1 && unifiedLayerCount() > 0
+        ? QStringLiteral("统一总层数：%1 | 本块计算：%2 | 补齐：%3")
+              .arg(totalLayers).arg(analysis.layerCount).arg(padding)
+        : QStringLiteral("掩模总数：%1").arg(totalLayers));
     if (layerList_->count() > 0) layerList_->setCurrentRow(0);
     updateStackZScale();
     updateStackInformation();
 }
 
 void MaskSliceWindow::updateStackLayerSelection(int row) {
-    if (!analysis_ || row < 0 || row >= analysis_->layerCount) {
+    const int totalLayers = unifiedLayerCount();
+    if (!analysis_ || row < 0 || row >= totalLayers) {
         stackLayerLabel_->setText(QStringLiteral("当前层：--"));
         return;
     }
@@ -411,8 +643,8 @@ void MaskSliceWindow::updateStackLayerSelection(int row) {
 
 void MaskSliceWindow::updateStackZScale() {
     double scale = stackZScale_->value();
-    if (automaticZScale_->isChecked() && analysis_ && analysis_->stackPreview) {
-        const auto& preview = *analysis_->stackPreview;
+    if (automaticZScale_->isChecked() && stackAnalysis_ && stackAnalysis_->preview) {
+        const auto& preview = *stackAnalysis_->preview;
         const double horizontal = std::max(preview.physicalSize.width(),
                                            preview.physicalSize.height());
         const double reconstruction = preview.layerCount * preview.layerHeight *
@@ -427,11 +659,11 @@ void MaskSliceWindow::updateStackZScale() {
 }
 
 void MaskSliceWindow::updateStackInformation() {
-    if (!analysis_ || !analysis_->stackPreview) {
+    if (!stackAnalysis_ || !stackAnalysis_->preview) {
         stackSamplingLabel_->setText(QStringLiteral("三维预览：--"));
         return;
     }
-    const auto& preview = *analysis_->stackPreview;
+    const auto& preview = *stackAnalysis_->preview;
     const QString sampling = preview.downsampled
         ? QStringLiteral("（由 %1 × %2 降采样）")
               .arg(preview.requestedOutputSize.width())
@@ -442,12 +674,13 @@ void MaskSliceWindow::updateStackInformation() {
     const QString layerSampling = stride > 1
         ? QStringLiteral("；爆炸视图每 %1 层显示一层").arg(stride) : QString();
     stackSamplingLabel_->setText(
-        QStringLiteral("三维预览 %1 × %2 %3 | X %4 μm，Y %5 μm | 重建高度 %6 μm，实际最高 %7 μm | Z %8×%9")
+        QStringLiteral("三维预览 %1 × %2 %3 | 已选 %4 块 | X %5 μm，Y %6 μm | 重建高度 %7 μm，实际最高 %8 μm | Z %9×%10")
             .arg(preview.gridSize.width()).arg(preview.gridSize.height()).arg(sampling)
+            .arg(preview.blocks.size())
             .arg(preview.physicalSize.width(),0,'f',6)
             .arg(preview.physicalSize.height(),0,'f',6)
             .arg(preview.layerCount*preview.layerHeight,0,'f',6)
-            .arg(analysis_->actualMaximumHeight,0,'f',6)
+            .arg(preview.actualMaximumHeight,0,'f',6)
             .arg(stackZScale_->value(),0,'f',2).arg(layerSampling));
 }
 
@@ -481,22 +714,25 @@ void MaskSliceWindow::setProgress(const TaskProgress& progress) {
 }
 
 void MaskSliceWindow::updateControls() {
-    const bool busy = tasks_->isBusy();
-    const bool exporting = busy && action_ == Action::Export;
+    const bool activeBusy = tasks_->isBusy();
+    const bool busy = activeBusy || stackTasks_->isBusy();
+    const bool exporting = activeBusy && action_ == Action::Export;
     layerHeight_->setEnabled(!exporting);
     outputWidth_->setEnabled(!exporting);
     outputHeight_->setEnabled(!exporting);
     lockAspect_->setEnabled(!exporting);
     invertMask_->setEnabled(!exporting);
     cancelButton_->setEnabled(busy);
-    exportButton_->setEnabled(!busy && analysis_ && analysis_->layerCount > 0 && !pendingAnalysis_);
+    exportButton_->setEnabled(!busy && unifiedLayerCount() > 0 &&
+                              !pendingAnalysis_ && !pendingStackAnalysis_);
 }
 
 int MaskSliceWindow::conflictCount(const QString& directory) const {
-    if (!analysis_) return 0;
+    const int layers = unifiedLayerCount();
+    if (layers <= 0) return 0;
     QDir output(directory);
     int count = 0;
-    for (int layer = 1; layer <= analysis_->layerCount; ++layer) {
+    for (int layer = 1; layer <= layers; ++layer) {
         const QFileInfo info(output.filePath(QString::number(layer) + QStringLiteral(".bmp")));
         if (info.exists() || info.isSymLink()) ++count;
     }
@@ -504,7 +740,8 @@ int MaskSliceWindow::conflictCount(const QString& directory) const {
 }
 
 void MaskSliceWindow::chooseExportDirectory() {
-    if (!analysis_ || analysis_->layerCount <= 0 || tasks_->isBusy()) return;
+    if (unifiedLayerCount() <= 0 || tasks_->isBusy() ||
+        stackTasks_->isBusy()) return;
     const QString directory = QFileDialog::getExistingDirectory(
         this, QStringLiteral("选择掩模输出目录"));
     if (directory.isEmpty()) return;
@@ -525,7 +762,8 @@ void MaskSliceWindow::chooseExportDirectory() {
 void MaskSliceWindow::startExport(const QString& directory, bool overwrite) {
     if (!analysis_ || tasks_->isBusy()) return;
     const MaskSliceRequest request = currentRequest();
-    const int layers = analysis_->layerCount;
+    const int layers = unifiedLayerCount();
+    if (layers <= 0) return;
     action_ = Action::Export;
     statusLabel_->setText(QStringLiteral("准备导出"));
     if (!tasks_->start(QStringLiteral("导出分层掩模"),
@@ -542,11 +780,19 @@ void MaskSliceWindow::startExport(const QString& directory, bool overwrite) {
 void MaskSliceWindow::cancelAndClear() {
     clearing_ = true;
     analysisTimer_->stop();
+    stackTimer_->stop();
     pendingAnalysis_ = false;
+    pendingStackAnalysis_ = false;
     tasks_->cancel();
+    stackTasks_->cancel();
     source_.reset();
     region_ = {};
     analysis_.reset();
+    stackAnalysis_.reset();
+    elements_.clear();
+    activeElementIndex_ = -1;
+    elementList_->clear();
+    elementListContainer_->hide();
     layerList_->clear();
     stackView_->clear();
     stackLayerLabel_->setText(QStringLiteral("当前层：--"));

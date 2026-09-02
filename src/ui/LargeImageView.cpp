@@ -5,6 +5,7 @@
 
 #include <QApplication>
 #include <QFutureWatcher>
+#include <QFocusEvent>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
@@ -65,6 +66,7 @@ void LargeImageView::setTraversalMode(TraversalMode mode) {
     if (traversalMode_ == mode) return;
     traversalMode_ = mode;
     if (showTraversalPath_) update();
+    if (!selectedCells_.isEmpty()) Q_EMIT segmentationCellsSelected(selectedCells(), selectedCell_);
 }
 
 void LargeImageView::setTraversalPathVisible(bool visible) {
@@ -79,9 +81,23 @@ void LargeImageView::setSelectedCell(int row, int column, bool centerOnSelection
     const ImageRegion region = segmentationCellRegion(
         segmentation_, document_->metadata.width, document_->metadata.height, row, column);
     if (!region.isValid()) { clearSelectedCell(); update(); return; }
-    selectedCell_ = {column, row};
+    setSingleSelectedCell({column, row}, false);
     if (centerOnSelection) centerOnCell(row, column);
     update();
+}
+
+QVector<QPoint> LargeImageView::selectedCells() const {
+    QVector<QPoint> result;
+    result.reserve(selectedCells_.size());
+    for (const QPoint& cell : selectedCells_) result.push_back(cell);
+    std::sort(result.begin(), result.end(), [this](const QPoint& left, const QPoint& right) {
+        const qint64 leftIndex = SplitExporter::traversalIndex(
+            segmentation_.rows, segmentation_.columns, traversalMode_, left.y(), left.x());
+        const qint64 rightIndex = SplitExporter::traversalIndex(
+            segmentation_.rows, segmentation_.columns, traversalMode_, right.y(), right.x());
+        return leftIndex < rightIndex;
+    });
+    return result;
 }
 
 void LargeImageView::centerOnCell(int row, int column) {
@@ -236,21 +252,31 @@ void LargeImageView::paintEvent(QPaintEvent*) {
             }
         }
 
-        if(selectedCell_.x()>=0&&selectedCell_.y()>=0) {
+        for (const QPoint& selected : selectedCells_) {
             const ImageRegion selectedRegion=segmentationCellRegion(
                 segmentation_,document_->metadata.width,document_->metadata.height,
-                selectedCell_.y(),selectedCell_.x());
+                selected.y(),selected.x());
             if(selectedRegion.isValid()) {
                 const QRectF selectedRect(baseX+selectedRegion.x*zoom_,baseY+selectedRegion.y*zoom_,
                                           selectedRegion.width*zoom_,selectedRegion.height*zoom_);
                 p.fillRect(selectedRect,QColor(255,200,0,80));
-                p.setPen(QPen(QColor(255,215,0,240),2));
+                const bool active = selected == selectedCell_;
+                p.setPen(QPen(active ? QColor(255,235,40,255) : QColor(255,190,0,210),
+                              active ? 3.0 : 1.5));
                 p.drawRect(selectedRect);
             }
         }
         p.restore();
     }
     drawFixedGrayPoints(p);
+    if (boxSelecting_) {
+        p.save();
+        p.setRenderHint(QPainter::Antialiasing, false);
+        p.fillRect(boxSelectionRect_, QColor(40, 150, 255, 55));
+        p.setPen(QPen(QColor(70, 175, 255, 245), 1.5, Qt::DashLine));
+        p.drawRect(boxSelectionRect_);
+        p.restore();
+    }
 }
 
 void LargeImageView::emitTileProgress() {
@@ -268,11 +294,26 @@ void LargeImageView::resizeEvent(QResizeEvent*) { update(); }
 void LargeImageView::mousePressEvent(QMouseEvent* e) {
     if(e->button()!=Qt::LeftButton)return;
     setFocus(Qt::MouseFocusReason);
-    leftPressed_=true;dragging_=false;pressModifiers_=e->modifiers();pressPosition_=lastMouse_=e->pos();e->accept();
+    leftPressed_=true;dragging_=false;pressModifiers_=e->modifiers();
+    pressMultiSelect_=multiSelectHeld_;
+    pressBoxSelect_=boxSelectHeld_;
+    if (pressBoxSelect_) {
+        boxSelecting_ = true;
+        boxSelectionStart_ = e->pos();
+        boxSelectionRect_ = QRect(boxSelectionStart_, boxSelectionStart_);
+        setCursor(Qt::CrossCursor);
+    }
+    pressPosition_=lastMouse_=e->pos();e->accept();
 }
 void LargeImageView::mouseMoveEvent(QMouseEvent* e) {
     updatePixelProbe(e->pos());
     if(!leftPressed_)return;
+    if (pressBoxSelect_) {
+        boxSelectionRect_ = QRect(boxSelectionStart_, e->pos()).normalized();
+        update();
+        e->accept();
+        return;
+    }
     if(!dragging_&&(e->pos()-pressPosition_).manhattanLength()<QApplication::startDragDistance())return;
     if(!dragging_){dragging_=true;setCursor(Qt::ClosedHandCursor);}
     offset_+=e->pos()-lastMouse_;lastMouse_=e->pos();update();e->accept();
@@ -513,7 +554,24 @@ void LargeImageView::clearFixedGrayPoints() {
 void LargeImageView::mouseReleaseEvent(QMouseEvent* e) {
     if(e->button()!=Qt::LeftButton||!leftPressed_)return;
     leftPressed_=false;
-    if(dragging_){dragging_=false;unsetCursor();}
+    if (pressBoxSelect_) {
+        boxSelectionRect_ = QRect(boxSelectionStart_, e->pos()).normalized();
+        selectCellsInRect(boxSelectionRect_, e->pos());
+        pressBoxSelect_ = false;
+        boxSelecting_ = false;
+        if (boxSelectHeld_) setCursor(Qt::CrossCursor); else unsetCursor();
+        update();
+    }
+    else if(dragging_){dragging_=false;unsetCursor();}
+    else if (pressMultiSelect_) toggleCellAt(e->pos());
+    else if (pressModifiers_ == Qt::ShiftModifier) {
+        const QPoint cell = cellAt(e->pos());
+        if (cell.x() >= 0 && cell.y() >= 0) {
+            if (selectedCells_.contains(cell)) setActiveCell(cell);
+            else setSingleSelectedCell(cell);
+            update();
+        }
+    }
     else if (pressModifiers_.testFlag(Qt::ControlModifier)) addFixedGrayPointAt(e->pos());
     else {
         const quint64 fixedPointId = fixedGrayPointAt(e->pos());
@@ -530,6 +588,10 @@ void LargeImageView::mouseReleaseEvent(QMouseEvent* e) {
 
 void LargeImageView::mouseDoubleClickEvent(QMouseEvent* event) {
     const Qt::KeyboardModifiers modifiers = event->modifiers();
+    if (multiSelectHeld_ || boxSelectHeld_) {
+        event->accept();
+        return;
+    }
     if (event->button() != Qt::LeftButton ||
         (modifiers != Qt::NoModifier && modifiers != Qt::ShiftModifier)) {
         QWidget::mouseDoubleClickEvent(event);
@@ -540,17 +602,39 @@ void LargeImageView::mouseDoubleClickEvent(QMouseEvent* event) {
         event->ignore();
         return;
     }
-    selectedCell_ = cell;
-    Q_EMIT segmentationCellSelected(cell.y(), cell.x());
-    if (modifiers == Qt::ShiftModifier)
-        Q_EMIT segmentationCellSliceActivated(cell.y(), cell.x());
-    else
+    if (modifiers == Qt::ShiftModifier) {
+        if (selectedCells_.contains(cell)) setActiveCell(cell);
+        else setSingleSelectedCell(cell);
+        if (selectedCells_.size() == 1)
+            Q_EMIT segmentationCellSliceActivated(cell.y(), cell.x());
+        else
+            Q_EMIT segmentationCellsSliceActivated(selectedCells(), selectedCell_);
+    } else {
+        setSingleSelectedCell(cell);
         Q_EMIT segmentationCellActivated(cell.y(), cell.x());
+    }
     update();
     event->accept();
 }
 
 void LargeImageView::keyPressEvent(QKeyEvent* event) {
+    if (event->key() == Qt::Key_Q) {
+        multiSelectHeld_ = true;
+        event->accept();
+        return;
+    }
+    if (event->key() == Qt::Key_F && !event->isAutoRepeat()) {
+        if (!selectedCells_.isEmpty())
+            Q_EMIT segmentationCellsSliceActivated(selectedCells(), selectedCell_);
+        event->accept();
+        return;
+    }
+    if (event->key() == Qt::Key_W) {
+        boxSelectHeld_ = true;
+        if (!leftPressed_) setCursor(Qt::CrossCursor);
+        event->accept();
+        return;
+    }
     if ((event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) &&
         selectedFixedGrayPointId_ != 0) {
         removeSelectedFixedGrayPoint();
@@ -558,6 +642,47 @@ void LargeImageView::keyPressEvent(QKeyEvent* event) {
         return;
     }
     QWidget::keyPressEvent(event);
+}
+
+void LargeImageView::keyReleaseEvent(QKeyEvent* event) {
+    if (event->key() == Qt::Key_Q) {
+        if (!event->isAutoRepeat()) multiSelectHeld_ = false;
+        event->accept();
+        return;
+    }
+    if (event->key() == Qt::Key_W) {
+        if (!event->isAutoRepeat()) boxSelectHeld_ = false;
+        if (!leftPressed_) unsetCursor();
+        event->accept();
+        return;
+    }
+    QWidget::keyReleaseEvent(event);
+}
+
+void LargeImageView::focusOutEvent(QFocusEvent* event) {
+    leftPressed_ = false;
+    dragging_ = false;
+    multiSelectHeld_ = false;
+    pressMultiSelect_ = false;
+    boxSelectHeld_ = false;
+    pressBoxSelect_ = false;
+    boxSelecting_ = false;
+    unsetCursor();
+    QWidget::focusOutEvent(event);
+}
+
+bool LargeImageView::event(QEvent* event) {
+    if (event->type() == QEvent::WindowDeactivate || event->type() == QEvent::Hide) {
+        leftPressed_ = false;
+        dragging_ = false;
+        multiSelectHeld_ = false;
+        pressMultiSelect_ = false;
+        boxSelectHeld_ = false;
+        pressBoxSelect_ = false;
+        boxSelecting_ = false;
+        unsetCursor();
+    }
+    return QWidget::event(event);
 }
 
 QPoint LargeImageView::cellAt(const QPoint& viewportPosition) const {
@@ -577,12 +702,102 @@ QPoint LargeImageView::cellAt(const QPoint& viewportPosition) const {
 void LargeImageView::selectCellAt(const QPoint& viewportPosition) {
     const QPoint cell=cellAt(viewportPosition);
     if(cell.x()<0||cell.y()<0){clearSelectedCell();update();return;}
-    selectedCell_=cell;Q_EMIT segmentationCellSelected(cell.y(),cell.x());update();
+    setSingleSelectedCell(cell);
+    update();
+}
+
+void LargeImageView::toggleCellAt(const QPoint& viewportPosition) {
+    const QPoint cell = cellAt(viewportPosition);
+    if (cell.x() < 0 || cell.y() < 0) return;
+    if (selectedCells_.contains(cell)) {
+        selectedCells_.remove(cell);
+        if (selectedCell_ == cell) {
+            const QVector<QPoint> remaining = selectedCells();
+            selectedCell_ = remaining.isEmpty() ? QPoint(-1, -1) : remaining.front();
+        }
+    } else {
+        selectedCells_.insert(cell);
+        selectedCell_ = cell;
+    }
+    emitSelectionChanged();
+    update();
+}
+
+void LargeImageView::selectCellsInRect(const QRect& viewportRect,
+                                       const QPoint& releasePosition) {
+    if (!document_ || !showGrid_) return;
+    QRect selection = viewportRect.normalized();
+    if (selection.width() < 2 && selection.height() < 2) {
+        const QPoint cell = cellAt(releasePosition);
+        setSingleSelectedCell(cell);
+        return;
+    }
+    QSet<QPoint> nextSelection;
+    const QRectF selectionRect(selection);
+    const QRectF imageRect(offset_.x(), offset_.y(),
+                           document_->metadata.width * zoom_,
+                           document_->metadata.height * zoom_);
+    if (!selectionRect.intersects(imageRect)) {
+        selectedCells_.clear();
+        selectedCell_ = {-1, -1};
+        emitSelectionChanged();
+        return;
+    }
+    const double imageLeft = (selectionRect.left() - offset_.x()) / zoom_;
+    const double imageRight = (selectionRect.right() - offset_.x()) / zoom_;
+    const double imageTop = (selectionRect.top() - offset_.y()) / zoom_;
+    const double imageBottom = (selectionRect.bottom() - offset_.y()) / zoom_;
+    const int firstColumn = std::clamp(static_cast<int>(std::floor(
+        imageLeft / segmentation_.settings.cellWidth)), 0, segmentation_.columns - 1);
+    const int lastColumn = std::clamp(static_cast<int>(std::floor(
+        imageRight / segmentation_.settings.cellWidth)), 0, segmentation_.columns - 1);
+    const int firstRow = std::clamp(static_cast<int>(std::floor(
+        imageTop / segmentation_.settings.cellHeight)), 0, segmentation_.rows - 1);
+    const int lastRow = std::clamp(static_cast<int>(std::floor(
+        imageBottom / segmentation_.settings.cellHeight)), 0, segmentation_.rows - 1);
+    for (int row = firstRow; row <= lastRow; ++row) {
+        for (int column = firstColumn; column <= lastColumn; ++column) {
+            const ImageRegion region = segmentationCellRegion(
+                segmentation_, document_->metadata.width, document_->metadata.height,
+                row, column);
+            if (!region.isValid()) continue;
+            const QRectF cellRect(offset_.x() + region.x * zoom_,
+                                  offset_.y() + region.y * zoom_,
+                                  region.width * zoom_, region.height * zoom_);
+            if (selectionRect.intersects(cellRect)) nextSelection.insert({column, row});
+        }
+    }
+    selectedCells_ = std::move(nextSelection);
+    const QPoint releasedCell = cellAt(releasePosition);
+    if (selectedCells_.contains(releasedCell)) selectedCell_ = releasedCell;
+    else {
+        const QVector<QPoint> ordered = selectedCells();
+        selectedCell_ = ordered.isEmpty() ? QPoint(-1, -1) : ordered.front();
+    }
+    emitSelectionChanged();
+}
+
+void LargeImageView::setSingleSelectedCell(const QPoint& cell, bool notify) {
+    selectedCells_.clear();
+    if (cell.x() >= 0 && cell.y() >= 0) selectedCells_.insert(cell);
+    selectedCell_ = selectedCells_.isEmpty() ? QPoint(-1, -1) : cell;
+    if (notify) emitSelectionChanged();
+}
+
+void LargeImageView::setActiveCell(const QPoint& cell, bool notify) {
+    if (!selectedCells_.contains(cell)) return;
+    selectedCell_ = cell;
+    if (notify) emitSelectionChanged();
+}
+
+void LargeImageView::emitSelectionChanged() {
+    Q_EMIT segmentationCellSelected(selectedCell_.y(), selectedCell_.x());
+    Q_EMIT segmentationCellsSelected(selectedCells(), selectedCell_);
 }
 
 void LargeImageView::clearSelectedCell() {
-    if(selectedCell_.x()<0&&selectedCell_.y()<0)return;
-    selectedCell_={-1,-1};Q_EMIT segmentationCellSelected(-1,-1);
+    if(selectedCell_.x()<0&&selectedCell_.y()<0&&selectedCells_.isEmpty())return;
+    selectedCells_.clear();selectedCell_={-1,-1};emitSelectionChanged();
 }
 void LargeImageView::wheelEvent(QWheelEvent* e) {
     if(!document_)return; const QPointF pos=e->position(); const QPointF imagePos=(pos-offset_)/zoom_;

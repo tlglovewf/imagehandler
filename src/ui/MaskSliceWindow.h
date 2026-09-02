@@ -26,10 +26,19 @@ public:
     void showElement(const ImageDocumentPtr& source, const ImageRegion& region,
                      int row, int column, qint64 traversalIndex,
                      const PointCloudSettings& mapping);
+    void showElements(const ImageDocumentPtr& source,
+                      const QVector<MaskSliceElement>& elements,
+                      const QPoint& activeCell, const PointCloudSettings& mapping);
+    void setElements(const ImageDocumentPtr& source,
+                     const QVector<MaskSliceElement>& elements,
+                     const QPoint& activeCell, const PointCloudSettings& mapping);
     void setPointCloudSettings(const PointCloudSettings& mapping);
     void cancelAndClear();
     [[nodiscard]] const std::optional<MaskSliceAnalysis>& analysis() const noexcept {
         return analysis_;
+    }
+    [[nodiscard]] const std::optional<MaskStackGroupAnalysis>& stackAnalysis() const noexcept {
+        return stackAnalysis_;
     }
 
 protected:
@@ -39,7 +48,10 @@ private:
     enum class Action { None, Analyze, Export };
 
     void scheduleAnalysis();
+    void scheduleActiveAnalysis();
+    void scheduleStackAnalysis();
     void startAnalysis();
+    void startStackAnalysis();
     void chooseExportDirectory();
     void startExport(const QString& directory, bool overwrite);
     void updateDimensionMapping();
@@ -48,17 +60,26 @@ private:
     void updateStackLayerSelection(int row);
     void updateStackZScale();
     void updateStackInformation();
+    void updateElementInformation();
+    void populateElementList();
+    void activateElement(int index);
     void setProgress(const TaskProgress& progress);
     [[nodiscard]] MaskSliceRequest currentRequest() const;
+    [[nodiscard]] MaskStackGroupRequest currentStackRequest() const;
+    [[nodiscard]] int unifiedLayerCount() const;
     [[nodiscard]] int conflictCount(const QString& directory) const;
 
     TaskManager* tasks_ = nullptr;
+    TaskManager* stackTasks_ = nullptr;
     QTimer* analysisTimer_ = nullptr;
+    QTimer* stackTimer_ = nullptr;
     QLabel* elementLabel_ = nullptr;
     QLabel* mappingLabel_ = nullptr;
     QLabel* totalLabel_ = nullptr;
     QLabel* statusLabel_ = nullptr;
     QLabel* percentLabel_ = nullptr;
+    QWidget* elementListContainer_ = nullptr;
+    QListWidget* elementList_ = nullptr;
     QDoubleSpinBox* layerHeight_ = nullptr;
     QSpinBox* outputWidth_ = nullptr;
     QSpinBox* outputHeight_ = nullptr;
@@ -78,11 +99,17 @@ private:
     ImageRegion region_;
     PointCloudSettings mapping_;
     std::optional<MaskSliceAnalysis> analysis_;
+    std::optional<MaskStackGroupAnalysis> stackAnalysis_;
+    QVector<MaskSliceElement> elements_;
+    int activeElementIndex_ = -1;
     int row_ = -1;
     int column_ = -1;
     qint64 traversalIndex_ = -1;
     Action action_ = Action::None;
     bool pendingAnalysis_ = false;
+    bool pendingStackAnalysis_ = false;
     bool updatingDimensions_ = false;
     bool clearing_ = false;
+    quint64 analysisRevision_ = 0;
+    quint64 stackRevision_ = 0;
 };

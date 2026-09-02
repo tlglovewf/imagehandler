@@ -3,6 +3,7 @@
 #include "ui/LargeImageView.h"
 
 #include <QTemporaryDir>
+#include <QFocusEvent>
 #include <QMouseEvent>
 #include <QtTest>
 #include <cmath>
@@ -15,6 +16,8 @@ private Q_SLOTS:
     void edgeTileAndGridClipping();
     void failedTileIsNotRetriedContinuously();
     void cellSelectionAndTraversalPath();
+    void cellMultiSelectionAndSliceShortcut();
+    void cellBoxSelectionWithW();
     void gray16PixelProbePreservesRawValue();
     void fixedGrayPointsPreserveRawValuesAndCanBeDeleted();
 };
@@ -147,6 +150,76 @@ void TestLargeImageView::cellSelectionAndTraversalPath() {
     QTest::mouseDClick(&view, Qt::LeftButton, Qt::ControlModifier, view.rect().center());
     QCOMPARE(activations.count(), 1);
     QCOMPARE(sliceActivations.count(), 1);
+}
+
+void TestLargeImageView::cellMultiSelectionAndSliceShortcut() {
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QImage source(200,200,QImage::Format_Grayscale8);source.fill(180);
+    const QString path=directory.filePath("multi-selection.bmp");QVERIFY(source.save(path,"BMP"));
+    QString error;const auto document=ImageLoader::load(path,110,&error);QVERIFY2(document,qPrintable(error));
+    LargeImageView view;view.resize(220,220);view.show();view.setDocument(document);
+    SegmentationResult grid;grid.settings={100,100,128,ForegroundPolarity::Dark};
+    grid.rows=2;grid.columns=2;view.setSegmentation(grid);view.setTraversalMode(TraversalMode::SnakeZ);
+    QSignalSpy groupSelections(&view,&LargeImageView::segmentationCellsSelected);
+    QSignalSpy groupActivations(&view,&LargeImageView::segmentationCellsSliceActivated);
+
+    QTest::mouseClick(&view,Qt::LeftButton,Qt::NoModifier,QPoint(60,60));
+    QTest::keyPress(&view,Qt::Key_Q);
+    QTest::mouseClick(&view,Qt::LeftButton,Qt::NoModifier,QPoint(160,60));
+    QTest::mouseClick(&view,Qt::LeftButton,Qt::NoModifier,QPoint(60,160));
+    QTest::keyRelease(&view,Qt::Key_Q);
+    QCOMPARE(view.selectedCells(),QVector<QPoint>({QPoint(0,0),QPoint(1,0),QPoint(0,1)}));
+    QCOMPARE(view.selectedCell(),QPoint(0,1));
+    QVERIFY(groupSelections.count()>=3);
+
+    QTest::keyClick(&view,Qt::Key_F);
+    QCOMPARE(groupActivations.count(),1);
+    QCOMPARE(groupActivations.at(0).at(0).value<QVector<QPoint>>(),view.selectedCells());
+    QCOMPARE(groupActivations.at(0).at(1).toPoint(),QPoint(0,1));
+
+    QTest::keyPress(&view,Qt::Key_Q);
+    QTest::mouseClick(&view,Qt::LeftButton,Qt::NoModifier,QPoint(60,160));
+    QTest::keyRelease(&view,Qt::Key_Q);
+    QCOMPARE(view.selectedCells(),QVector<QPoint>({QPoint(0,0),QPoint(1,0)}));
+    QCOMPARE(view.selectedCell(),QPoint(0,0));
+
+    QTest::mouseDClick(&view,Qt::LeftButton,Qt::ShiftModifier,QPoint(160,60));
+    QCOMPARE(view.selectedCells(),QVector<QPoint>({QPoint(0,0),QPoint(1,0)}));
+    QCOMPARE(view.selectedCell(),QPoint(1,0));
+    QCOMPARE(groupActivations.count(),2);
+
+    QTest::keyPress(&view,Qt::Key_Q);
+    QFocusEvent focusOut(QEvent::FocusOut,Qt::OtherFocusReason);
+    QApplication::sendEvent(&view,&focusOut);
+    view.setFocus();QCoreApplication::processEvents();
+    QTest::mouseClick(&view,Qt::LeftButton,Qt::NoModifier,QPoint(160,160));
+    QCOMPARE(view.selectedCells(),QVector<QPoint>({QPoint(1,1)}));
+}
+
+void TestLargeImageView::cellBoxSelectionWithW() {
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QImage source(200,200,QImage::Format_Grayscale8);source.fill(200);
+    const QString path=directory.filePath("box-selection.bmp");QVERIFY(source.save(path,"BMP"));
+    QString error;const auto document=ImageLoader::load(path,115,&error);QVERIFY2(document,qPrintable(error));
+    LargeImageView view;view.resize(220,220);view.show();view.setDocument(document);
+    SegmentationResult grid;grid.settings={100,100,128,ForegroundPolarity::Dark};
+    grid.rows=2;grid.columns=2;view.setSegmentation(grid);view.setTraversalMode(TraversalMode::SnakeZ);
+    QSignalSpy groupActivations(&view,&LargeImageView::segmentationCellsSliceActivated);
+
+    QTest::keyPress(&view,Qt::Key_W);
+    QTest::mousePress(&view,Qt::LeftButton,Qt::NoModifier,QPoint(20,20));
+    QTest::mouseMove(&view,QPoint(200,100));
+    QTest::mouseRelease(&view,Qt::LeftButton,Qt::NoModifier,QPoint(200,100));
+    QTest::keyRelease(&view,Qt::Key_W);
+    QCOMPARE(view.selectedCells(),QVector<QPoint>({QPoint(0,0),QPoint(1,0)}));
+    QCOMPARE(view.selectedCell(),QPoint(1,0));
+    QTest::keyClick(&view,Qt::Key_F);QCOMPARE(groupActivations.count(),1);
+
+    QTest::keyPress(&view,Qt::Key_W);
+    QTest::mousePress(&view,Qt::LeftButton,Qt::NoModifier,QPoint(60,60));
+    QTest::mouseRelease(&view,Qt::LeftButton,Qt::NoModifier,QPoint(60,60));
+    QTest::keyRelease(&view,Qt::Key_W);
+    QCOMPARE(view.selectedCells(),QVector<QPoint>({QPoint(0,0)}));
 }
 
 void TestLargeImageView::gray16PixelProbePreservesRawValue() {

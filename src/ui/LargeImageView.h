@@ -10,6 +10,7 @@
 
 class QKeyEvent;
 class QPainter;
+class QFocusEvent;
 
 enum class FixedGrayPointState { Loading, Ready, Failed };
 
@@ -33,6 +34,7 @@ public:
     void setSelectedCell(int row, int column, bool centerOnSelection = false);
     void centerOnCell(int row, int column);
     [[nodiscard]] QPoint selectedCell() const { return selectedCell_; }
+    [[nodiscard]] QVector<QPoint> selectedCells() const;
     [[nodiscard]] const QVector<FixedGrayPoint>& fixedGrayPoints() const noexcept {
         return fixedGrayPoints_;
     }
@@ -48,8 +50,11 @@ Q_SIGNALS:
     void tileProgress(quint64 generation, qint64 completed, qint64 failed, qint64 total);
     void tileError(const QString& error);
     void segmentationCellSelected(int row, int column);
+    void segmentationCellsSelected(const QVector<QPoint>& cells, const QPoint& activeCell);
     void segmentationCellActivated(int row, int column);
     void segmentationCellSliceActivated(int row, int column);
+    void segmentationCellsSliceActivated(const QVector<QPoint>& cells,
+                                         const QPoint& activeCell);
     void pixelValueChanged(qint64 x, qint64 y, quint32 value, bool valid);
     void fixedGrayPointCountChanged(int count);
     void fixedGrayPointError(const QString& error);
@@ -62,6 +67,9 @@ protected:
     void mouseReleaseEvent(QMouseEvent*) override;
     void mouseDoubleClickEvent(QMouseEvent*) override;
     void keyPressEvent(QKeyEvent*) override;
+    void keyReleaseEvent(QKeyEvent*) override;
+    void focusOutEvent(QFocusEvent*) override;
+    bool event(QEvent*) override;
     void leaveEvent(QEvent*) override;
     void wheelEvent(QWheelEvent*) override;
 
@@ -71,6 +79,11 @@ private:
     void emitTileProgress();
     [[nodiscard]] QPoint cellAt(const QPoint& viewportPosition) const;
     void selectCellAt(const QPoint& viewportPosition);
+    void toggleCellAt(const QPoint& viewportPosition);
+    void selectCellsInRect(const QRect& viewportRect, const QPoint& releasePosition);
+    void setSingleSelectedCell(const QPoint& cell, bool notify = true);
+    void setActiveCell(const QPoint& cell, bool notify = true);
+    void emitSelectionChanged();
     void updatePixelProbe(const QPoint& viewportPosition);
     void requestProbeBlock(qint64 x, qint64 y);
     void emitCachedProbe();
@@ -91,6 +104,7 @@ private:
     bool showTraversalPath_ = false;
     TraversalMode traversalMode_ = TraversalMode::SnakeZ;
     QPoint selectedCell_{-1, -1};
+    QSet<QPoint> selectedCells_;
     double zoom_ = 1.0;
     QPointF offset_;
     QPoint pressPosition_;
@@ -98,6 +112,13 @@ private:
     bool leftPressed_ = false;
     bool dragging_ = false;
     Qt::KeyboardModifiers pressModifiers_;
+    bool multiSelectHeld_ = false;
+    bool pressMultiSelect_ = false;
+    bool boxSelectHeld_ = false;
+    bool pressBoxSelect_ = false;
+    bool boxSelecting_ = false;
+    QPoint boxSelectionStart_;
+    QRect boxSelectionRect_;
     QCache<QString, QImage> cache_{256 * 1024};
     QSet<QString> pending_;
     QHash<QString, QString> failedTiles_;

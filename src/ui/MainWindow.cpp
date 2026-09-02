@@ -184,8 +184,16 @@ void MainWindow::connectUi() {
     connect(pathButton_,&QPushButton::toggled,view_,&LargeImageView::setTraversalPathVisible);
     connect(traversal_,qOverload<int>(&QComboBox::currentIndexChanged),this,[this]{view_->setTraversalMode(selectedTraversalMode());updateSelectedCellLabel();scheduleJobPreview(false);});
     connect(view_,&LargeImageView::segmentationCellSelected,this,[this](int row,int column){selectedRow_=row;selectedColumn_=column;updateSelectedCellLabel();selectJobFromImage(row,column);});
+    connect(view_,&LargeImageView::segmentationCellsSelected,this,
+            [this](const QVector<QPoint>& cells,const QPoint& activeCell){
+        if(maskSliceWindow_&&maskSliceWindow_->isVisible())
+            syncMaskSliceSelection(cells,activeCell);
+    });
     connect(view_,&LargeImageView::segmentationCellActivated,this,&MainWindow::showElementPointCloud);
-    connect(view_,&LargeImageView::segmentationCellSliceActivated,this,&MainWindow::showMaskSlices);
+    connect(view_,&LargeImageView::segmentationCellSliceActivated,this,
+            qOverload<int,int>(&MainWindow::showMaskSlices));
+    connect(view_,&LargeImageView::segmentationCellsSliceActivated,this,
+            qOverload<const QVector<QPoint>&,const QPoint&>(&MainWindow::showMaskSlices));
     connect(jobView_,&JobPreviewWidget::placeSelected,this,&MainWindow::selectImageFromJob);
     connect(previewTabs_,&QTabBar::currentChanged,this,&MainWindow::showPreviewTab);
     connect(previewLayoutMode_,qOverload<int>(&QComboBox::currentIndexChanged),this,&MainWindow::setPreviewLayoutMode);
@@ -672,7 +680,54 @@ void MainWindow::generatePointCloud(){if(tasks_->isBusy()||!document_)return;if(
 
 void MainWindow::showElementPointCloud(int row, int column){if(!document_||segmentation_.rows<=0||segmentation_.columns<=0)return;const ImageRegion region=segmentationCellRegion(segmentation_,document_->metadata.width,document_->metadata.height,row,column);if(!region.isValid())return;if(!ImageLoader::isProcessable(document_->metadata)){statusBar()->showMessage(QStringLiteral("单要素 PointCloud 仅支持二值、8-bit 和 16-bit 灰度图。"),6000);return;}if(!elementCloudWindow_)elementCloudWindow_=new ElementPointCloudWindow(this);if(!elementCloudWindow_->isVulkanAvailable()){elementCloudWindow_->showElement(document_,region,row,column,SplitExporter::traversalIndex(segmentation_.rows,segmentation_.columns,selectedTraversalMode(),row,column),{},generation_++);statusBar()->showMessage(QStringLiteral("当前环境没有可用的 Vulkan PointCloud 渲染器。"),6000);return;}const PointCloudSettings settings{cloudPixelScale_->value(),cloudMaximumHeight_->value(),cloudInvertHeight_->isChecked(),cloudStartColor_,cloudEndColor_};const qint64 index=SplitExporter::traversalIndex(segmentation_.rows,segmentation_.columns,selectedTraversalMode(),row,column);elementCloudWindow_->showElement(document_,region,row,column,index,settings,generation_++);}
 
-void MainWindow::showMaskSlices(int row,int column){if(!document_||segmentation_.rows<=0||segmentation_.columns<=0)return;const ImageRegion region=segmentationCellRegion(segmentation_,document_->metadata.width,document_->metadata.height,row,column);if(!region.isValid())return;if(!ImageLoader::isProcessable(document_->metadata)){statusBar()->showMessage(QStringLiteral("单元分层切片仅支持二值、8-bit 和 16-bit 灰度图。"),6000);return;}if(!maskSliceWindow_)maskSliceWindow_=new MaskSliceWindow(this);const PointCloudSettings mapping{cloudPixelScale_->value(),cloudMaximumHeight_->value(),cloudInvertHeight_->isChecked(),cloudStartColor_,cloudEndColor_};const qint64 index=SplitExporter::traversalIndex(segmentation_.rows,segmentation_.columns,selectedTraversalMode(),row,column);maskSliceWindow_->showElement(document_,region,row,column,index,mapping);}
+void MainWindow::showMaskSlices(int row,int column){
+    showMaskSlices({QPoint(column,row)},QPoint(column,row));
+}
+
+QVector<MaskSliceElement> MainWindow::maskSliceElements(const QVector<QPoint>& cells) const {
+    QVector<MaskSliceElement> result;
+    if(!document_||segmentation_.rows<=0||segmentation_.columns<=0)return result;
+    result.reserve(cells.size());
+    for(const QPoint& cell:cells){
+        const ImageRegion region=segmentationCellRegion(segmentation_,document_->metadata.width,
+            document_->metadata.height,cell.y(),cell.x());
+        if(!region.isValid())continue;
+        const qint64 index=SplitExporter::traversalIndex(segmentation_.rows,
+            segmentation_.columns,selectedTraversalMode(),cell.y(),cell.x());
+        if(index>=0)result.push_back({region,cell.y(),cell.x(),index});
+    }
+    std::sort(result.begin(),result.end(),[](const auto& left,const auto& right){
+        return left.traversalIndex<right.traversalIndex;
+    });
+    return result;
+}
+
+void MainWindow::showMaskSlices(const QVector<QPoint>& cells,const QPoint& activeCell){
+    if(!document_||segmentation_.rows<=0||segmentation_.columns<=0||cells.isEmpty())return;
+    if(!ImageLoader::isProcessable(document_->metadata)){
+        statusBar()->showMessage(QStringLiteral("单元分层切片仅支持二值、8-bit 和 16-bit 灰度图。"),6000);
+        return;
+    }
+    const QVector<MaskSliceElement> elements=maskSliceElements(cells);
+    if(elements.isEmpty())return;
+    if(!maskSliceWindow_)maskSliceWindow_=new MaskSliceWindow(this);
+    const PointCloudSettings mapping{cloudPixelScale_->value(),cloudMaximumHeight_->value(),
+        cloudInvertHeight_->isChecked(),cloudStartColor_,cloudEndColor_};
+    maskSliceWindow_->showElements(document_,elements,activeCell,mapping);
+}
+
+void MainWindow::syncMaskSliceSelection(const QVector<QPoint>& cells,const QPoint& activeCell){
+    if(!maskSliceWindow_||!maskSliceWindow_->isVisible())return;
+    if(cells.isEmpty()){
+        maskSliceWindow_->cancelAndClear();
+        return;
+    }
+    const QVector<MaskSliceElement> elements=maskSliceElements(cells);
+    if(elements.isEmpty())return;
+    const PointCloudSettings mapping{cloudPixelScale_->value(),cloudMaximumHeight_->value(),
+        cloudInvertHeight_->isChecked(),cloudStartColor_,cloudEndColor_};
+    maskSliceWindow_->setElements(document_,elements,activeCell,mapping);
+}
 
 void MainWindow::syncMaskSliceMapping(){if(!maskSliceWindow_)return;maskSliceWindow_->setPointCloudSettings({cloudPixelScale_->value(),cloudMaximumHeight_->value(),cloudInvertHeight_->isChecked(),cloudStartColor_,cloudEndColor_});}
 
@@ -697,5 +752,5 @@ void MainWindow::selectJobFromImage(int row,int column){if(!jobDocument_||!jobDo
 void MainWindow::selectImageFromJob(qint64 placeId){jobView_->setSelectedPlaceId(placeId,false);if(!jobDocument_||!jobDocument_->isLinked()||placeId<0||placeId>=static_cast<qint64>(jobDocument_->linkedCells.size()))return;const QPoint cell=jobDocument_->linkedCells[static_cast<size_t>(placeId)];selectedRow_=cell.y();selectedColumn_=cell.x();const bool jump=autoJumpCheck_->isChecked();view_->setSelectedCell(selectedRow_,selectedColumn_,jump);updateSelectedCellLabel();if(jump&&previewLayoutMode_->currentIndex()==0)showPreviewTab(0);}
 
 TraversalMode MainWindow::selectedTraversalMode() const{return traversal_->currentIndex()==0?TraversalMode::SnakeZ:TraversalMode::ClockwiseSpiral;}
-void MainWindow::updateSelectedCellLabel(){if(!selectedCellLabel_)return;if(selectedRow_<0||selectedColumn_<0||segmentation_.rows<=0||segmentation_.columns<=0){selectedCellLabel_->setText(QStringLiteral("未选择"));return;}const qint64 index=SplitExporter::traversalIndex(segmentation_.rows,segmentation_.columns,selectedTraversalMode(),selectedRow_,selectedColumn_);if(index<0){selectedCellLabel_->setText(QStringLiteral("未选择"));return;}selectedCellLabel_->setText(QStringLiteral("%1x%2 : %3.bmp").arg(selectedRow_+1).arg(selectedColumn_+1).arg(index+1));}
+void MainWindow::updateSelectedCellLabel(){if(!selectedCellLabel_)return;if(selectedRow_<0||selectedColumn_<0||segmentation_.rows<=0||segmentation_.columns<=0){selectedCellLabel_->setText(QStringLiteral("未选择"));return;}const qint64 index=SplitExporter::traversalIndex(segmentation_.rows,segmentation_.columns,selectedTraversalMode(),selectedRow_,selectedColumn_);if(index<0){selectedCellLabel_->setText(QStringLiteral("未选择"));return;}const int count=view_?view_->selectedCells().size():1;selectedCellLabel_->setText(count>1?QStringLiteral("已选 %1 块 | 当前 %2x%3 : %4.bmp").arg(count).arg(selectedRow_+1).arg(selectedColumn_+1).arg(index+1):QStringLiteral("%1x%2 : %3.bmp").arg(selectedRow_+1).arg(selectedColumn_+1).arg(index+1));}
 QString MainWindow::pixelDescription(const ImageMetadata& m)const{switch(m.kind){case PixelKind::Binary1:return QStringLiteral("1-bit 二值");case PixelKind::Gray8:return QStringLiteral("8-bit 灰度");case PixelKind::Gray16:return QStringLiteral("16-bit 灰度");case PixelKind::Color:return QStringLiteral("彩色");default:return QStringLiteral("不支持");}}
