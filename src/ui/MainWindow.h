@@ -4,6 +4,7 @@
 #include "domain/JobModels.h"
 #include "domain/PointCloudModels.h"
 #include "domain/MaskSliceModels.h"
+#include "imaging/ElementGrouping.h"
 #include "io/ExportTypes.h"
 #include <QMainWindow>
 #include <QVector>
@@ -44,7 +45,7 @@ protected:
     void dropEvent(QDropEvent* event) override;
 
 private:
-    enum class PendingAction { None, Scan, Load, Merge, Detect, Grid,
+    enum class PendingAction { None, Scan, Load, Merge, Detect, Grid, GroupElements,
                                SelectedBlocksExport, MosaicExport,
                                JobLoad, JobLoadExport, JobPreviewBuild, PointCloudBuild };
     void buildUi();
@@ -62,6 +63,8 @@ private:
     void chooseMergedExportPath();
     void detectSegmentation();
     void applyManualSegmentation();
+    void groupElements();
+    void clearElementGrouping();
     void chooseExportDirectory();
     void chooseSelectedBlocksExportDirectory();
     void chooseJobFile();
@@ -120,6 +123,7 @@ private:
     QPushButton *openButton_=nullptr,*directoryButton_=nullptr,*mergeButton_=nullptr;
     QPushButton *detectButton_=nullptr,*exportButton_=nullptr,*previousButton_=nullptr,*nextButton_=nullptr;
     QPushButton *manualPreviewButton_=nullptr,*pathButton_=nullptr,*cancelButton_=nullptr;
+    QPushButton* groupElementsButton_ = nullptr;
     QPushButton *mergedExportButton_=nullptr,*jobImportButton_=nullptr,*resetParametersButton_=nullptr;
     QPushButton* selectedBlocksExportButton_ = nullptr;
     QPushButton* clearFixedGrayPointsButton_ = nullptr;
@@ -143,6 +147,7 @@ private:
     QColor cloudStartColor_{0,0,255};
     QColor cloudEndColor_{0,255,0};
     SegmentationResult segmentation_;
+    ElementGroupingResult elementGrouping_;
     QStringList directoryPaths_;
     QStringList pendingMergePaths_;
     QVector<ImageDocumentPtr> mergedDocuments_;

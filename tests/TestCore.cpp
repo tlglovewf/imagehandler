@@ -6,12 +6,14 @@
 #include "io/MaskSliceExporter.h"
 #include "io/ExportPreflight.h"
 #include "io/LayeredPackageExporter.h"
+#include "io/JobFileLoader.h"
 #include "io/SplitExporter.h"
 #include "imaging/ImageLoader.h"
 #include "imaging/MosaicBuilder.h"
 #include "imaging/MaskSliceGenerator.h"
 #include "imaging/MaskStackMeshBuilder.h"
 #include "imaging/LayeredMaskProcessor.h"
+#include "imaging/ElementGrouping.h"
 #include "imaging/PatternDetector.h"
 #include "imaging/PointCloudBuilder.h"
 #include "imaging/PointCloudMath.h"
@@ -79,6 +81,8 @@ private Q_SLOTS:
     void printCanvasCoordinates();
     void printPackageExportAndReplacement();
     void layeredPackageUsesPhysicalCoordinatesAndUniformLayers();
+    void elementGroupingAndLayeredPackageReuse();
+    void elementGroupingSupportsGrayDepthsAndResiduals();
     void layeredMasksPadTransformAndValidate();
     void exportPreflightEstimatesAndSpacePolicy();
     void storageSizeFormatting();
@@ -1246,6 +1250,155 @@ void TestCore::layeredPackageUsesPhysicalCoordinatesAndUniformLayers() {
     const auto unsafePreflight=LayeredPackageExporter::inspect(request);
     QVERIFY(!unsafePreflight.valid);QVERIFY(unsafePreflight.blockingError.contains(QStringLiteral("不安全")));
 }
+void TestCore::elementGroupingAndLayeredPackageReuse() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    QImage source(4, 2, QImage::Format_Grayscale8);
+    for (int y = 0; y < 2; ++y) {
+        uchar* row = source.scanLine(y);
+        row[0] = 0; row[1] = 255;
+        row[2] = 64; row[3] = 128;
+    }
+    const QString sourcePath = directory.filePath(QStringLiteral("groups.bmp"));
+    QVERIFY(source.save(sourcePath, "BMP"));
+    QString error;
+    const auto document = ImageLoader::load(sourcePath, 1401, &error);
+    QVERIFY2(document, qPrintable(error));
+    const auto grid = PatternDetector::makeManualGrid(
+        document, {2, 1, 128, ForegroundPolarity::Dark});
+    QCOMPARE(grid.rows, 2); QCOMPARE(grid.columns, 2);
+
+    const auto token = std::make_shared<CancellationToken>();
+    ExactGrayElementComparison exact;
+    const auto grouping = ElementGrouper::group(document, grid, exact, token, {}, &error);
+    QVERIFY2(grouping.valid, qPrintable(error));
+    QCOMPARE(grouping.groups.size(), 2);
+    QCOMPARE(grouping.groupIdAt(0, 0), 0);
+    QCOMPARE(grouping.groupIdAt(0, 1), 1);
+    QCOMPARE(grouping.groupIdAt(1, 0), 0);
+    QCOMPARE(grouping.groupIdAt(1, 1), 1);
+    QCOMPARE(grouping.colorAt(0, 0), grouping.colorAt(1, 0));
+    QVERIFY(grouping.colorAt(0, 0) != grouping.colorAt(0, 1));
+
+    class CollisionComparison final : public ElementComparisonStrategy {
+    public:
+        QString id() const override { return QStringLiteral("collision_test"); }
+        QByteArray fingerprint(const QImage&, PixelKind) const override {
+            return QByteArrayLiteral("same-bucket");
+        }
+        bool equivalent(const QImage& left, const QImage& right,
+                        PixelKind kind) const override {
+            return exact_.equivalent(left, right, kind);
+        }
+    private:
+        ExactGrayElementComparison exact_;
+    } collision;
+    const auto collisionGrouping = ElementGrouper::group(
+        document, grid, collision, token, {}, &error);
+    QVERIFY2(collisionGrouping.valid, qPrintable(error));
+    QCOMPARE(collisionGrouping.groups.size(), 2);
+
+    const QString output = directory.filePath(QStringLiteral("grouped-package"));
+    QVERIFY(QDir().mkpath(output));
+    LayeredPackageRequest request{output, document, grid, TraversalMode::SnakeZ,
+        {0.5, 1.0, 1.0, 2, 1, false, false, false,
+         LayerCountStrategy::RoundUp}, true, grouping};
+    request.options.attachToCanvas = false;
+    const auto estimate = LayeredPackageExporter::estimateOutput(request);
+    QVERIFY2(estimate.valid, qPrintable(estimate.error));
+    QCOMPARE(estimate.bmpFileCount, qint64(2));
+    const auto preflight = LayeredPackageExporter::inspect(request);
+    QVERIFY2(preflight.valid, qPrintable(preflight.blockingError));
+    QVERIFY2(LayeredPackageExporter::exportPackage(
+        request, {false, true, preflight.targetFingerprint}, token, {}, &error),
+        qPrintable(error));
+    QCOMPARE(QDir(output).entryList({QStringLiteral("0"), QStringLiteral("1")},
+                                    QDir::Dirs | QDir::NoDotAndDotDot).size(), 2);
+    QVERIFY(!QFileInfo::exists(QDir(output).filePath(QStringLiteral("2"))));
+
+    QFile jobFile(QDir(output).filePath(QStringLiteral("job.json")));
+    QVERIFY(jobFile.open(QIODevice::ReadOnly));
+    const QJsonObject jobObject = QJsonDocument::fromJson(jobFile.readAll()).object();
+    const QJsonArray models = jobObject.value(QStringLiteral("models")).toArray();
+    const QJsonArray commands = jobObject.value(QStringLiteral("commands")).toArray();
+    QCOMPARE(models.size(), 2); QCOMPARE(commands.size(), 8);
+    QCOMPARE(commands[1].toObject().value(QStringLiteral("id")).toInt(), 0);
+    QCOMPARE(commands[3].toObject().value(QStringLiteral("id")).toInt(), 1);
+    QCOMPARE(commands[5].toObject().value(QStringLiteral("id")).toInt(), 1);
+    QCOMPARE(commands[7].toObject().value(QStringLiteral("id")).toInt(), 0);
+
+    const auto loaded = JobFileLoader::load(
+        jobFile.fileName(), std::make_shared<CancellationToken>(), {}, &error);
+    QVERIFY2(loaded, qPrintable(error));
+    QCOMPARE(loaded->models.size(), size_t(2));
+    QCOMPARE(loaded->points.size(), size_t(4));
+    QCOMPARE(loaded->points[3].placementId, qint64(3));
+
+    QFile report(QDir(output).filePath(QStringLiteral("export-report.json")));
+    QVERIFY(report.open(QIODevice::ReadOnly));
+    const QJsonObject reportOutput = QJsonDocument::fromJson(report.readAll()).object()
+        .value(QStringLiteral("output")).toObject();
+    QCOMPARE(reportOutput.value(QStringLiteral("placementCount")).toInt(), 4);
+    QCOMPARE(reportOutput.value(QStringLiteral("uniquePatternCount")).toInt(), 2);
+    QCOMPARE(reportOutput.value(QStringLiteral("reusedPlacementCount")).toInt(), 2);
+    QCOMPARE(reportOutput.value(QStringLiteral("bmpCount")).toInt(), 2);
+}
+
+void TestCore::elementGroupingSupportsGrayDepthsAndResiduals() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    QString error;
+    ExactGrayElementComparison comparison;
+    const auto token = std::make_shared<CancellationToken>();
+
+    QImage gray16(4, 1, QImage::Format_Grayscale16);
+    auto* gray16Row = reinterpret_cast<quint16*>(gray16.scanLine(0));
+    gray16Row[0] = 100; gray16Row[1] = 50000;
+    gray16Row[2] = 100; gray16Row[3] = 50000;
+    const QString gray16Path = directory.filePath(QStringLiteral("groups16.png"));
+    QVERIFY(gray16.save(gray16Path, "PNG"));
+    const auto gray16Document = ImageLoader::load(gray16Path, 1420, &error);
+    QVERIFY2(gray16Document, qPrintable(error));
+    QCOMPARE(gray16Document->metadata.kind, PixelKind::Gray16);
+    const auto gray16Grid = PatternDetector::makeManualGrid(
+        gray16Document, {2, 1, 128, ForegroundPolarity::Dark});
+    const auto gray16Grouping = ElementGrouper::group(
+        gray16Document, gray16Grid, comparison, token, {}, &error);
+    QVERIFY2(gray16Grouping.valid, qPrintable(error));
+    QCOMPARE(gray16Grouping.groups.size(), 1);
+
+    QImage residual(5, 1, QImage::Format_Grayscale8);
+    uchar* residualRow = residual.scanLine(0);
+    residualRow[0] = 7; residualRow[1] = 8; residualRow[2] = 7;
+    residualRow[3] = 8; residualRow[4] = 7;
+    const QString residualPath = directory.filePath(QStringLiteral("residual.bmp"));
+    QVERIFY(residual.save(residualPath, "BMP"));
+    const auto residualDocument = ImageLoader::load(residualPath, 1421, &error);
+    QVERIFY2(residualDocument, qPrintable(error));
+    const auto residualGrid = PatternDetector::makeManualGrid(
+        residualDocument, {2, 1, 128, ForegroundPolarity::Dark});
+    const auto residualGrouping = ElementGrouper::group(
+        residualDocument, residualGrid, comparison, token, {}, &error);
+    QVERIFY2(residualGrouping.valid, qPrintable(error));
+    QCOMPARE(residualGrouping.groups.size(), 2);
+    QCOMPARE(residualGrouping.groupIdAt(0, 0), residualGrouping.groupIdAt(0, 1));
+    QVERIFY(residualGrouping.groupIdAt(0, 2) != residualGrouping.groupIdAt(0, 0));
+
+    QImage binary(4, 1, QImage::Format_Mono);
+    binary.setColorTable({qRgb(0, 0, 0), qRgb(255, 255, 255)});
+    binary.setPixel(0, 0, 0); binary.setPixel(1, 0, 1);
+    binary.setPixel(2, 0, 0); binary.setPixel(3, 0, 1);
+    const QString binaryPath = directory.filePath(QStringLiteral("groups1.bmp"));
+    QVERIFY(binary.save(binaryPath, "BMP"));
+    const auto binaryDocument = ImageLoader::load(binaryPath, 1422, &error);
+    QVERIFY2(binaryDocument, qPrintable(error));
+    QCOMPARE(binaryDocument->metadata.kind, PixelKind::Binary1);
+    const auto binaryGrid = PatternDetector::makeManualGrid(
+        binaryDocument, {2, 1, 128, ForegroundPolarity::Dark});
+    const auto binaryGrouping = ElementGrouper::group(
+        binaryDocument, binaryGrid, comparison, token, {}, &error);
+    QVERIFY2(binaryGrouping.valid, qPrintable(error));
+    QCOMPARE(binaryGrouping.groups.size(), 1);
+}
+
 void TestCore::layeredMasksPadTransformAndValidate() {
     QTemporaryDir directory; QVERIFY(directory.isValid());
     QImage source(3, 1, QImage::Format_Grayscale8);

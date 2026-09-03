@@ -391,7 +391,8 @@ bool parseCommands(JsonReader& reader, JobDocument& document, QString* error) {
             if (document.points.size() >= static_cast<size_t>(kMaximumJobPoints)) {
                 reader.fail(error, QStringLiteral("点数量超过 %1").arg(kMaximumJobPoints)); return false;
             }
-            document.points.push_back({command.id, pendingPosition, commandIndex});
+            document.points.push_back({command.id, pendingPosition, commandIndex,
+                                       static_cast<qint64>(document.points.size())});
             document.bounds.include(pendingPosition);
         }
         expectingRelMove = !expectingRelMove;
@@ -458,28 +459,18 @@ JobDocumentPtr JobFileLoader::load(const QString& path, const CancellationTokenP
             if (error) *error = QStringLiteral("Job 不包含可预览的模型和点。");
             return {};
         }
-        if (document->models.size() != document->points.size()) {
-            if (error) *error = QStringLiteral("模型数量 %1 与 place 数量 %2 不一致。")
-                                    .arg(document->models.size()).arg(document->points.size());
-            return {};
-        }
         const JobCoordinate extent=document->bounds.size();
         if(extent.x>std::numeric_limits<float>::max()||extent.y>std::numeric_limits<float>::max()||extent.z>std::numeric_limits<float>::max()){
             if(error)*error=QStringLiteral("Job 坐标范围过大，无法安全转换为 GPU 相对坐标。");
             return {};
         }
-        std::vector<bool> ids(document->models.size(), false);
         for (const JobPoint& point : document->points) {
-            if (point.placeId < 0 || point.placeId >= static_cast<qint64>(ids.size())) {
+            if (point.placeId < 0 ||
+                point.placeId >= static_cast<qint64>(document->models.size())) {
                 if (error) *error = QStringLiteral("命令 %1 的 place.id=%2 超出模型范围。")
                                         .arg(point.commandIndex).arg(point.placeId);
                 return {};
             }
-            if (ids[static_cast<size_t>(point.placeId)]) {
-                if (error) *error = QStringLiteral("place.id=%1 重复。").arg(point.placeId);
-                return {};
-            }
-            ids[static_cast<size_t>(point.placeId)] = true;
         }
         if(progress)progress({QStringLiteral("建立 Job 空间索引"),0,static_cast<qint64>(document->points.size())});
         if (!JobSpatialIndex::prepare(document.get(),token)) {

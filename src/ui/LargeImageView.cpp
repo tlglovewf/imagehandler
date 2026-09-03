@@ -42,7 +42,7 @@ LargeImageView::LargeImageView(QWidget* parent) : QWidget(parent) {
 void LargeImageView::setDocument(const ImageDocumentPtr& document) {
     if (tileRequestToken_) tileRequestToken_->cancel();
     tileRequestToken_ = std::make_shared<CancellationToken>();
-    document_ = document; cache_.clear(); pending_.clear(); failedTiles_.clear(); visibleTileKeys_.clear(); showGrid_ = false;
+    document_ = document; cache_.clear(); pending_.clear(); failedTiles_.clear(); visibleTileKeys_.clear(); showGrid_ = false; grouping_ = {};
     probeCache_ = {}; probeCacheOrigin_ = {-1, -1}; hoverPixel_ = {-1, -1}; probePending_ = false; ++probeRequestSerial_;
     const bool hadFixedPoints = !fixedGrayPoints_.isEmpty();
     fixedGrayPoints_.clear(); selectedFixedGrayPointId_ = 0;
@@ -54,12 +54,23 @@ void LargeImageView::setDocument(const ImageDocumentPtr& document) {
 
 void LargeImageView::setSegmentation(const SegmentationResult& segmentation) {
     segmentation_ = segmentation; showGrid_ = segmentation.rows > 0 && segmentation.columns > 0;
+    grouping_ = {};
     if (!showGrid_) showTraversalPath_ = false;
     clearSelectedCell(); update();
 }
 
 void LargeImageView::clearSegmentation() {
-    showGrid_ = false; showTraversalPath_ = false; clearSelectedCell(); update();
+    showGrid_ = false; showTraversalPath_ = false; grouping_ = {}; clearSelectedCell(); update();
+}
+
+void LargeImageView::setElementGrouping(const ElementGroupingResult& grouping) {
+    grouping_ = grouping.matches(document_, segmentation_) ? grouping : ElementGroupingResult{};
+    update();
+}
+
+void LargeImageView::clearElementGrouping() {
+    grouping_ = {};
+    update();
 }
 
 void LargeImageView::setTraversalMode(TraversalMode mode) {
@@ -212,6 +223,22 @@ void LargeImageView::paintEvent(QPaintEvent*) {
         // Fixed Rect2D cells tile continuously from image coordinate (0,0).
         const double minimumSpacing = std::min(pitchX, pitchY);
         const int alpha = minimumSpacing >= 16.0 ? 190 : minimumSpacing >= 8.0 ? 115 : 70;
+        if (grouping_.matches(document_, segmentation_) && minimumSpacing >= 2.0) {
+            const int firstColumn=std::max(0,int(std::floor(leftImage/segmentation_.settings.cellWidth)));
+            const int lastColumn=std::min(segmentation_.columns-1,int(std::floor(std::max(0.0,rightImage-1.0)/segmentation_.settings.cellWidth)));
+            const int firstRow=std::max(0,int(std::floor(topImage/segmentation_.settings.cellHeight)));
+            const int lastRow=std::min(segmentation_.rows-1,int(std::floor(std::max(0.0,bottomImage-1.0)/segmentation_.settings.cellHeight)));
+            p.setPen(Qt::NoPen);
+            for(int r=firstRow;r<=lastRow;++r)for(int c=firstColumn;c<=lastColumn;++c) {
+                const ImageRegion cell=segmentationCellRegion(
+                    segmentation_,document_->metadata.width,document_->metadata.height,r,c);
+                QColor color=grouping_.colorAt(r,c);
+                if(!cell.isValid()||!color.isValid())continue;
+                color.setAlpha(72);
+                p.fillRect(QRectF(baseX+cell.x*zoom_,baseY+cell.y*zoom_,
+                                  cell.width*zoom_,cell.height*zoom_),color);
+            }
+        }
         p.setPen(QPen(QColor(255,70,70,alpha),1));
         if(minimumSpacing>=4.0) {
             const int firstColumn=std::max(0,int(std::ceil((visibleImageRect.left()-baseX-patternW)/pitchX)));

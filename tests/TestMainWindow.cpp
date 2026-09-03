@@ -46,6 +46,7 @@ private Q_SLOTS:
     void listModesAndMergedExportControl();
     void printCanvasFollowsDocument();
     void jobPreviewWorkspaceAndLinking();
+    void elementGroupingButtonUpdatesJobPreview();
     void denseJobPointCanBeSelectedAfterOrbit();
     void settingsPersistenceAndReset();
     void multipleImageDropIsSortedAndSelected();
@@ -188,6 +189,43 @@ void TestMainWindow::jobPreviewWorkspaceAndLinking() {
     }else{
         QVERIFY(!importButton->isEnabled());
         QVERIFY(window.findChild<QLabel*>(QStringLiteral("jobVulkanError")));
+    }
+}
+
+void TestMainWindow::elementGroupingButtonUpdatesJobPreview() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    QImage source(4, 2, QImage::Format_Grayscale8);
+    for (int y = 0; y < source.height(); ++y) {
+        uchar* row = source.scanLine(y);
+        row[0] = 0; row[1] = 255; row[2] = 64; row[3] = 128;
+    }
+    const QString path = directory.filePath(QStringLiteral("group-ui.bmp"));
+    QVERIFY(source.save(path, "BMP"));
+    QString error;
+    const auto document = ImageLoader::load(path, 251, &error);
+    QVERIFY2(document, qPrintable(error));
+    MainWindow window;
+    auto* width = window.findChild<QSpinBox*>(QStringLiteral("segmentationCellWidth"));
+    auto* height = window.findChild<QSpinBox*>(QStringLiteral("segmentationCellHeight"));
+    auto* preview = window.findChild<QPushButton*>(QStringLiteral("manualSegmentationPreviewButton"));
+    auto* grouping = window.findChild<QPushButton*>(QStringLiteral("groupElementsButton"));
+    auto* jobView = window.findChild<JobPreviewWidget*>(QStringLiteral("jobPreviewWidget"));
+    QVERIFY(width); QVERIFY(height); QVERIFY(preview); QVERIFY(grouping); QVERIFY(jobView);
+    QVERIFY(!grouping->isEnabled());
+    QVERIFY(QMetaObject::invokeMethod(&window, "acceptDocument", Qt::DirectConnection,
+                                      Q_ARG(ImageDocumentPtr, document)));
+    width->setValue(2); height->setValue(1);
+    QTest::mouseClick(preview, Qt::LeftButton);
+    QVERIFY(grouping->isEnabled());
+    QTest::mouseClick(grouping, Qt::LeftButton);
+    QTRY_VERIFY_WITH_TIMEOUT(grouping->text().contains(QStringLiteral("2/4")), 5000);
+    if (jobView->isVulkanAvailable()) {
+        QTRY_VERIFY_WITH_TIMEOUT(jobView->document() != nullptr, 5000);
+        QCOMPARE(jobView->document()->models.size(), size_t(2));
+        QCOMPARE(jobView->document()->points.size(), size_t(4));
+        QCOMPARE(jobView->document()->points[0].placeId, qint64(0));
+        QCOMPARE(jobView->document()->points[2].placeId, qint64(1));
+        QVERIFY(jobView->document()->points[0].groupColor.isValid());
     }
 }
 

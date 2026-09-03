@@ -2,6 +2,7 @@
 
 #include "domain/Models.h"
 #include "domain/PointCloudModels.h"
+#include "imaging/ElementGrouping.h"
 
 #include <QMetaType>
 #include <QString>
@@ -40,6 +41,7 @@ struct LayeredPackageRequest {
     TraversalMode traversalMode = TraversalMode::SnakeZ;
     LayeredPackageOptions options;
     bool writeReport = true;
+    ElementGroupingResult grouping;
 };
 
 Q_DECLARE_METATYPE(LayerCountStrategy)

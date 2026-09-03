@@ -2,6 +2,7 @@
 
 layout(location = 0) in vec3 inPosition;
 layout(location = 1) in float inId;
+layout(location = 2) in vec3 inColor;
 
 layout(std140, binding = 0) uniform Camera {
     mat4 mvp;
@@ -27,5 +28,5 @@ void main() {
     gl_Position = clip;
     localPosition = corner;
     color = selected ? vec3(1.0, 0.82, 0.0)
-                     : (hovered ? vec3(1.0, 0.45, 0.12) : vec3(0.1, 0.75, 1.0));
+                     : (hovered ? vec3(1.0, 0.45, 0.12) : inColor);
 }

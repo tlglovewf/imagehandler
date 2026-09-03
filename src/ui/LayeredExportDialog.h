@@ -31,6 +31,7 @@ public:
                    double maximumHeight, bool invertHeight,
                    bool reverseY, const QString& initialDirectory,
                    const QPoint& activeCell = QPoint(-1, -1));
+    void setElementGrouping(const ElementGroupingResult& grouping);
     [[nodiscard]] bool reverseY() const;
     [[nodiscard]] QString outputDirectory() const;
     void setOutputDirectory(const QString& directory);
@@ -95,6 +96,7 @@ private:
     QDoubleSpinBox* stackZScale_ = nullptr;
     ImageDocumentPtr document_;
     SegmentationResult segmentation_;
+    ElementGroupingResult grouping_;
     TraversalMode traversalMode_ = TraversalMode::SnakeZ;
     double pixelScale_ = 0.25;
     bool invertHeight_ = true;

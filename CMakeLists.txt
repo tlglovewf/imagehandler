@@ -29,6 +29,7 @@ add_library(image_handler_core
     src/imaging/ImageLoader.h src/imaging/ImageLoader.cpp
     src/imaging/MosaicBuilder.h src/imaging/MosaicBuilder.cpp
     src/imaging/PatternDetector.h src/imaging/PatternDetector.cpp
+    src/imaging/ElementGrouping.h src/imaging/ElementGrouping.cpp
     src/imaging/JobPreviewBuilder.h src/imaging/JobPreviewBuilder.cpp
     src/imaging/JobLabelLod.h src/imaging/JobLabelLod.cpp
     src/imaging/JobPreviewMath.h src/imaging/JobPreviewMath.cpp

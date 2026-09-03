@@ -40,7 +40,7 @@ constexpr float kPi = 3.14159265358979323846F;
 constexpr int kMaximumOrdinaryLabels = 4096;
 constexpr size_t kMaximumLabelCandidates = 65536;
 
-struct PointVertex { float x, y, z, id; };
+struct PointVertex { float x, y, z, id, r, g, b; };
 struct LineVertex { float x, y, r, g, b; };
 struct alignas(16) CameraUniform {
     float mvp[16];
@@ -113,7 +113,7 @@ public:
             origin_ = document_->bounds.center();
             idToIndex_.resize(document_->points.size(), -1);
             for (size_t index = 0; index < document_->points.size(); ++index) {
-                const qint64 id = document_->points[index].placeId;
+                const qint64 id = document_->points[index].placementId;
                 if (id >= 0 && id < static_cast<qint64>(idToIndex_.size()))
                     idToIndex_[static_cast<size_t>(id)] = static_cast<qint64>(index);
             }
@@ -300,7 +300,7 @@ private:
             if (!project(localPosition(point), mvp, &screen, nullptr, &depth)) return;
             const QPointF delta = screen - position;
             if (QPointF::dotProduct(delta, delta) <= radiusSquared && depth < bestDepth) {
-                bestDepth = depth; best = point.placeId;
+                bestDepth = depth; best = point.placementId;
             }
         };
         for (quint32 pointIndex : candidates) testPoint(pointIndex);
@@ -576,7 +576,7 @@ private:
         const JobLabelLodDecision lod = JobLabelLod::decide(spacing, static_cast<qint64>(document_->points.size()));
         if (lod.level == JobLabelLodLevel::Individual) {
             for (const ProjectedPoint& point : projected) {
-                const qint64 id=document_->points[point.pointIndex].placeId;
+                const qint64 id=document_->points[point.pointIndex].placementId;
                 if (id == selectedId_ || id == hoveredId_) continue;
                 addOrdinary(point.screen, QString::number(id));
             }
@@ -585,7 +585,7 @@ private:
             struct RangeAnchor { QPointF screenSum; qint64 visibleCount=0; };
             std::map<qint64,RangeAnchor> anchors;
             for(const ProjectedPoint& point:projected){
-                const qint64 id=document_->points[point.pointIndex].placeId;
+                const qint64 id=document_->points[point.pointIndex].placementId;
                 if(id<0)continue;
                 auto& anchor=anchors[(id/group)*group];
                 anchor.screenSum+=point.screen;++anchor.visibleCount;
@@ -697,13 +697,15 @@ VkPipeline JobVulkanRenderer::createPipeline(VkShaderModule vertex, VkShaderModu
     VkVertexInputBindingDescription binding{};
     binding.binding = 0; binding.inputRate = pointPipeline ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
     binding.stride = pointPipeline ? sizeof(PointVertex) : sizeof(LineVertex);
-    VkVertexInputAttributeDescription attributes[2]{};
+    VkVertexInputAttributeDescription attributes[3]{};
     attributes[0] = {0, 0, pointPipeline ? VK_FORMAT_R32G32B32_SFLOAT : VK_FORMAT_R32G32_SFLOAT, 0};
     attributes[1] = {1, 0, pointPipeline ? VK_FORMAT_R32_SFLOAT : VK_FORMAT_R32G32B32_SFLOAT,
                      pointPipeline ? 12U : 8U};
+    if (pointPipeline) attributes[2] = {2, 0, VK_FORMAT_R32G32B32_SFLOAT, 16U};
     VkPipelineVertexInputStateCreateInfo vertexInput{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     vertexInput.vertexBindingDescriptionCount = 1; vertexInput.pVertexBindingDescriptions = &binding;
-    vertexInput.vertexAttributeDescriptionCount = 2; vertexInput.pVertexAttributeDescriptions = attributes;
+    vertexInput.vertexAttributeDescriptionCount = pointPipeline ? 3U : 2U;
+    vertexInput.pVertexAttributeDescriptions = attributes;
     VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
     assembly.topology = topology;
     VkPipelineViewportStateCreateInfo viewport{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
@@ -793,7 +795,11 @@ void JobVulkanRenderer::rebuildPointBuffer() {
     const JobCoordinate origin = window_->origin();
     for (const JobPoint& point : document->points) {
         const QVector3D local = point.position.relativeTo(origin);
-        vertices.push_back({local.x(), local.y(), local.z(), static_cast<float>(point.placeId)});
+        const QColor color = point.groupColor.isValid() ? point.groupColor
+                                                        : QColor(26, 191, 255);
+        vertices.push_back({local.x(), local.y(), local.z(),
+                            static_cast<float>(point.placementId), color.redF(),
+                            color.greenF(), color.blueF()});
     }
     upload(&pointBuffer_, vertices.data(), vertices.size() * sizeof(PointVertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
 }

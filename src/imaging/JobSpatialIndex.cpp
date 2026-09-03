@@ -24,10 +24,8 @@ std::shared_ptr<JobSpatialIndex> JobSpatialIndex::build(const std::vector<JobPoi
 
 bool JobSpatialIndex::prepare(JobDocument* document,const CancellationTokenPtr& token){
     if(!document||!token||token->isCancelled()||document->points.empty())return false;
-    std::vector<JobCoordinate> byId(document->points.size());
-    size_t scanned=0;for(const JobPoint& point:document->points){if((scanned++&4095U)==0&&token->isCancelled())return false;if(point.placeId<0||point.placeId>=static_cast<qint64>(byId.size()))return false;byId[static_cast<size_t>(point.placeId)]=point.position;}
-    document->idPrefixSums.resize(byId.size()+1);
-    for(size_t i=0;i<byId.size();++i){if((i&4095U)==0&&token->isCancelled())return false;const auto& previous=document->idPrefixSums[i];const auto& point=byId[i];document->idPrefixSums[i+1]={previous.x+point.x,previous.y+point.y,previous.z+point.z};}
+    document->idPrefixSums.resize(document->points.size()+1);
+    for(size_t i=0;i<document->points.size();++i){if((i&4095U)==0&&token->isCancelled())return false;const auto& previous=document->idPrefixSums[i];const auto& point=document->points[i].position;document->idPrefixSums[i+1]={previous.x+point.x,previous.y+point.y,previous.z+point.z};}
     document->spatialIndex=build(document->points,token);
     return document->spatialIndex!=nullptr;
 }

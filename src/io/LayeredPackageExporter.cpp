@@ -40,6 +40,37 @@ bool checkedMultiply(qint64 left, qint64 right, qint64* result) {
     return true;
 }
 
+bool hasGrouping(const LayeredPackageRequest& request) {
+    return request.grouping.matches(request.document, request.segmentation) &&
+           !request.grouping.groups.isEmpty();
+}
+
+qint64 modelCount(const LayeredPackageRequest& request,
+                  const std::vector<QPoint>& order) {
+    return hasGrouping(request) ? request.grouping.groups.size()
+                                : static_cast<qint64>(order.size());
+}
+
+int modelIdFor(const LayeredPackageRequest& request, const QPoint& cell,
+               qsizetype traversalIndex) {
+    return hasGrouping(request) ? request.grouping.groupIdAt(cell.y(), cell.x())
+                                : static_cast<int>(traversalIndex);
+}
+
+QVector<QPoint> representativeCells(const LayeredPackageRequest& request,
+                                    const std::vector<QPoint>& order) {
+    QVector<QPoint> result;
+    if (hasGrouping(request)) {
+        result.reserve(request.grouping.groups.size());
+        for (const ElementGroup& group : request.grouping.groups)
+            result.push_back(group.representativeCell);
+    } else {
+        result.reserve(static_cast<qsizetype>(order.size()));
+        for (const QPoint& cell : order) result.push_back(cell);
+    }
+    return result;
+}
+
 QString jsonNumber(double value) {
     if (value == 0.0) return QStringLiteral("0.0");
     QString number = QString::number(value, 'g', QLocale::FloatingPointShortest);
@@ -74,12 +105,12 @@ bool writeJobJson(const QString& path, const LayeredPackageRequest& request,
         return false;
     }
     if (!writeAll(file, QByteArrayLiteral("{\n  \"models\": [\n"), error)) return false;
-    for (qsizetype i = 0; i < static_cast<qsizetype>(order.size()); ++i) {
+    const qint64 models = modelCount(request, order);
+    for (qint64 i = 0; i < models; ++i) {
         if (token && token->isCancelled()) return false;
         const QByteArray item = QStringLiteral(
             "    {\n      \"label\": \"%1\",\n      \"path\": \"%1\"\n    }%2\n")
-            .arg(i).arg(i + 1 < static_cast<qsizetype>(order.size()) ? QStringLiteral(",")
-                                                                       : QString()).toUtf8();
+            .arg(i).arg(i + 1 < models ? QStringLiteral(",") : QString()).toUtf8();
         if (!writeAll(file, item, error)) return false;
     }
     if (!writeAll(file, QByteArrayLiteral("  ],\n  \"commands\": [\n"), error)) return false;
@@ -88,10 +119,11 @@ bool writeJobJson(const QString& path, const LayeredPackageRequest& request,
         if (token && token->isCancelled()) return false;
         const QPointF position = SplitExporter::physicalPosition(
             request.segmentation, order[static_cast<size_t>(i)], placement);
+        const int modelId = modelIdFor(request, order[static_cast<size_t>(i)], i);
         const QByteArray item = QStringLiteral(
             "    {\n      \"command\": \"relmove\",\n      \"by\": [%1, %2, 0.0]\n    },\n"
             "    {\n      \"command\": \"place\",\n      \"id\": %3\n    }%4\n")
-            .arg(jsonNumber(position.x()), jsonNumber(position.y())).arg(i)
+            .arg(jsonNumber(position.x()), jsonNumber(position.y())).arg(modelId)
             .arg(i + 1 < static_cast<qsizetype>(order.size()) ? QStringLiteral(",")
                                                                : QString()).toUtf8();
         if (!writeAll(file, item, error)) return false;
@@ -111,8 +143,9 @@ bool writeReport(const QString& path, const LayeredPackageRequest& request, int 
     const auto sampling = request.options.transformSampling == BinaryTransformSampling::Nearest
         ? QStringLiteral("nearest") : QStringLiteral("smooth_threshold");
     const qint64 cells = qint64(request.segmentation.rows) * request.segmentation.columns;
+    const qint64 groups = hasGrouping(request) ? request.grouping.groups.size() : cells;
     QJsonObject root{
-        {QStringLiteral("schemaVersion"), 2},
+        {QStringLiteral("schemaVersion"), 3},
         {QStringLiteral("application"), QJsonObject{
             {QStringLiteral("name"), QStringLiteral("ImageHandler")},
             {QStringLiteral("version"), QCoreApplication::applicationVersion().isEmpty()
@@ -132,8 +165,13 @@ bool writeReport(const QString& path, const LayeredPackageRequest& request, int 
             {QStringLiteral("strategy"), strategy},
             {QStringLiteral("invertMask"), request.options.invertMask}}},
         {QStringLiteral("output"), QJsonObject{
-            {QStringLiteral("directoryCount"), cells},
-            {QStringLiteral("bmpCount"), cells * layers},
+            {QStringLiteral("directoryCount"), groups},
+            {QStringLiteral("bmpCount"), groups * layers},
+            {QStringLiteral("placementCount"), cells},
+            {QStringLiteral("uniquePatternCount"), groups},
+            {QStringLiteral("reusedPlacementCount"), cells - groups},
+            {QStringLiteral("groupingStrategy"), hasGrouping(request)
+                ? request.grouping.strategyId : QStringLiteral("none")},
             {QStringLiteral("standardWidth"), request.options.outputWidth},
             {QStringLiteral("standardHeight"), request.options.outputHeight},
             {QStringLiteral("residualAlignment"), QStringLiteral("top_left")},
@@ -273,8 +311,9 @@ ExportSizeEstimate LayeredPackageExporter::estimateOutput(const LayeredPackageRe
     const auto order = SplitExporter::traversal(request.segmentation.rows,
                                                  request.segmentation.columns,
                                                  request.traversalMode);
+    const QVector<QPoint> exports = representativeCells(request, order);
     qint64 bytes = 0;
-    for (const QPoint& cell : order) {
+    for (const QPoint& cell : exports) {
         const ImageRegion region = segmentationCellRegion(
             request.segmentation, request.document->metadata.width,
             request.document->metadata.height, cell.y(), cell.x());
@@ -300,15 +339,15 @@ ExportSizeEstimate LayeredPackageExporter::estimateOutput(const LayeredPackageRe
             return result;
         }
     }
-    const qint64 cells = static_cast<qint64>(order.size());
-    if (!checkedMultiply(cells, layers, &result.bmpFileCount)) {
+    const qint64 uniquePatterns = exports.size();
+    if (!checkedMultiply(uniquePatterns, layers, &result.bmpFileCount)) {
         result.error = QStringLiteral("BMP 文件数量超过程序可表示范围。");
         return result;
     }
     result.estimatedBmpBytes = bytes;
     qint64 jobEstimate = 0;
     qint64 auxiliary = request.writeReport ? kReportEstimate : 0;
-    if (!checkedMultiply(cells, 220, &jobEstimate) ||
+    if (!checkedMultiply(static_cast<qint64>(order.size()), 220, &jobEstimate) ||
         !checkedAdd(auxiliary, jobEstimate, &auxiliary) ||
         !checkedAdd(bytes, auxiliary, &result.estimatedTotalBytes)) {
         result.error = QStringLiteral("预计输出尺寸超过程序可表示范围。");
@@ -335,7 +374,8 @@ ExportPreflightResult LayeredPackageExporter::inspect(
     result.blockingError = estimate.error;
     if (!estimate.valid) return result;
     const int layers = layerCount(request.options);
-    const qint64 cells = qint64(request.segmentation.rows) * request.segmentation.columns;
+    const qint64 cells = hasGrouping(request) ? request.grouping.groups.size()
+                                              : qint64(request.segmentation.rows) * request.segmentation.columns;
     result.firstOutput = QStringLiteral("0/1.bmp");
     result.lastOutput = QStringLiteral("%1/%2.bmp").arg(cells - 1).arg(layers);
     result.targetFingerprint = targetFingerprint(request, &result.conflictCount,
@@ -411,8 +451,9 @@ bool LayeredPackageExporter::exportPackage(
     const auto order = SplitExporter::traversal(request.segmentation.rows,
                                                  request.segmentation.columns,
                                                  request.traversalMode);
-    const qint64 total = static_cast<qint64>(order.size()) + 2;
-    for (qsizetype index = 0; index < static_cast<qsizetype>(order.size()); ++index) {
+    const QVector<QPoint> exports = representativeCells(request, order);
+    const qint64 total = static_cast<qint64>(exports.size()) + 2;
+    for (qsizetype index = 0; index < exports.size(); ++index) {
         if (token->isCancelled()) { cleanup(); return false; }
         const QString directoryName = QString::number(index);
         if (!staged.mkdir(directoryName)) {
@@ -420,7 +461,7 @@ bool LayeredPackageExporter::exportPackage(
             if (error) *error = QStringLiteral("无法创建分块目录：%1").arg(directoryName);
             return false;
         }
-        const QPoint cell = order[static_cast<size_t>(index)];
+        const QPoint cell = exports[index];
         const ImageRegion region = segmentationCellRegion(
             request.segmentation, request.document->metadata.width,
             request.document->metadata.height, cell.y(), cell.x());
@@ -435,12 +476,12 @@ bool LayeredPackageExporter::exportPackage(
                 *error = QStringLiteral("分块 %1 导出失败：%2").arg(index).arg(sliceError);
             return false;
         }
-        if (progress) progress({QStringLiteral("导出分块 %1/%2").arg(index + 1).arg(order.size()),
+        if (progress) progress({QStringLiteral("导出图元组 %1/%2").arg(index + 1).arg(exports.size()),
                                 index + 1, total});
     }
     if (!writeJobJson(staged.filePath(QStringLiteral("job.json")), request, order, token,
                       error)) { cleanup(); return false; }
-    if (progress) progress({QStringLiteral("生成 job.json"), qint64(order.size()) + 1, total});
+    if (progress) progress({QStringLiteral("生成 job.json"), qint64(exports.size()) + 1, total});
     if (request.writeReport &&
         !writeReport(staged.filePath(QString::fromLatin1(kReportName)), request, layers,
                      estimate.estimatedBmpBytes, conflicts, error)) {
@@ -476,7 +517,7 @@ bool LayeredPackageExporter::exportPackage(
         }
         backedUp << name;
     }
-    for (qsizetype index = 0; index < static_cast<qsizetype>(order.size()); ++index) {
+    for (qsizetype index = 0; index < exports.size(); ++index) {
         const QString name = QString::number(index);
         if (token->isCancelled() || !QDir().rename(staged.filePath(name), output.filePath(name))) {
             if (error && error->isEmpty()) *error = QStringLiteral("无法提交分块目录：%1").arg(name);

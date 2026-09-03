@@ -1,6 +1,7 @@
 #pragma once
 
 #include "domain/Models.h"
+#include "imaging/ElementGrouping.h"
 #include <QCache>
 #include <QElapsedTimer>
 #include <QHash>
@@ -29,6 +30,8 @@ public:
     void setDocument(const ImageDocumentPtr& document);
     void setSegmentation(const SegmentationResult& segmentation);
     void clearSegmentation();
+    void setElementGrouping(const ElementGroupingResult& grouping);
+    void clearElementGrouping();
     void setTraversalMode(TraversalMode mode);
     void setTraversalPathVisible(bool visible);
     void setSelectedCell(int row, int column, bool centerOnSelection = false);
@@ -100,6 +103,7 @@ private:
 
     ImageDocumentPtr document_;
     SegmentationResult segmentation_;
+    ElementGroupingResult grouping_;
     bool showGrid_ = false;
     bool showTraversalPath_ = false;
     TraversalMode traversalMode_ = TraversalMode::SnakeZ;

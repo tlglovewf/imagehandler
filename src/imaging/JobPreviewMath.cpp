@@ -96,8 +96,11 @@ JobGuideGeometry JobPreviewMath::guideGeometry(const JobDocument& document,
                                                const JobCoordinate& floatingOrigin) {
     JobGuideGeometry geometry;
     if (!document.bounds.valid || document.points.empty()) return geometry;
-    const auto zero = std::find_if(document.points.begin(), document.points.end(),
-                                   [](const JobPoint& point) { return point.placeId == 0; });
+    auto zero = std::find_if(document.points.begin(), document.points.end(),
+                             [](const JobPoint& point) { return point.placementId == 0; });
+    if (zero == document.points.end())
+        zero = std::find_if(document.points.begin(), document.points.end(),
+                            [](const JobPoint& point) { return point.placeId == 0; });
     if (zero == document.points.end()) return geometry;
     geometry.pointZero = zero->position.relativeTo(floatingOrigin);
     geometry.minimum = document.bounds.minimum.relativeTo(floatingOrigin);

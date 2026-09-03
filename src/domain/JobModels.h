@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QMetaType>
+#include <QColor>
 #include <QPoint>
 #include <QString>
 #include <QVector3D>
@@ -34,6 +35,10 @@ struct JobPoint {
     qint64 placeId = -1;
     JobCoordinate position;
     qint64 commandIndex = -1;
+    // Unique point instance used by picking and image/Job linkage. placeId is
+    // the referenced model and may legitimately repeat at different positions.
+    qint64 placementId = -1;
+    QColor groupColor;
 };
 
 struct JobBounds {
@@ -71,9 +76,9 @@ struct JobDocument {
     std::vector<JobPoint> points;
     JobBounds bounds;
     std::shared_ptr<JobSpatialIndex> spatialIndex;
-    // Prefix sums in place.id order; entry 0 is zero and entry N+1 includes id N.
+    // Prefix sums in placement order; entry 0 is zero and entry N+1 includes point N.
     std::vector<JobCoordinate> idPrefixSums;
-    // Indexed by place.id. Empty for manually imported files.
+    // Indexed by placementId. Empty for manually imported files.
     std::vector<QPoint> linkedCells;
 
     [[nodiscard]] bool isLinked() const noexcept {

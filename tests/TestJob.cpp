@@ -83,7 +83,6 @@ void TestJob::validatesStructureAndIds() {
         {QByteArrayLiteral(R"({"models":[{"label":"0","path":"0"}],"commands":[{"command":"move","by":[0,0,0]},{"command":"place","id":0}]})"), QStringLiteral("不支持的命令")},
         {QByteArrayLiteral(R"({"models":[{"label":"0","path":"0"}],"commands":[{"command":"relmove","by":[0,0]},{"command":"place","id":0}]})"), QStringLiteral("坐标")},
         {QByteArrayLiteral(R"({"models":[{"label":"0","path":"0"}],"commands":[{"command":"relmove","by":[0,0,0]},{"command":"place","id":2}]})"), QStringLiteral("超出模型范围")},
-        {QByteArrayLiteral(R"({"models":[{"label":"0","path":"0"},{"label":"1","path":"1"}],"commands":[{"command":"relmove","by":[0,0,0]},{"command":"place","id":0},{"command":"relmove","by":[1,0,0]},{"command":"place","id":0}]})"), QStringLiteral("重复")},
         {QByteArrayLiteral(R"({"models":[{"label":"0","path":"0"}],"commands":[)"), QStringLiteral("字节")}
     };
     for (int i = 0; i < cases.size(); ++i) {
@@ -92,6 +91,17 @@ void TestJob::validatesStructureAndIds() {
         QVERIFY(!JobFileLoader::load(path, std::make_shared<CancellationToken>(), {}, &error));
         QVERIFY2(error.contains(cases[i].expected), qPrintable(error));
     }
+    const QByteArray reused = QByteArrayLiteral(R"({"models":[{"label":"0","path":"0"}],"commands":[{"command":"relmove","by":[0,0,0]},{"command":"place","id":0},{"command":"relmove","by":[1,0,0]},{"command":"place","id":0}]})");
+    const QString reusedPath = writeJob(directory, QStringLiteral("reused.json"), reused);
+    QString reusedError;
+    const auto reusedDocument = JobFileLoader::load(
+        reusedPath, std::make_shared<CancellationToken>(), {}, &reusedError);
+    QVERIFY2(reusedDocument, qPrintable(reusedError));
+    QCOMPARE(reusedDocument->models.size(), size_t(1));
+    QCOMPARE(reusedDocument->points.size(), size_t(2));
+    QCOMPARE(reusedDocument->points[0].placeId, qint64(0));
+    QCOMPARE(reusedDocument->points[1].placeId, qint64(0));
+    QCOMPARE(reusedDocument->points[1].placementId, qint64(1));
 }
 
 void TestJob::supportsEscapesAndUnknownFields() {

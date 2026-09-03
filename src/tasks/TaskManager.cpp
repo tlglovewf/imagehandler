@@ -1,6 +1,7 @@
 #include "tasks/TaskManager.h"
 #include "domain/JobModels.h"
 #include "domain/PointCloudModels.h"
+#include "imaging/ElementGrouping.h"
 #include "imaging/MosaicBuilder.h"
 #include "io/ExportTypes.h"
 
@@ -28,6 +29,7 @@ TaskManager::TaskManager(QObject* parent) : QObject(parent) {
     qRegisterMetaType<SegmentationResult>();
     qRegisterMetaType<MosaicBuildResult>();
     qRegisterMetaType<JobDocumentPtr>();
+    qRegisterMetaType<ElementGroupingResult>();
     qRegisterMetaType<PointCloudDocumentPtr>();
     qRegisterMetaType<ExportPreflightResult>();
 }

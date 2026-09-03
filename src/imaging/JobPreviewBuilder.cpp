@@ -12,7 +12,8 @@ JobDocumentPtr buildDocument(const ImageMetadata& metadata,
                              TraversalMode traversalMode,
                              const CancellationTokenPtr& token,
                              const JobPreviewBuilder::Progress& progress, QString* error,
-                             const std::function<QPointF(const QPoint&)>& positionFor) {
+                             const std::function<QPointF(const QPoint&)>& positionFor,
+                             const ElementGroupingResult* grouping) {
     if (error) error->clear();
     if (!token || metadata.width <= 0 || metadata.height <= 0 ||
         segmentation.rows <= 0 || segmentation.columns <= 0 ||
@@ -34,17 +35,24 @@ JobDocumentPtr buildDocument(const ImageMetadata& metadata,
     try {
         auto document = std::make_shared<JobDocument>();
         document->source = JobDocumentSource::GeneratedPreview;
-        document->models.reserve(static_cast<size_t>(count));
+        const bool grouped = grouping && grouping->valid &&
+            grouping->rows == segmentation.rows && grouping->columns == segmentation.columns;
+        const qint64 modelCount = grouped ? grouping->groups.size() : count;
+        document->models.reserve(static_cast<size_t>(modelCount));
         document->points.reserve(static_cast<size_t>(count));
         document->linkedCells.resize(static_cast<size_t>(count));
+        for (qint64 model = 0; model < modelCount; ++model)
+            document->models.push_back({model, QString::number(model), QString::number(model)});
         qint64 lastPermille = -1;
         for (qint64 i = 0; i < count; ++i) {
             if (token->isCancelled()) return {};
             const QPoint cell = order[static_cast<size_t>(i)];
             const QPointF position = positionFor(cell);
             const JobCoordinate xyz{position.x(), position.y(), 0.0};
-            document->models.push_back({i, QString::number(i), QString::number(i)});
-            document->points.push_back({i, xyz, i * 2 + 1});
+            const int groupId = grouped ? grouping->groupIdAt(cell.y(), cell.x())
+                                        : static_cast<int>(i);
+            const QColor color = grouped ? grouping->colorAt(cell.y(), cell.x()) : QColor{};
+            document->points.push_back({groupId, xyz, i * 2 + 1, i, color});
             document->linkedCells[static_cast<size_t>(i)] = cell;
             document->bounds.include(xyz);
             if (progress) {
@@ -75,7 +83,8 @@ JobDocumentPtr JobPreviewBuilder::build(const ImageMetadata& metadata,
                                         TraversalMode traversalMode,
                                         const PrintExportOptions& options,
                                         const CancellationTokenPtr& token,
-                                        const Progress& progress, QString* error) {
+                                        const Progress& progress, QString* error,
+                                        const ElementGroupingResult* grouping) {
     if (options.canvasX <= 0 || options.canvasY <= 0) {
         if (error) *error = QStringLiteral("无法从当前分割参数生成 Job 预览。");
         return {};
@@ -83,7 +92,7 @@ JobDocumentPtr JobPreviewBuilder::build(const ImageMetadata& metadata,
     return buildDocument(metadata, segmentation, traversalMode, token, progress, error,
         [&](const QPoint& cell) {
             return SplitExporter::canvasPosition(metadata, segmentation, cell, options);
-        });
+        }, grouping);
 }
 
 JobDocumentPtr JobPreviewBuilder::build(const ImageMetadata& metadata,
@@ -91,7 +100,8 @@ JobDocumentPtr JobPreviewBuilder::build(const ImageMetadata& metadata,
                                         TraversalMode traversalMode,
                                         const JobPlacementOptions& options,
                                         const CancellationTokenPtr& token,
-                                        const Progress& progress, QString* error) {
+                                        const Progress& progress, QString* error,
+                                        const ElementGroupingResult* grouping) {
     if (!std::isfinite(options.pixelScale) || options.pixelScale <= 0.0) {
         if (error) *error = QStringLiteral("无法从当前 pixel2phy 生成 Job 预览。");
         return {};
@@ -99,5 +109,5 @@ JobDocumentPtr JobPreviewBuilder::build(const ImageMetadata& metadata,
     return buildDocument(metadata, segmentation, traversalMode, token, progress, error,
         [&](const QPoint& cell) {
             return SplitExporter::physicalPosition(segmentation, cell, options);
-        });
+        }, grouping);
 }
