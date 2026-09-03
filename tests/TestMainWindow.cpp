@@ -31,6 +31,7 @@
 #include <QSettings>
 #include <QTemporaryDir>
 #include <QTabBar>
+#include <QTabWidget>
 #include <QTimer>
 #include <QWindow>
 #include <QtTest>
@@ -397,14 +398,38 @@ void TestMainWindow::segmentationStatisticsUpdates() {
     auto* reverse=dialog.findChild<QCheckBox*>(QStringLiteral("layeredExportReverseY"));
     auto* summary=dialog.findChild<QLabel*>(QStringLiteral("layeredExportSummary"));
     auto* start=dialog.findChild<QPushButton*>(QStringLiteral("layeredExportStart"));
+    auto* tabs=dialog.findChild<QTabWidget*>(QStringLiteral("layeredExportTabs"));
+    auto* attach=dialog.findChild<QCheckBox*>(QStringLiteral("ck_attach"));
+    auto* canvasWidth=dialog.findChild<QSpinBox*>(QStringLiteral("o_w"));
+    auto* canvasHeight=dialog.findChild<QSpinBox*>(QStringLiteral("o_h"));
+    auto* rotation=dialog.findChild<QDoubleSpinBox*>(QStringLiteral("rot_ang"));
+    auto* scaleX=dialog.findChild<QDoubleSpinBox*>(QStringLiteral("scale_x"));
+    auto* scaleY=dialog.findChild<QDoubleSpinBox*>(QStringLiteral("scale_y"));
+    auto* sampling=dialog.findChild<QComboBox*>(QStringLiteral("layeredExportTransformSampling"));
+    auto* previewElement=dialog.findChild<QLabel*>(QStringLiteral("layeredExportPreviewElement"));
     QVERIFY(layer);QVERIFY(maximum);QVERIFY(strategy);QVERIFY(width);QVERIFY(height);
     QVERIFY(invert);QVERIFY(reverse);QVERIFY(summary);QVERIFY(start);
+    QVERIFY(tabs);QVERIFY(attach);QVERIFY(canvasWidth);QVERIFY(canvasHeight);QVERIFY(rotation);
+    QVERIFY(scaleX);QVERIFY(scaleY);QVERIFY(sampling);QVERIFY(previewElement);
+    QCOMPARE(tabs->count(),2);QCOMPARE(tabs->tabText(0),QStringLiteral("导出设置"));
+    QCOMPARE(tabs->tabText(1),QStringLiteral("导出预览"));
+    QVERIFY(attach->isChecked());QCOMPARE(canvasWidth->value(),1920);QCOMPARE(canvasHeight->value(),1080);
+    QCOMPARE(rotation->value(),0.0);QCOMPARE(scaleX->value(),1.0);QCOMPARE(scaleY->value(),1.0);
+    QCOMPARE(sampling->currentIndex(),0);QVERIFY(previewElement->text().contains(QStringLiteral("预览块：0")));
     QCOMPARE(layer->value(),0.1);QCOMPARE(maximum->value(),1.0);
     QCOMPARE(width->value(),4);QCOMPARE(height->value(),2);QVERIFY(!invert->isChecked());
+    attach->setChecked(false);QVERIFY(!canvasWidth->isEnabled());QVERIFY(!rotation->isEnabled());
+    attach->setChecked(true);QVERIFY(canvasWidth->isEnabled());QVERIFY(rotation->isEnabled());
+    canvasWidth->setValue(3);QVERIFY(!start->isEnabled());
+    QVERIFY(summary->text().contains(QStringLiteral("超过导出底图")));
+    canvasWidth->setValue(1920);QVERIFY(start->isEnabled());
     QVERIFY(reverse->isChecked());QVERIFY(summary->text().contains(QStringLiteral("10 层")));
     maximum->setValue(1.05);QVERIFY(summary->text().contains(QStringLiteral("11 层")));
     strategy->setCurrentIndex(1);QVERIFY(!start->isEnabled());
     QVERIFY(summary->text().contains(QStringLiteral("整除")));
+    dialog.configure(document,grid,TraversalMode::SnakeZ,0.25,1.0,true,true,
+                     directory.path(),QPoint(1,1));
+    QVERIFY(previewElement->text().contains(QStringLiteral("预览块：2")));
 }
 
 void TestMainWindow::maskSliceWindowDefaultsAndReuse() {

@@ -1,8 +1,7 @@
 #include "io/LayeredPackageExporter.h"
 
 #include "domain/StorageSizeFormatter.h"
-#include "imaging/ImageLoader.h"
-#include "io/MaskSliceExporter.h"
+#include "imaging/LayeredMaskProcessor.h"
 #include "io/SplitExporter.h"
 
 #include <QCoreApplication>
@@ -39,17 +38,6 @@ bool checkedMultiply(qint64 left, qint64 right, qint64* result) {
         (left != 0 && right > std::numeric_limits<qint64>::max() / left)) return false;
     *result = left * right;
     return true;
-}
-
-QSize outputSizeFor(const LayeredPackageRequest& request, const ImageRegion& region) {
-    const double scaleX = double(request.options.outputWidth) /
-                          request.segmentation.settings.cellWidth;
-    const double scaleY = double(request.options.outputHeight) /
-                          request.segmentation.settings.cellHeight;
-    return {static_cast<int>(std::clamp<qint64>(
-                qRound64(region.width * scaleX), 1, INT_MAX)),
-            static_cast<int>(std::clamp<qint64>(
-                qRound64(region.height * scaleY), 1, INT_MAX))};
 }
 
 QString jsonNumber(double value) {
@@ -120,6 +108,8 @@ bool writeReport(const QString& path, const LayeredPackageRequest& request, int 
                  qint64 estimatedBytes, qint64 overwritten, QString* error) {
     const auto strategy = request.options.layerCountStrategy == LayerCountStrategy::RoundUp
         ? QStringLiteral("round_up") : QStringLiteral("require_exact");
+    const auto sampling = request.options.transformSampling == BinaryTransformSampling::Nearest
+        ? QStringLiteral("nearest") : QStringLiteral("smooth_threshold");
     const qint64 cells = qint64(request.segmentation.rows) * request.segmentation.columns;
     QJsonObject root{
         {QStringLiteral("schemaVersion"), 2},
@@ -146,6 +136,14 @@ bool writeReport(const QString& path, const LayeredPackageRequest& request, int 
             {QStringLiteral("bmpCount"), cells * layers},
             {QStringLiteral("standardWidth"), request.options.outputWidth},
             {QStringLiteral("standardHeight"), request.options.outputHeight},
+            {QStringLiteral("residualAlignment"), QStringLiteral("top_left")},
+            {QStringLiteral("attachToCanvas"), request.options.attachToCanvas},
+            {QStringLiteral("canvasWidth"), request.options.canvasWidth},
+            {QStringLiteral("canvasHeight"), request.options.canvasHeight},
+            {QStringLiteral("rotationDegrees"), request.options.rotationDegrees},
+            {QStringLiteral("scaleX"), request.options.scaleX},
+            {QStringLiteral("scaleY"), request.options.scaleY},
+            {QStringLiteral("transformSampling"), sampling},
             {QStringLiteral("bitsPerPixel"), 1},
             {QStringLiteral("namingRule"), QStringLiteral("{placeId}/{layer}.bmp")},
             {QStringLiteral("estimatedBmpBytes"), estimatedBytes},
@@ -284,8 +282,16 @@ ExportSizeEstimate LayeredPackageExporter::estimateOutput(const LayeredPackageRe
             result.error = QStringLiteral("分割网格与当前图像尺寸不匹配。");
             return result;
         }
-        const QSize size = outputSizeFor(request, region);
-        const quint64 one = MaskSliceExporter::bmpFileSize(size.width(), size.height());
+        const LayeredMaskRequest mask{request.document, region,
+            {request.segmentation.settings.cellWidth, request.segmentation.settings.cellHeight},
+            request.options, layers};
+        QString maskError;
+        if (!LayeredMaskProcessor::validate(mask, &maskError)) {
+            result.error = maskError;
+            return result;
+        }
+        const quint64 one = LayeredMaskProcessor::bmpFileSize(
+            LayeredMaskProcessor::outputSize(request.options));
         qint64 block = 0;
         if (one == 0 || one > quint64(std::numeric_limits<qint64>::max()) ||
             !checkedMultiply(static_cast<qint64>(one), layers, &block) ||
@@ -418,15 +424,12 @@ bool LayeredPackageExporter::exportPackage(
         const ImageRegion region = segmentationCellRegion(
             request.segmentation, request.document->metadata.width,
             request.document->metadata.height, cell.y(), cell.x());
-        const QSize size = outputSizeFor(request, region);
-        PointCloudSettings mapping{request.options.pixelScale, request.options.maximumHeight,
-                                   request.options.invertHeight};
-        MaskSliceRequest slice{request.document, region, mapping,
-            {request.options.layerHeight, size.width(), size.height(),
-             request.options.invertMask}};
+        const LayeredMaskRequest slice{request.document, region,
+            {request.segmentation.settings.cellWidth, request.segmentation.settings.cellHeight},
+            request.options, layers};
         QString sliceError;
-        if (!MaskSliceExporter::exportAll(staged.filePath(directoryName), slice, layers, false,
-                                          token, {}, &sliceError)) {
+        if (!LayeredMaskProcessor::exportAll(staged.filePath(directoryName), slice, token, {},
+                                             &sliceError)) {
             cleanup();
             if (!token->isCancelled() && error)
                 *error = QStringLiteral("分块 %1 导出失败：%2").arg(index).arg(sliceError);

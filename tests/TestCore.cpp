@@ -11,6 +11,7 @@
 #include "imaging/MosaicBuilder.h"
 #include "imaging/MaskSliceGenerator.h"
 #include "imaging/MaskStackMeshBuilder.h"
+#include "imaging/LayeredMaskProcessor.h"
 #include "imaging/PatternDetector.h"
 #include "imaging/PointCloudBuilder.h"
 #include "imaging/PointCloudMath.h"
@@ -78,6 +79,7 @@ private Q_SLOTS:
     void printCanvasCoordinates();
     void printPackageExportAndReplacement();
     void layeredPackageUsesPhysicalCoordinatesAndUniformLayers();
+    void layeredMasksPadTransformAndValidate();
     void exportPreflightEstimatesAndSpacePolicy();
     void storageSizeFormatting();
     void exportPreflightConflictsAndPortableReports();
@@ -1188,6 +1190,7 @@ void TestCore::layeredPackageUsesPhysicalCoordinatesAndUniformLayers() {
     const QString output=directory.filePath("package");QVERIFY(QDir().mkpath(output));
     LayeredPackageRequest request{output,document,grid,TraversalMode::SnakeZ,
         {0.5,1.0,0.2,4,2,false,false,true,LayerCountStrategy::RoundUp},true};
+    request.options.attachToCanvas=false;
     const auto estimate=LayeredPackageExporter::estimateOutput(request);
     QVERIFY2(estimate.valid,qPrintable(estimate.error));QCOMPARE(estimate.bmpFileCount,qint64(20));
     const auto preflight=LayeredPackageExporter::inspect(request);
@@ -1201,7 +1204,7 @@ void TestCore::layeredPackageUsesPhysicalCoordinatesAndUniformLayers() {
         const auto first=ImageLoader::load(blockDirectory.filePath("1.bmp"),1210+block,&error);
         QVERIFY2(first,qPrintable(error));QCOMPARE(first->metadata.kind,PixelKind::Binary1);
         QCOMPARE(first->metadata.height,qint64(2));
-        QCOMPARE(first->metadata.width,qint64(block==1||block==2?2:4));
+        QCOMPARE(first->metadata.width,qint64(4));
     }
     const auto padded=ImageLoader::load(QDir(output).filePath("0/5.bmp"),1220,&error);
     QVERIFY2(padded,qPrintable(error));
@@ -1217,8 +1220,12 @@ void TestCore::layeredPackageUsesPhysicalCoordinatesAndUniformLayers() {
     QVERIFY(jobBytes.contains("\"by\": [1.0, 0.0, 0.0]"));
     QVERIFY(jobBytes.contains("\"by\": [1.0, -0.5, 0.0]"));
     QFile report(QDir(output).filePath("export-report.json"));QVERIFY(report.open(QIODevice::ReadOnly));
-    QCOMPARE(QJsonDocument::fromJson(report.readAll()).object().value("mode").toString(),
-             QStringLiteral("layered_package"));
+    const QJsonObject reportObject=QJsonDocument::fromJson(report.readAll()).object();
+    QCOMPARE(reportObject.value("mode").toString(),QStringLiteral("layered_package"));
+    const QJsonObject reportOutput=reportObject.value("output").toObject();
+    QCOMPARE(reportOutput.value("residualAlignment").toString(),QStringLiteral("top_left"));
+    QCOMPARE(reportOutput.value("attachToCanvas").toBool(),false);
+    QCOMPARE(reportOutput.value("transformSampling").toString(),QStringLiteral("nearest"));
 
     const auto replacementPreflight=LayeredPackageExporter::inspect(request);
     QVERIFY(replacementPreflight.valid);QCOMPARE(replacementPreflight.conflictCount,qint64(6));
@@ -1239,6 +1246,93 @@ void TestCore::layeredPackageUsesPhysicalCoordinatesAndUniformLayers() {
     const auto unsafePreflight=LayeredPackageExporter::inspect(request);
     QVERIFY(!unsafePreflight.valid);QVERIFY(unsafePreflight.blockingError.contains(QStringLiteral("不安全")));
 }
+void TestCore::layeredMasksPadTransformAndValidate() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    QImage source(3, 1, QImage::Format_Grayscale8);
+    source.fill(0); source.setPixel(2, 0, 255);
+    const QString path = directory.filePath("residual.bmp");
+    QVERIFY(source.save(path, "BMP"));
+    QString error;
+    const auto document = ImageLoader::load(path, 1301, &error);
+    QVERIFY2(document, qPrintable(error));
+
+    LayeredPackageOptions options{0.5, 1.0, 1.0, 4, 2, false, false, false,
+                                  LayerCountStrategy::RoundUp};
+    options.attachToCanvas = false;
+    LayeredMaskRequest request{document, {2, 0, 1, 1}, {2, 1}, options, 1};
+    QCOMPARE(LayeredMaskProcessor::contentSize(request), QSize(2, 2));
+    QVERIFY2(LayeredMaskProcessor::validate(request, &error), qPrintable(error));
+    const QString plain = directory.filePath("plain"); QVERIFY(QDir().mkpath(plain));
+    QVERIFY2(LayeredMaskProcessor::exportAll(plain, request,
+        std::make_shared<CancellationToken>(), {}, &error), qPrintable(error));
+    const auto plainDocument = ImageLoader::load(QDir(plain).filePath("1.bmp"), 1302, &error);
+    QVERIFY2(plainDocument, qPrintable(error));
+    QCOMPARE(plainDocument->metadata.kind, PixelKind::Binary1);
+    QCOMPARE(plainDocument->metadata.width, qint64(4));
+    QCOMPARE(plainDocument->metadata.height, qint64(2));
+    const QImage plainPixels = VipsSupport::renderRegion(plainDocument, 0, 0, 4, 2, 1.0, &error);
+    for (int y = 0; y < 2; ++y) {
+        QCOMPARE(plainPixels.pixelColor(0, y), QColor(Qt::white));
+        QCOMPARE(plainPixels.pixelColor(1, y), QColor(Qt::white));
+        QCOMPARE(plainPixels.pixelColor(2, y), QColor(Qt::black));
+        QCOMPARE(plainPixels.pixelColor(3, y), QColor(Qt::black));
+    }
+
+    request.options.attachToCanvas = true;
+    request.options.canvasWidth = 8; request.options.canvasHeight = 6;
+    const QString attached = directory.filePath("attached"); QVERIFY(QDir().mkpath(attached));
+    QVERIFY2(LayeredMaskProcessor::exportAll(attached, request,
+        std::make_shared<CancellationToken>(), {}, &error), qPrintable(error));
+    const auto attachedDocument = ImageLoader::load(QDir(attached).filePath("1.bmp"), 1303, &error);
+    QVERIFY2(attachedDocument, qPrintable(error));
+    QCOMPARE(attachedDocument->metadata.width, qint64(8));
+    QCOMPARE(attachedDocument->metadata.height, qint64(6));
+    const QImage attachedPixels = VipsSupport::renderRegion(attachedDocument, 0, 0, 8, 6, 1.0, &error);
+    QCOMPARE(attachedPixels.pixelColor(2, 2), QColor(Qt::white));
+    QCOMPARE(attachedPixels.pixelColor(3, 3), QColor(Qt::white));
+    QCOMPARE(attachedPixels.pixelColor(1, 2), QColor(Qt::black));
+    QCOMPARE(attachedPixels.pixelColor(4, 2), QColor(Qt::black));
+
+    const auto grid = PatternDetector::makeManualGrid(
+        document, {3, 1, 128, ForegroundPolarity::Dark});
+    const QString packagePath = directory.filePath("package-attached");
+    QVERIFY(QDir().mkpath(packagePath));
+    LayeredPackageRequest package{packagePath, document, grid, TraversalMode::SnakeZ,
+                                  request.options, true};
+    const auto estimate = LayeredPackageExporter::estimateOutput(package);
+    QVERIFY2(estimate.valid, qPrintable(estimate.error));
+    QCOMPARE(estimate.estimatedBmpBytes,
+             qint64(LayeredMaskProcessor::bmpFileSize(QSize(8, 6))));
+    const auto preflight = LayeredPackageExporter::inspect(package);
+    QVERIFY2(preflight.valid, qPrintable(preflight.blockingError));
+    QVERIFY2(LayeredPackageExporter::exportPackage(package,
+        {false, true, preflight.targetFingerprint}, std::make_shared<CancellationToken>(),
+        {}, &error), qPrintable(error));
+    const auto packageMask = ImageLoader::load(
+        QDir(packagePath).filePath("0/1.bmp"), 1304, &error);
+    QVERIFY2(packageMask, qPrintable(error));
+    QCOMPARE(packageMask->metadata.width, qint64(8));
+    QCOMPARE(packageMask->metadata.height, qint64(6));
+    QFile report(QDir(packagePath).filePath("export-report.json"));
+    QVERIFY(report.open(QIODevice::ReadOnly));
+    const QJsonObject output = QJsonDocument::fromJson(report.readAll()).object()
+                                   .value("output").toObject();
+    QCOMPARE(output.value("attachToCanvas").toBool(), true);
+    QCOMPARE(output.value("canvasWidth").toInt(), 8);
+    QCOMPARE(output.value("canvasHeight").toInt(), 6);
+
+    request.options.rotationDegrees = 90.0;
+    request.options.transformSampling = BinaryTransformSampling::SmoothThreshold;
+    const auto preview = LayeredMaskProcessor::preview(
+        request, std::make_shared<CancellationToken>(), {}, &error);
+    QVERIFY2(preview.stackPreview, qPrintable(error));
+    QCOMPARE(preview.outputSize, QSize(8, 6));
+    QCOMPARE(preview.thumbnails.size(), 1);
+    request.options.scaleY = 5.0;
+    QVERIFY(!LayeredMaskProcessor::validate(request, &error));
+    QVERIFY(error.contains(QStringLiteral("超过导出底图")));
+}
+
 void TestCore::realPatternImageFromEnvironment() {
     const QString path=qEnvironmentVariable("IMAGE_HANDLER_REAL_TEST_IMAGE");
     if(path.isEmpty())QSKIP("IMAGE_HANDLER_REAL_TEST_IMAGE is not set");

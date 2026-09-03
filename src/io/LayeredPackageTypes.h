@@ -7,6 +7,7 @@
 #include <QString>
 
 enum class LayerCountStrategy { RoundUp, RequireExact };
+enum class BinaryTransformSampling { Nearest, SmoothThreshold };
 
 struct JobPlacementOptions {
     double pixelScale = 0.25;
@@ -23,6 +24,13 @@ struct LayeredPackageOptions {
     bool invertMask = false;
     bool reverseY = false;
     LayerCountStrategy layerCountStrategy = LayerCountStrategy::RoundUp;
+    bool attachToCanvas = true;
+    int canvasWidth = 1920;
+    int canvasHeight = 1080;
+    double rotationDegrees = 0.0;
+    double scaleX = 1.0;
+    double scaleY = 1.0;
+    BinaryTransformSampling transformSampling = BinaryTransformSampling::Nearest;
 };
 
 struct LayeredPackageRequest {
@@ -35,4 +43,5 @@ struct LayeredPackageRequest {
 };
 
 Q_DECLARE_METATYPE(LayerCountStrategy)
+Q_DECLARE_METATYPE(BinaryTransformSampling)
 Q_DECLARE_METATYPE(LayeredPackageRequest)

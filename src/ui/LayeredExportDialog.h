@@ -2,6 +2,7 @@
 
 #include "io/LayeredPackageTypes.h"
 #include "io/ExportTypes.h"
+#include "imaging/LayeredMaskProcessor.h"
 
 #include <QDialog>
 
@@ -13,7 +14,11 @@ class QLabel;
 class QProgressBar;
 class QPushButton;
 class QSpinBox;
+class QTabWidget;
+class QListWidget;
+class QTimer;
 class TaskManager;
+class MaskStackWidget;
 
 class LayeredExportDialog final : public QDialog {
     Q_OBJECT
@@ -24,7 +29,8 @@ public:
                    const SegmentationResult& segmentation,
                    TraversalMode traversalMode, double pixelScale,
                    double maximumHeight, bool invertHeight,
-                   bool reverseY, const QString& initialDirectory);
+                   bool reverseY, const QString& initialDirectory,
+                   const QPoint& activeCell = QPoint(-1, -1));
     [[nodiscard]] bool reverseY() const;
     [[nodiscard]] QString outputDirectory() const;
     void setOutputDirectory(const QString& directory);
@@ -45,8 +51,17 @@ private:
     [[nodiscard]] LayeredPackageRequest currentRequest() const;
     void setProgress(const TaskProgress& progress);
     void setBusy(bool busy);
+    void schedulePreview();
+    void startPreview();
+    void applyPreview(const LayeredMaskPreview& preview);
+    void updatePreviewLayer(int row);
+    void updatePreviewZScale();
+    [[nodiscard]] LayeredMaskRequest currentPreviewRequest() const;
 
     TaskManager* tasks_ = nullptr;
+    TaskManager* previewTasks_ = nullptr;
+    QTimer* previewTimer_ = nullptr;
+    QTabWidget* tabs_ = nullptr;
     QPushButton* directoryButton_ = nullptr;
     QLabel* directoryLabel_ = nullptr;
     QDoubleSpinBox* layerHeight_ = nullptr;
@@ -57,6 +72,13 @@ private:
     QCheckBox* lockAspect_ = nullptr;
     QCheckBox* invertMask_ = nullptr;
     QCheckBox* reverseY_ = nullptr;
+    QCheckBox* attachToCanvas_ = nullptr;
+    QSpinBox* canvasWidth_ = nullptr;
+    QSpinBox* canvasHeight_ = nullptr;
+    QDoubleSpinBox* rotationDegrees_ = nullptr;
+    QDoubleSpinBox* scaleX_ = nullptr;
+    QDoubleSpinBox* scaleY_ = nullptr;
+    QComboBox* transformSampling_ = nullptr;
     QLabel* summaryLabel_ = nullptr;
     QLabel* statusLabel_ = nullptr;
     QLabel* percentLabel_ = nullptr;
@@ -64,6 +86,13 @@ private:
     QPushButton* cancelTaskButton_ = nullptr;
     QPushButton* exportButton_ = nullptr;
     QPushButton* closeButton_ = nullptr;
+    QLabel* previewElementLabel_ = nullptr;
+    QLabel* previewStatusLabel_ = nullptr;
+    QListWidget* previewLayers_ = nullptr;
+    MaskStackWidget* stackView_ = nullptr;
+    QComboBox* stackMode_ = nullptr;
+    QCheckBox* automaticZScale_ = nullptr;
+    QDoubleSpinBox* stackZScale_ = nullptr;
     ImageDocumentPtr document_;
     SegmentationResult segmentation_;
     TraversalMode traversalMode_ = TraversalMode::SnakeZ;
@@ -72,4 +101,7 @@ private:
     QString directory_;
     Action action_ = Action::None;
     bool updatingDimensions_ = false;
+    QPoint previewCell_{-1, -1};
+    quint64 previewRevision_ = 0;
+    bool previewPending_ = false;
 };

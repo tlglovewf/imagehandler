@@ -36,6 +36,7 @@ add_library(image_handler_core
     src/imaging/PointCloudBuilder.h src/imaging/PointCloudBuilder.cpp
     src/imaging/PointCloudMath.h src/imaging/PointCloudMath.cpp
     src/imaging/MaskSliceGenerator.h src/imaging/MaskSliceGenerator.cpp
+    src/imaging/LayeredMaskProcessor.h src/imaging/LayeredMaskProcessor.cpp
     src/imaging/MaskStackMeshBuilder.h src/imaging/MaskStackMeshBuilder.cpp
     src/io/DirectoryScanner.h src/io/DirectoryScanner.cpp
     src/io/BmpFormat.h
