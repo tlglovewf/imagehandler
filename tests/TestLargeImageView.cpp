@@ -18,6 +18,7 @@ private Q_SLOTS:
     void cellSelectionAndTraversalPath();
     void cellMultiSelectionAndSliceShortcut();
     void cellBoxSelectionWithW();
+    void groupedCellsShowStableAdaptiveGroupNumbers();
     void gray16PixelProbePreservesRawValue();
     void fixedGrayPointsPreserveRawValuesAndCanBeDeleted();
 };
@@ -220,6 +221,51 @@ void TestLargeImageView::cellBoxSelectionWithW() {
     QTest::mouseRelease(&view,Qt::LeftButton,Qt::NoModifier,QPoint(60,60));
     QTest::keyRelease(&view,Qt::Key_W);
     QCOMPARE(view.selectedCells(),QVector<QPoint>({QPoint(0,0)}));
+}
+
+void TestLargeImageView::groupedCellsShowStableAdaptiveGroupNumbers() {
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QImage source(200,100,QImage::Format_Grayscale8);source.fill(240);
+    const QString path=directory.filePath("group-labels.bmp");QVERIFY(source.save(path,"BMP"));
+    QString error;const auto document=ImageLoader::load(path,118,&error);QVERIFY2(document,qPrintable(error));
+    LargeImageView view;view.resize(420,240);view.show();view.setDocument(document);
+    SegmentationResult grid;grid.settings={100,100,128,ForegroundPolarity::Dark};grid.rows=1;grid.columns=2;
+    view.setSegmentation(grid);
+    ElementGroupingResult grouping;grouping.documentGeneration=document->generation;grouping.settings=grid.settings;
+    grouping.rows=1;grouping.columns=2;grouping.groupByCell={0,0};grouping.valid=true;
+    const QColor sharedColor(40,130,220);
+    grouping.groups={{0,QPoint(0,0),{QPoint(0,0),QPoint(1,0)},sharedColor}};
+    view.setElementGrouping(grouping);
+
+    QTRY_VERIFY_WITH_TIMEOUT(view.grab().toImage().pixelColor(view.rect().center()).red()>100,3000);
+    const QImage sameGroup=view.grab().toImage();
+    const QRect firstBadge(88,88,44,44),secondBadge(288,88,44,44);
+    QCOMPARE(sameGroup.copy(firstBadge),sameGroup.copy(secondBadge));
+
+    grouping.groupByCell={0,1};
+    grouping.groups={{0,QPoint(0,0),{QPoint(0,0)},sharedColor},
+                     {1,QPoint(1,0),{QPoint(1,0)},sharedColor}};
+    view.setElementGrouping(grouping);
+    const QImage differentGroups=view.grab().toImage();
+    QVERIFY(differentGroups.copy(firstBadge)!=differentGroups.copy(secondBadge));
+
+    view.setTraversalMode(TraversalMode::ClockwiseSpiral);
+    QCOMPARE(view.grab().toImage().copy(firstBadge),differentGroups.copy(firstBadge));
+    QCOMPARE(view.grab().toImage().copy(secondBadge),differentGroups.copy(secondBadge));
+
+    view.clearElementGrouping();
+    const QImage cleared=view.grab().toImage();
+    QVERIFY(cleared.copy(firstBadge)!=differentGroups.copy(firstBadge));
+
+    grid.settings.cellWidth=10;grid.columns=20;view.setSegmentation(grid);
+    grouping.settings=grid.settings;grouping.columns=20;grouping.groupByCell.fill(0,20);
+    grouping.groups={{0,QPoint(0,0),{},sharedColor}};
+    for(int column=0;column<20;++column)grouping.groups[0].cells.push_back(QPoint(column,0));
+    view.setElementGrouping(grouping);
+    const QImage compact=view.grab().toImage();
+    const QColor compactCenter=compact.pixelColor(20,120);
+    for(int y=112;y<=128;++y)for(int x=15;x<=25;++x)
+        QCOMPARE(compact.pixelColor(x,y),compactCenter);
 }
 
 void TestLargeImageView::gray16PixelProbePreservesRawValue() {

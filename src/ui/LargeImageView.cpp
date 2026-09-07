@@ -6,6 +6,7 @@
 #include <QApplication>
 #include <QFutureWatcher>
 #include <QFocusEvent>
+#include <QFontMetricsF>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
@@ -18,6 +19,7 @@
 
 namespace {
 constexpr int kTilePixels = 256;
+constexpr double kMinimumGroupLabelCellSize = 24.0;
 
 std::optional<quint32> grayValue(const QImage& image, int x, int y, PixelKind kind) {
     if (image.isNull() || x < 0 || y < 0 || x >= image.width() || y >= image.height())
@@ -223,13 +225,14 @@ void LargeImageView::paintEvent(QPaintEvent*) {
         // Fixed Rect2D cells tile continuously from image coordinate (0,0).
         const double minimumSpacing = std::min(pitchX, pitchY);
         const int alpha = minimumSpacing >= 16.0 ? 190 : minimumSpacing >= 8.0 ? 115 : 70;
-        if (grouping_.matches(document_, segmentation_) && minimumSpacing >= 2.0) {
-            const int firstColumn=std::max(0,int(std::floor(leftImage/segmentation_.settings.cellWidth)));
-            const int lastColumn=std::min(segmentation_.columns-1,int(std::floor(std::max(0.0,rightImage-1.0)/segmentation_.settings.cellWidth)));
-            const int firstRow=std::max(0,int(std::floor(topImage/segmentation_.settings.cellHeight)));
-            const int lastRow=std::min(segmentation_.rows-1,int(std::floor(std::max(0.0,bottomImage-1.0)/segmentation_.settings.cellHeight)));
+        const bool hasGrouping = grouping_.matches(document_, segmentation_);
+        const int firstVisibleColumn=std::max(0,int(std::floor(leftImage/segmentation_.settings.cellWidth)));
+        const int lastVisibleColumn=std::min(segmentation_.columns-1,int(std::floor(std::max(0.0,rightImage-1.0)/segmentation_.settings.cellWidth)));
+        const int firstVisibleRow=std::max(0,int(std::floor(topImage/segmentation_.settings.cellHeight)));
+        const int lastVisibleRow=std::min(segmentation_.rows-1,int(std::floor(std::max(0.0,bottomImage-1.0)/segmentation_.settings.cellHeight)));
+        if (hasGrouping && minimumSpacing >= 2.0) {
             p.setPen(Qt::NoPen);
-            for(int r=firstRow;r<=lastRow;++r)for(int c=firstColumn;c<=lastColumn;++c) {
+            for(int r=firstVisibleRow;r<=lastVisibleRow;++r)for(int c=firstVisibleColumn;c<=lastVisibleColumn;++c) {
                 const ImageRegion cell=segmentationCellRegion(
                     segmentation_,document_->metadata.width,document_->metadata.height,r,c);
                 QColor color=grouping_.colorAt(r,c);
@@ -276,6 +279,45 @@ void LargeImageView::paintEvent(QPaintEvent*) {
                 const QPointF nextCenter(baseX+(nextRegion.x+nextRegion.width/2.0)*zoom_,
                                          baseY+(nextRegion.y+nextRegion.height/2.0)*zoom_);
                 p.drawLine(currentCenter,nextCenter);
+            }
+        }
+
+        if (hasGrouping && minimumSpacing >= kMinimumGroupLabelCellSize) {
+            p.setRenderHint(QPainter::TextAntialiasing, true);
+            QFont labelFont=p.font();
+            labelFont.setBold(true);
+            labelFont.setPixelSize(std::clamp(int(std::floor(minimumSpacing*0.30)),10,28));
+            p.setFont(labelFont);
+            const QFontMetricsF metrics(labelFont);
+            QHash<int,QSizeF> badgeSizes;
+            for(int r=firstVisibleRow;r<=lastVisibleRow;++r)for(int c=firstVisibleColumn;c<=lastVisibleColumn;++c) {
+                const int groupId=grouping_.groupIdAt(r,c);
+                if(groupId<0)continue;
+                const ImageRegion cell=segmentationCellRegion(
+                    segmentation_,document_->metadata.width,document_->metadata.height,r,c);
+                if(!cell.isValid())continue;
+                const QRectF cellRect(baseX+cell.x*zoom_,baseY+cell.y*zoom_,
+                                      cell.width*zoom_,cell.height*zoom_);
+                const QString label=QString::number(groupId+1);
+                auto badgeIt=badgeSizes.constFind(groupId);
+                QSizeF badgeSize;
+                if(badgeIt==badgeSizes.cend()) {
+                    badgeSize=QSizeF(std::ceil(metrics.horizontalAdvance(label))+12.0,
+                                    std::ceil(metrics.height())+6.0);
+                    badgeSizes.insert(groupId,badgeSize);
+                } else {
+                    badgeSize=*badgeIt;
+                }
+                const QRectF available=cellRect.adjusted(3.0,3.0,-3.0,-3.0);
+                if(available.width()<badgeSize.width()||available.height()<badgeSize.height())continue;
+                const QRectF badge(available.center().x()-badgeSize.width()/2.0,
+                                   available.center().y()-badgeSize.height()/2.0,
+                                   badgeSize.width(),badgeSize.height());
+                p.setPen(QPen(QColor(255,255,255,190),1.0));
+                p.setBrush(QColor(15,18,22,215));
+                p.drawRoundedRect(badge,4.0,4.0);
+                p.setPen(Qt::white);
+                p.drawText(badge,Qt::AlignCenter,label);
             }
         }
 
