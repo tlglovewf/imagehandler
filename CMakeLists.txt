@@ -191,6 +191,9 @@ set_property(TEST ImageHandlerTests PROPERTY ENVIRONMENT_MODIFICATION
     "PATH=path_list_prepend:${QT_ROOT}/bin"
     "PATH=path_list_prepend:${VIPS_ROOT}/bin")
 
+qt_add_executable(ImageHandlerPerformance tests/PerformanceBenchmark.cpp)
+target_link_libraries(ImageHandlerPerformance PRIVATE image_handler_core)
+
 qt_add_executable(JobDataTests tests/TestJob.cpp)
 target_link_libraries(JobDataTests PRIVATE image_handler_core Qt6::Test)
 add_test(NAME JobDataTests COMMAND JobDataTests)

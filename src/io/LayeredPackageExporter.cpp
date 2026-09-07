@@ -13,11 +13,17 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLocale>
+#include <QMutex>
+#include <QMutexLocker>
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QStorageInfo>
+#include <QThread>
+#include <QThreadPool>
 #include <QUuid>
+#include <QtConcurrent/QtConcurrentRun>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <limits>
 
@@ -25,6 +31,8 @@ namespace {
 constexpr auto kReportName = "export-report.json";
 constexpr qint64 kReportEstimate = 8 * 1024;
 constexpr qint64 kMinimumSafetyMargin = 16 * 1024 * 1024;
+constexpr quint64 kExportWorkerMemoryBudget = 256ULL * 1024ULL * 1024ULL;
+constexpr int kMaximumExportWorkers = 2;
 
 bool checkedAdd(qint64 left, qint64 right, qint64* result) {
     if (left < 0 || right < 0 || left > std::numeric_limits<qint64>::max() - right)
@@ -38,6 +46,23 @@ bool checkedMultiply(qint64 left, qint64 right, qint64* result) {
         (left != 0 && right > std::numeric_limits<qint64>::max() / left)) return false;
     *result = left * right;
     return true;
+}
+
+int exportWorkerCount(const LayeredPackageRequest& request, qsizetype groupCount) {
+    if (groupCount <= 1) return 1;
+    const quint64 sourcePixels = quint64(request.options.outputWidth) *
+                                 quint64(request.options.outputHeight);
+    const QSize finalSize = LayeredMaskProcessor::outputSize(request.options);
+    const quint64 finalPixels = quint64(finalSize.width()) * quint64(finalSize.height());
+    const quint64 rowBytes = ((quint64(finalSize.width()) + 31) / 32) * 4;
+    const quint64 perWorker = std::max<quint64>(1,
+        sourcePixels * sizeof(quint16) + finalPixels * sizeof(quint16) + rowBytes * 2);
+    const int memoryLimit = static_cast<int>(std::max<quint64>(
+        1, std::min<quint64>(kMaximumExportWorkers,
+                             kExportWorkerMemoryBudget / perWorker)));
+    const int cpuLimit = std::max(1, QThread::idealThreadCount() - 1);
+    return std::max(1, std::min({kMaximumExportWorkers, memoryLimit, cpuLimit,
+                                static_cast<int>(groupCount)}));
 }
 
 bool hasGrouping(const LayeredPackageRequest& request) {
@@ -454,30 +479,68 @@ bool LayeredPackageExporter::exportPackage(
     const QVector<QPoint> exports = representativeCells(request, order);
     const qint64 total = static_cast<qint64>(exports.size()) + 2;
     for (qsizetype index = 0; index < exports.size(); ++index) {
-        if (token->isCancelled()) { cleanup(); return false; }
         const QString directoryName = QString::number(index);
-        if (!staged.mkdir(directoryName)) {
-            cleanup();
-            if (error) *error = QStringLiteral("无法创建分块目录：%1").arg(directoryName);
-            return false;
-        }
-        const QPoint cell = exports[index];
-        const ImageRegion region = segmentationCellRegion(
-            request.segmentation, request.document->metadata.width,
-            request.document->metadata.height, cell.y(), cell.x());
-        const LayeredMaskRequest slice{request.document, region,
-            {request.segmentation.settings.cellWidth, request.segmentation.settings.cellHeight},
-            request.options, layers};
-        QString sliceError;
-        if (!LayeredMaskProcessor::exportAll(staged.filePath(directoryName), slice, token, {},
-                                             &sliceError)) {
+        if (token->isCancelled() || !staged.mkdir(directoryName)) {
             cleanup();
             if (!token->isCancelled() && error)
-                *error = QStringLiteral("分块 %1 导出失败：%2").arg(index).arg(sliceError);
+                *error = QStringLiteral("无法创建分块目录：%1").arg(directoryName);
             return false;
         }
-        if (progress) progress({QStringLiteral("导出图元组 %1/%2").arg(index + 1).arg(exports.size()),
-                                index + 1, total});
+    }
+    const int workers = exportWorkerCount(request, exports.size());
+    QThreadPool exportPool;
+    exportPool.setMaxThreadCount(workers);
+    std::atomic<qsizetype> nextIndex{0};
+    std::atomic<qint64> completedGroups{0};
+    std::atomic_bool stop{false};
+    QMutex errorMutex;
+    QMutex progressMutex;
+    qsizetype firstErrorIndex = std::numeric_limits<qsizetype>::max();
+    QString firstError;
+    const auto exportWorker = [&] {
+        while (!stop.load(std::memory_order_relaxed) && !token->isCancelled()) {
+            const qsizetype index = nextIndex.fetch_add(1, std::memory_order_relaxed);
+            if (index >= exports.size()) return;
+            const QPoint cell = exports[index];
+            const ImageRegion region = segmentationCellRegion(
+                request.segmentation, request.document->metadata.width,
+                request.document->metadata.height, cell.y(), cell.x());
+            const LayeredMaskRequest slice{request.document, region,
+                {request.segmentation.settings.cellWidth,
+                 request.segmentation.settings.cellHeight}, request.options, layers};
+            QString sliceError;
+            if (!LayeredMaskProcessor::exportAll(
+                    staged.filePath(QString::number(index)), slice, token, {}, &sliceError)) {
+                if (!token->isCancelled()) {
+                    QMutexLocker lock(&errorMutex);
+                    if (index < firstErrorIndex) {
+                        firstErrorIndex = index;
+                        firstError = QStringLiteral("分块 %1 导出失败：%2")
+                                         .arg(index).arg(sliceError);
+                    }
+                }
+                stop.store(true, std::memory_order_relaxed);
+                return;
+            }
+            const qint64 done = completedGroups.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (progress) {
+                QMutexLocker lock(&progressMutex);
+                progress({QStringLiteral("导出图元组 %1/%2").arg(done).arg(exports.size()),
+                          done, total});
+            }
+        }
+    };
+    QVector<QFuture<void>> futures;
+    futures.reserve(workers);
+    for (int worker = 0; worker < workers; ++worker)
+        futures.push_back(QtConcurrent::run(&exportPool, exportWorker));
+    for (auto& future : futures) future.waitForFinished();
+    exportPool.waitForDone();
+    if (token->isCancelled()) { cleanup(); return false; }
+    if (!firstError.isEmpty()) {
+        cleanup();
+        if (error) *error = firstError;
+        return false;
     }
     if (!writeJobJson(staged.filePath(QStringLiteral("job.json")), request, order, token,
                       error)) { cleanup(); return false; }

@@ -84,6 +84,7 @@ private Q_SLOTS:
     void elementGroupingAndLayeredPackageReuse();
     void elementGroupingSupportsGrayDepthsAndResiduals();
     void layeredMasksPadTransformAndValidate();
+    void layeredMaskTransformIsComputedOnce();
     void exportPreflightEstimatesAndSpacePolicy();
     void storageSizeFormatting();
     void exportPreflightConflictsAndPortableReports();
@@ -1282,12 +1283,12 @@ void TestCore::elementGroupingAndLayeredPackageReuse() {
     class CollisionComparison final : public ElementComparisonStrategy {
     public:
         QString id() const override { return QStringLiteral("collision_test"); }
-        QByteArray fingerprint(const QImage&, PixelKind) const override {
-            return QByteArrayLiteral("same-bucket");
+        ElementFingerprint fingerprint(const ElementRasterView&) const override {
+            return 1;
         }
-        bool equivalent(const QImage& left, const QImage& right,
-                        PixelKind kind) const override {
-            return exact_.equivalent(left, right, kind);
+        bool equivalent(const ElementRasterView& left,
+                        const ElementRasterView& right) const override {
+            return exact_.equivalent(left, right);
         }
     private:
         ExactGrayElementComparison exact_;
@@ -1317,7 +1318,8 @@ void TestCore::elementGroupingAndLayeredPackageReuse() {
 
     QFile jobFile(QDir(output).filePath(QStringLiteral("job.json")));
     QVERIFY(jobFile.open(QIODevice::ReadOnly));
-    const QJsonObject jobObject = QJsonDocument::fromJson(jobFile.readAll()).object();
+    const QByteArray groupedJobBytes = jobFile.readAll();
+    const QJsonObject jobObject = QJsonDocument::fromJson(groupedJobBytes).object();
     const QJsonArray models = jobObject.value(QStringLiteral("models")).toArray();
     const QJsonArray commands = jobObject.value(QStringLiteral("commands")).toArray();
     QCOMPARE(models.size(), 2); QCOMPARE(commands.size(), 8);
@@ -1341,6 +1343,20 @@ void TestCore::elementGroupingAndLayeredPackageReuse() {
     QCOMPARE(reportOutput.value(QStringLiteral("uniquePatternCount")).toInt(), 2);
     QCOMPARE(reportOutput.value(QStringLiteral("reusedPlacementCount")).toInt(), 2);
     QCOMPARE(reportOutput.value(QStringLiteral("bmpCount")).toInt(), 2);
+
+    const auto cancellationPreflight = LayeredPackageExporter::inspect(request);
+    QVERIFY(cancellationPreflight.valid);
+    auto cancellationToken = std::make_shared<CancellationToken>();
+    const auto cancelAfterFirstGroup = [cancellationToken](const TaskProgress& value) {
+        if (value.phase.startsWith(QStringLiteral("导出图元组")) && value.completed >= 1)
+            cancellationToken->cancel();
+    };
+    QVERIFY(!LayeredPackageExporter::exportPackage(
+        request, {true, true, cancellationPreflight.targetFingerprint}, cancellationToken,
+        cancelAfterFirstGroup, &error));
+    QFile preservedJob(QDir(output).filePath(QStringLiteral("job.json")));
+    QVERIFY(preservedJob.open(QIODevice::ReadOnly));
+    QCOMPARE(preservedJob.readAll(), groupedJobBytes);
 }
 
 void TestCore::elementGroupingSupportsGrayDepthsAndResiduals() {
@@ -1484,6 +1500,80 @@ void TestCore::layeredMasksPadTransformAndValidate() {
     request.options.scaleY = 5.0;
     QVERIFY(!LayeredMaskProcessor::validate(request, &error));
     QVERIFY(error.contains(QStringLiteral("超过导出底图")));
+}
+
+void TestCore::layeredMaskTransformIsComputedOnce() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    QImage source(2, 1, QImage::Format_Grayscale8);
+    source.scanLine(0)[0] = 0;
+    source.scanLine(0)[1] = 255;
+    const QString path = directory.filePath(QStringLiteral("transform-once.bmp"));
+    QVERIFY(source.save(path, "BMP"));
+    QString error;
+    const auto document = ImageLoader::load(path, 1450, &error);
+    QVERIFY2(document, qPrintable(error));
+
+    LayeredPackageOptions options{0.5, 1.0, 0.25, 4, 2, false, false, false,
+                                  LayerCountStrategy::RoundUp};
+    options.attachToCanvas = true;
+    options.canvasWidth = 8;
+    options.canvasHeight = 6;
+    options.rotationDegrees = 90.0;
+    options.transformSampling = BinaryTransformSampling::SmoothThreshold;
+    LayeredMaskRequest request{document, {0, 0, 2, 1}, {2, 1}, options, 4};
+    const auto token = std::make_shared<CancellationToken>();
+
+    const QString normalPath = directory.filePath(QStringLiteral("normal"));
+    QVERIFY(QDir().mkpath(normalPath));
+    LayeredMaskExportMetrics normalMetrics;
+    QVERIFY2(LayeredMaskProcessor::exportAll(
+        normalPath, request, token, {}, &error, &normalMetrics), qPrintable(error));
+    QCOMPARE(normalMetrics.transformedPixelCount, qint64(8 * 6));
+    QCOMPARE(normalMetrics.packedPixelCount, qint64(8 * 6 * 4));
+
+    QVector<QImage> normalLayers;
+    int previousWhiteCount = std::numeric_limits<int>::max();
+    for (int layer = 1; layer <= 4; ++layer) {
+        const auto layerDocument = ImageLoader::load(
+            QDir(normalPath).filePath(QString::number(layer) + QStringLiteral(".bmp")),
+            1450 + layer, &error);
+        QVERIFY2(layerDocument, qPrintable(error));
+        QImage pixels = VipsSupport::renderRegion(layerDocument, 0, 0, 8, 6, 1.0, &error);
+        QVERIFY2(!pixels.isNull(), qPrintable(error));
+        int whiteCount = 0;
+        for (int y = 0; y < pixels.height(); ++y) {
+            for (int x = 0; x < pixels.width(); ++x) {
+                const bool white = pixels.pixelColor(x, y) == QColor(Qt::white);
+                if (white) ++whiteCount;
+                if (layer > 1 && white)
+                    QCOMPARE(normalLayers.back().pixelColor(x, y), QColor(Qt::white));
+            }
+        }
+        QVERIFY(whiteCount <= previousWhiteCount);
+        previousWhiteCount = whiteCount;
+        normalLayers.push_back(std::move(pixels));
+    }
+    QVERIFY(previousWhiteCount > 0);
+
+    request.options.invertMask = true;
+    const QString invertedPath = directory.filePath(QStringLiteral("inverted"));
+    QVERIFY(QDir().mkpath(invertedPath));
+    LayeredMaskExportMetrics invertedMetrics;
+    QVERIFY2(LayeredMaskProcessor::exportAll(
+        invertedPath, request, token, {}, &error, &invertedMetrics), qPrintable(error));
+    QCOMPARE(invertedMetrics.transformedPixelCount, qint64(8 * 6));
+    for (int layer = 1; layer <= 4; ++layer) {
+        const auto layerDocument = ImageLoader::load(
+            QDir(invertedPath).filePath(QString::number(layer) + QStringLiteral(".bmp")),
+            1460 + layer, &error);
+        QVERIFY2(layerDocument, qPrintable(error));
+        const QImage inverted = VipsSupport::renderRegion(
+            layerDocument, 0, 0, 8, 6, 1.0, &error);
+        QVERIFY2(!inverted.isNull(), qPrintable(error));
+        for (int y = 0; y < inverted.height(); ++y)
+            for (int x = 0; x < inverted.width(); ++x)
+                QVERIFY(inverted.pixelColor(x, y) != normalLayers[layer - 1].pixelColor(x, y));
+    }
 }
 
 void TestCore::realPatternImageFromEnvironment() {

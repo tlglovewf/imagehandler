@@ -2,12 +2,11 @@
 
 #include "domain/Models.h"
 
-#include <QByteArray>
 #include <QColor>
-#include <QImage>
 #include <QMetaType>
 #include <QPoint>
 #include <QVector>
+#include <QtTypes>
 #include <functional>
 
 struct ElementGroup {
@@ -33,6 +32,24 @@ struct ElementGroupingResult {
                                const SegmentationResult& segmentation) const noexcept;
 };
 
+struct ElementRasterView {
+    const uchar* data = nullptr;
+    int width = 0;
+    int height = 0;
+    qsizetype rowBytes = 0;
+    qsizetype stride = 0;
+    PixelKind kind = PixelKind::Unsupported;
+
+    [[nodiscard]] bool isValid() const noexcept {
+        return data && width > 0 && height > 0 && rowBytes > 0 && stride >= rowBytes;
+    }
+    [[nodiscard]] const uchar* scanLine(int row) const noexcept {
+        return isValid() && row >= 0 && row < height ? data + qsizetype(row) * stride : nullptr;
+    }
+};
+
+using ElementFingerprint = quint64;
+
 // A strategy supplies a cheap candidate key and a definitive comparison. Future
 // tolerant or transform-aware matchers can be added without changing grouping,
 // preview, Job, or export code.
@@ -40,19 +57,19 @@ class ElementComparisonStrategy {
 public:
     virtual ~ElementComparisonStrategy() = default;
     [[nodiscard]] virtual QString id() const = 0;
-    [[nodiscard]] virtual QByteArray fingerprint(const QImage& image,
-                                                 PixelKind kind) const = 0;
-    [[nodiscard]] virtual bool equivalent(const QImage& left, const QImage& right,
-                                          PixelKind kind) const = 0;
+    [[nodiscard]] virtual ElementFingerprint fingerprint(
+        const ElementRasterView& raster) const = 0;
+    [[nodiscard]] virtual bool equivalent(const ElementRasterView& left,
+                                          const ElementRasterView& right) const = 0;
 };
 
 class ExactGrayElementComparison final : public ElementComparisonStrategy {
 public:
     [[nodiscard]] QString id() const override;
-    [[nodiscard]] QByteArray fingerprint(const QImage& image,
-                                         PixelKind kind) const override;
-    [[nodiscard]] bool equivalent(const QImage& left, const QImage& right,
-                                  PixelKind kind) const override;
+    [[nodiscard]] ElementFingerprint fingerprint(
+        const ElementRasterView& raster) const override;
+    [[nodiscard]] bool equivalent(const ElementRasterView& left,
+                                  const ElementRasterView& right) const override;
 };
 
 class ElementGrouper final {

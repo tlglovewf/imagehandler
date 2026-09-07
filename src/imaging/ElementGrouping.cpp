@@ -3,20 +3,142 @@
 #include "imaging/ImageLoader.h"
 #include "imaging/VipsSupport.h"
 
+#include <QByteArray>
 #include <QCache>
-#include <QCryptographicHash>
-#include <QDataStream>
 #include <QHash>
-#include <QIODevice>
+#include <qhashfunctions.h>
 #include <algorithm>
+#include <array>
 #include <cstring>
+#include <limits>
+#include <optional>
+#include <vips/vips.h>
 
 namespace {
-qsizetype pixelRowBytes(const QImage& image) {
-    if (image.format() == QImage::Format_Grayscale16)
-        return qsizetype(image.width()) * qsizetype(sizeof(quint16));
-    return image.width();
+constexpr int kRepresentativeCacheKiB = 128 * 1024;
+
+struct OwnedElementRaster {
+    QByteArray pixels;
+    int width = 0;
+    int height = 0;
+    qsizetype rowBytes = 0;
+    PixelKind kind = PixelKind::Unsupported;
+
+    [[nodiscard]] ElementRasterView view() const noexcept {
+        return {reinterpret_cast<const uchar*>(pixels.constData()), width, height,
+                rowBytes, rowBytes, kind};
+    }
+};
+
+std::optional<OwnedElementRaster> copyRaster(const ElementRasterView& source) {
+    if (!source.isValid() || source.rowBytes > std::numeric_limits<qsizetype>::max() /
+                                                   source.height)
+        return std::nullopt;
+    OwnedElementRaster result;
+    result.width = source.width;
+    result.height = source.height;
+    result.rowBytes = source.rowBytes;
+    result.kind = source.kind;
+    result.pixels.resize(source.rowBytes * source.height);
+    if (result.pixels.size() != source.rowBytes * source.height) return std::nullopt;
+    for (int row = 0; row < source.height; ++row)
+        std::memcpy(result.pixels.data() + qsizetype(row) * source.rowBytes,
+                    source.scanLine(row), static_cast<size_t>(source.rowBytes));
+    return result;
 }
+
+int cacheCostKiB(const OwnedElementRaster& raster) {
+    const qsizetype kib = std::max<qsizetype>(1, (raster.pixels.size() + 1023) / 1024);
+    return static_cast<int>(std::min<qsizetype>(kib, std::numeric_limits<int>::max()));
+}
+
+VipsImagePtr prepareGroupingImage(const ImageDocumentPtr& document, QString* error) {
+    VipsImage* bandRaw = nullptr;
+    if (document->image->Bands == 1) {
+        bandRaw = document->image.get();
+        g_object_ref(bandRaw);
+    } else if (vips_extract_band(document->image.get(), &bandRaw, 0, nullptr) != 0) {
+        if (error) *error = VipsSupport::lastError();
+        return {};
+    }
+    const auto band = VipsSupport::adopt(bandRaw);
+    const VipsBandFormat target = document->metadata.kind == PixelKind::Gray16
+        ? VIPS_FORMAT_USHORT : VIPS_FORMAT_UCHAR;
+    VipsImagePtr normalized = band;
+    if (band->BandFmt != target) {
+        VipsImage* convertedRaw = nullptr;
+        if (vips_cast(band.get(), &convertedRaw, target, nullptr) != 0) {
+            if (error) *error = VipsSupport::lastError();
+            return {};
+        }
+        normalized = VipsSupport::adopt(convertedRaw);
+    }
+    VipsImage* copyRaw = nullptr;
+    if (vips_copy(normalized.get(), &copyRaw, nullptr) != 0) {
+        if (error) *error = VipsSupport::lastError();
+        return {};
+    }
+    return VipsSupport::adopt(copyRaw);
+}
+
+class ElementRasterReader final {
+public:
+    ElementRasterReader(const VipsImagePtr& image, PixelKind kind)
+        : image_(image), kind_(kind), bytesPerSample_(kind == PixelKind::Gray16 ? 2 : 1),
+          region_(image ? vips_region_new(image.get()) : nullptr) {}
+    ~ElementRasterReader() { if (region_) g_object_unref(region_); }
+    ElementRasterReader(const ElementRasterReader&) = delete;
+    ElementRasterReader& operator=(const ElementRasterReader&) = delete;
+
+    [[nodiscard]] ElementRasterView read(const ImageRegion& source, QString* error) {
+        if (!region_ || !source.isValid() || source.x < 0 || source.y < 0 ||
+            source.x > INT_MAX || source.y > INT_MAX || source.width > INT_MAX ||
+            source.height > INT_MAX) {
+            if (error) *error = QStringLiteral("图元区域无效。");
+            return {};
+        }
+        VipsRect rectangle{static_cast<int>(source.x), static_cast<int>(source.y),
+                           static_cast<int>(source.width), static_cast<int>(source.height)};
+        if (vips_region_prepare(region_, &rectangle) != 0) {
+            if (error) *error = VipsSupport::lastError();
+            return {};
+        }
+        return {VIPS_REGION_ADDR(region_, rectangle.left, rectangle.top), rectangle.width,
+                rectangle.height, qsizetype(rectangle.width) * bytesPerSample_,
+                static_cast<qsizetype>(VIPS_REGION_LSKIP(region_)), kind_};
+    }
+
+private:
+    VipsImagePtr image_;
+    PixelKind kind_ = PixelKind::Unsupported;
+    qsizetype bytesPerSample_ = 1;
+    VipsRegion* region_ = nullptr;
+};
+
+class EvaluationCancellation final {
+public:
+    EvaluationCancellation(VipsImage* image, const CancellationTokenPtr& token)
+        : image_(image), token_(token) {
+        if (!image_ || !token_) return;
+        vips_image_set_progress(image_, TRUE);
+        handler_ = g_signal_connect(image_, "eval", G_CALLBACK(cancelEvaluation), this);
+    }
+    ~EvaluationCancellation() {
+        if (handler_) g_signal_handler_disconnect(image_, handler_);
+    }
+    EvaluationCancellation(const EvaluationCancellation&) = delete;
+    EvaluationCancellation& operator=(const EvaluationCancellation&) = delete;
+
+private:
+    static void cancelEvaluation(VipsImage* image, VipsProgress*, gpointer opaque) {
+        const auto* scope = static_cast<const EvaluationCancellation*>(opaque);
+        if (scope->token_ && scope->token_->isCancelled()) vips_image_set_kill(image, TRUE);
+    }
+
+    VipsImage* image_ = nullptr;
+    CancellationTokenPtr token_;
+    gulong handler_ = 0;
+};
 
 bool sameSettings(const SegmentationSettings& left, const SegmentationSettings& right) {
     return left.cellWidth == right.cellWidth && left.cellHeight == right.cellHeight &&
@@ -45,28 +167,27 @@ bool ElementGroupingResult::matches(const ImageDocumentPtr& document,
 
 QString ExactGrayElementComparison::id() const { return QStringLiteral("exact_gray_v1"); }
 
-QByteArray ExactGrayElementComparison::fingerprint(const QImage& image, PixelKind kind) const {
-    QByteArray header;
-    QDataStream stream(&header, QIODevice::WriteOnly);
-    stream.setByteOrder(QDataStream::LittleEndian);
-    stream << qint32(image.width()) << qint32(image.height()) << qint32(image.format())
-           << qint32(kind);
-    QCryptographicHash hash(QCryptographicHash::Sha256);
-    hash.addData(header);
-    const qsizetype rowBytes = pixelRowBytes(image);
-    for (int y = 0; y < image.height(); ++y)
-        hash.addData(reinterpret_cast<const char*>(image.constScanLine(y)), rowBytes);
-    return hash.result();
+ElementFingerprint ExactGrayElementComparison::fingerprint(
+    const ElementRasterView& raster) const {
+    if (!raster.isValid()) return 0;
+    const std::array<quint64,4> header{
+        static_cast<quint64>(raster.width), static_cast<quint64>(raster.height),
+        static_cast<quint64>(raster.rowBytes), static_cast<quint64>(raster.kind)};
+    size_t hash = qHashBits(header.data(), sizeof(header));
+    for (int row = 0; row < raster.height; ++row)
+        hash = qHashBits(raster.scanLine(row), static_cast<size_t>(raster.rowBytes), hash);
+    return static_cast<ElementFingerprint>(hash);
 }
 
-bool ExactGrayElementComparison::equivalent(const QImage& left, const QImage& right,
-                                            PixelKind kind) const {
-    Q_UNUSED(kind);
-    if (left.size() != right.size() || left.format() != right.format()) return false;
-    const qsizetype rowBytes = pixelRowBytes(left);
-    for (int y = 0; y < left.height(); ++y) {
-        if (std::memcmp(left.constScanLine(y), right.constScanLine(y),
-                        static_cast<size_t>(rowBytes)) != 0)
+bool ExactGrayElementComparison::equivalent(const ElementRasterView& left,
+                                            const ElementRasterView& right) const {
+    if (!left.isValid() || !right.isValid() || left.width != right.width ||
+        left.height != right.height || left.rowBytes != right.rowBytes ||
+        left.kind != right.kind)
+        return false;
+    for (int row = 0; row < left.height; ++row) {
+        if (std::memcmp(left.scanLine(row), right.scanLine(row),
+                        static_cast<size_t>(left.rowBytes)) != 0)
             return false;
     }
     return true;
@@ -107,23 +228,17 @@ ElementGroupingResult ElementGrouper::group(
     result.strategyId = strategy.id();
     result.groupByCell.fill(-1, static_cast<qsizetype>(total));
 
-    QHash<QByteArray, QVector<int>> candidates;
-    QCache<int, QImage> representativeCache(128 * 1024); // KiB
-    auto representativeImage = [&](int groupId, QString* loadError) -> QImage {
-        if (const auto* cached = representativeCache.object(groupId)) return *cached;
-        const QPoint cell = result.groups[groupId].representativeCell;
-        const ImageRegion region = segmentationCellRegion(
-            segmentation, document->metadata.width, document->metadata.height,
-            cell.y(), cell.x());
-        QImage image = VipsSupport::renderRegion(document, region.x, region.y,
-                                                 region.width, region.height, 1.0,
-                                                 loadError, token);
-        if (!image.isNull()) {
-            representativeCache.insert(groupId, new QImage(image),
-                std::max(1, static_cast<int>(image.sizeInBytes() / 1024)));
-        }
-        return image;
-    };
+    QString prepareError;
+    const VipsImagePtr prepared = prepareGroupingImage(document, &prepareError);
+    if (!prepared) {
+        if (error) *error = QStringLiteral("准备图元分组数据失败：%1").arg(prepareError);
+        return {};
+    }
+    EvaluationCancellation cancellation(prepared.get(), token);
+    ElementRasterReader currentReader(prepared, document->metadata.kind);
+    ElementRasterReader representativeReader(prepared, document->metadata.kind);
+    QHash<ElementFingerprint, QVector<int>> candidates;
+    QCache<int, OwnedElementRaster> representativeCache(kRepresentativeCacheKiB);
 
     qint64 completed = 0;
     for (int row = 0; row < segmentation.rows; ++row) {
@@ -137,28 +252,47 @@ ElementGroupingResult ElementGrouper::group(
                 return {};
             }
             QString loadError;
-            const QImage image = VipsSupport::renderRegion(
-                document, region.x, region.y, region.width, region.height, 1.0,
-                &loadError, token);
-            if (image.isNull()) {
+            const ElementRasterView raster = currentReader.read(region, &loadError);
+            if (!raster.isValid()) {
                 if (!token->isCancelled() && error)
                     *error = QStringLiteral("读取图元（行 %1，列 %2）失败：%3")
                                  .arg(row + 1).arg(column + 1).arg(loadError);
                 return {};
             }
 
-            const QByteArray fingerprint = strategy.fingerprint(image, document->metadata.kind);
+            const ElementFingerprint fingerprint = strategy.fingerprint(raster);
             int groupId = -1;
             const auto bucket = candidates.constFind(fingerprint);
             if (bucket != candidates.cend()) {
                 for (int candidateId : bucket.value()) {
-                    QImage representative = representativeImage(candidateId, &loadError);
-                    if (representative.isNull()) {
-                        if (!token->isCancelled() && error)
-                            *error = QStringLiteral("重新读取代表图元失败：%1").arg(loadError);
-                        return {};
+                    const OwnedElementRaster* representative =
+                        representativeCache.object(candidateId);
+                    std::optional<OwnedElementRaster> loadedRepresentative;
+                    if (!representative) {
+                        const QPoint representativeCell =
+                            result.groups[candidateId].representativeCell;
+                        const ImageRegion representativeRegion = segmentationCellRegion(
+                            segmentation, document->metadata.width, document->metadata.height,
+                            representativeCell.y(), representativeCell.x());
+                        const ElementRasterView representativeView =
+                            representativeReader.read(representativeRegion, &loadError);
+                        loadedRepresentative = copyRaster(representativeView);
+                        if (!loadedRepresentative) {
+                            if (!token->isCancelled() && error)
+                                *error = QStringLiteral("重新读取代表图元失败：%1")
+                                             .arg(loadError);
+                            return {};
+                        }
+                        representative = &*loadedRepresentative;
                     }
-                    if (strategy.equivalent(image, representative, document->metadata.kind)) {
+                    const bool equivalent = strategy.equivalent(raster, representative->view());
+                    if (loadedRepresentative) {
+                        const int cost = cacheCostKiB(*loadedRepresentative);
+                        if (cost <= kRepresentativeCacheKiB)
+                            representativeCache.insert(candidateId,
+                                new OwnedElementRaster(std::move(*loadedRepresentative)), cost);
+                    }
+                    if (equivalent) {
                         groupId = candidateId;
                         break;
                     }
@@ -169,8 +303,15 @@ ElementGroupingResult ElementGrouper::group(
                 groupId = result.groups.size();
                 result.groups.push_back({groupId, cell, {}, elementGroupColor(groupId)});
                 candidates[fingerprint].push_back(groupId);
-                representativeCache.insert(groupId, new QImage(image),
-                    std::max(1, static_cast<int>(image.sizeInBytes() / 1024)));
+                auto owned = copyRaster(raster);
+                if (!owned) {
+                    if (error) *error = QStringLiteral("图元尺寸过大，无法缓存代表图元。");
+                    return {};
+                }
+                const int cost = cacheCostKiB(*owned);
+                if (cost <= kRepresentativeCacheKiB)
+                    representativeCache.insert(groupId,
+                        new OwnedElementRaster(std::move(*owned)), cost);
             }
             result.groups[groupId].cells.push_back(cell);
             result.groupByCell[qsizetype(row) * segmentation.columns + column] = groupId;

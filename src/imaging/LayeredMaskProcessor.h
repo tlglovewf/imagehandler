@@ -23,6 +23,11 @@ struct LayeredMaskPreview {
     MaskStackPreviewDataPtr stackPreview;
 };
 
+struct LayeredMaskExportMetrics {
+    qint64 transformedPixelCount = 0;
+    qint64 packedPixelCount = 0;
+};
+
 Q_DECLARE_METATYPE(LayeredMaskPreview)
 
 class LayeredMaskProcessor final {
@@ -40,5 +45,5 @@ public:
     [[nodiscard]] static bool exportAll(
         const QString& outputDirectory, const LayeredMaskRequest& request,
         const CancellationTokenPtr& token, const Progress& progress,
-        QString* error);
+        QString* error, LayeredMaskExportMetrics* metrics = nullptr);
 };
