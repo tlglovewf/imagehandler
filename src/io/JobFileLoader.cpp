@@ -472,6 +472,7 @@ JobDocumentPtr JobFileLoader::load(const QString& path, const CancellationTokenP
                 return {};
             }
         }
+        document->sceneBounds = document->bounds;
         if(progress)progress({QStringLiteral("建立 Job 空间索引"),0,static_cast<qint64>(document->points.size())});
         if (!JobSpatialIndex::prepare(document.get(),token)) {
             if (!token->isCancelled() && error) *error=QStringLiteral("无法建立 Job 空间索引。");

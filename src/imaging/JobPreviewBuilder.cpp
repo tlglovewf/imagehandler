@@ -69,6 +69,7 @@ JobDocumentPtr buildDocument(const ImageMetadata& metadata,
                 *error = QStringLiteral("无法建立 Job 预览空间索引。");
             return {};
         }
+        document->sceneBounds = document->bounds;
         if (progress) progress({QStringLiteral("建立 Job 预览空间索引"), count, count});
         return document;
     } catch (const std::bad_alloc&) {

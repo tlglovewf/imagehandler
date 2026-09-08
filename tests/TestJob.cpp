@@ -1,10 +1,14 @@
+#include "domain/MaskSliceModels.h"
 #include "imaging/JobPreviewBuilder.h"
 #include "imaging/JobLabelLod.h"
 #include "imaging/JobPreviewMath.h"
 #include "imaging/JobSpatialIndex.h"
+#include "imaging/VipsSupport.h"
 #include "io/JobFileLoader.h"
+#include "io/JobPackageLoader.h"
 
 #include <QFile>
+#include <QDir>
 #include <QElapsedTimer>
 #include <QTemporaryDir>
 #include <QtTest>
@@ -15,6 +19,8 @@
 class TestJob final : public QObject {
     Q_OBJECT
 private Q_SLOTS:
+    void initTestCase();
+    void cleanupTestCase();
     void jsonAndAldlUseSameParser();
     void validatesStructureAndIds();
     void supportsEscapesAndUnknownFields();
@@ -28,6 +34,9 @@ private Q_SLOTS:
     void terrainCameraIsGroundOrientedAndClamped();
     void terrainCameraContinuousOrbitCrossesPoles();
     void millionPointPreviewScale();
+    void layeredPackageLoadsStacksAndSceneBounds();
+    void layeredPackageUsesInstanceAwareLod();
+    void incompleteLayeredPackageFallsBackToPoints();
 };
 
 namespace {
@@ -53,7 +62,34 @@ QByteArray validJob() {
       ]
     })");
 }
+
+QByteArray packageReport(int layers = 2, bool invertMask = false) {
+    return QStringLiteral(R"({
+      "schemaVersion": 3,
+      "mode": "layered_package",
+      "mapping": {"pixel2phy": 0.5},
+      "layers": {"layerHeight": 0.25, "count": %1, "invertMask": %2},
+      "output": {"attachToCanvas": false, "standardWidth": 2,
+                 "standardHeight": 2, "canvasWidth": 8, "canvasHeight": 6,
+                 "bitsPerPixel": 1}
+    })").arg(layers).arg(invertMask ? QStringLiteral("true") : QStringLiteral("false")).toUtf8();
 }
+
+bool writeBinaryMask(const QString& path, const QList<QPoint>& whitePixels) {
+    QImage image(2, 2, QImage::Format_Mono);
+    image.setColorTable({qRgb(0, 0, 0), qRgb(255, 255, 255)});
+    image.fill(0);
+    for (const QPoint& point : whitePixels) image.setPixel(point, 1);
+    return image.save(path, "BMP");
+}
+}
+
+void TestJob::initTestCase() {
+    QString error;
+    QVERIFY2(VipsSupport::initialize("JobDataTests", &error), qPrintable(error));
+}
+
+void TestJob::cleanupTestCase() { VipsSupport::shutdown(); }
 
 void TestJob::jsonAndAldlUseSameParser() {
     QTemporaryDir directory; QVERIFY(directory.isValid());
@@ -121,6 +157,128 @@ void TestJob::cancellationDoesNotReturnDocument() {
     auto token = std::make_shared<CancellationToken>(); token->cancel();
     QString error;
     QVERIFY(!JobFileLoader::load(path, token, {}, &error));
+}
+
+void TestJob::layeredPackageLoadsStacksAndSceneBounds() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    const QByteArray job = QByteArrayLiteral(R"({
+      "models":[{"label":"shared","path":"0"}],
+      "commands":[
+        {"command":"relmove","by":[0,0,0]},{"command":"place","id":0},
+        {"command":"relmove","by":[2,3,1]},{"command":"place","id":0}
+      ]
+    })");
+    const QString jobPath = writeJob(directory, QStringLiteral("job.json"), job);
+    QVERIFY(!writeJob(directory, QStringLiteral("export-report.json"), packageReport()).isEmpty());
+    QVERIFY(QDir(directory.path()).mkdir(QStringLiteral("0")));
+    const QDir model(directory.filePath(QStringLiteral("0")));
+    QVERIFY(writeBinaryMask(model.filePath(QStringLiteral("1.bmp")),
+                            {{0,0},{1,0},{0,1},{1,1}}));
+    QVERIFY(writeBinaryMask(model.filePath(QStringLiteral("2.bmp")), {{1,0}}));
+
+    QString error;
+    const auto document = JobPackageLoader::load(
+        jobPath, std::make_shared<CancellationToken>(), {}, &error);
+    QVERIFY2(document, qPrintable(error));
+    QVERIFY(document->layeredPackageDetected);
+    QCOMPARE(document->loadedStackCount(), 1);
+    QVERIFY(document->packageWarnings.isEmpty());
+    QCOMPARE(document->models[0].stackState, JobModelStackState::Loaded);
+    const auto stack = document->models[0].stack;
+    QVERIFY(stack); QCOMPARE(stack->sourceSize, QSize(2,2));
+    QCOMPARE(stack->gridSize, QSize(2,2)); QCOMPARE(stack->physicalSize, QSizeF(1,1));
+    QCOMPARE(stack->layerCount, 2); QCOMPARE(stack->layerHeight, 0.25);
+    QVERIFY(stack->solidGeometry); QVERIFY(!stack->solidGeometry->indices.empty());
+    QVERIFY(stack->explodedGeometry); QVERIFY(!stack->explodedGeometry->indices.empty());
+    QCOMPARE(document->sceneBounds.minimum, (JobCoordinate{0,0,0}));
+    QCOMPARE(document->sceneBounds.maximum, (JobCoordinate{3,4,1.5}));
+
+    QVERIFY(!writeJob(directory, QStringLiteral("export-report.json"),
+                      packageReport(2, true)).isEmpty());
+    QVERIFY(writeBinaryMask(model.filePath(QStringLiteral("1.bmp")), {}));
+    QVERIFY(writeBinaryMask(model.filePath(QStringLiteral("2.bmp")),
+                            {{0,0},{0,1},{1,1}}));
+    const auto inverted = JobPackageLoader::load(
+        jobPath, std::make_shared<CancellationToken>(), {}, &error);
+    QVERIFY2(inverted, qPrintable(error));
+    QCOMPARE(inverted->loadedStackCount(), 1);
+    QVERIFY(inverted->models[0].stack->solidGeometry);
+    QVERIFY(!inverted->models[0].stack->solidGeometry->indices.empty());
+}
+
+void TestJob::layeredPackageUsesInstanceAwareLod() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    QByteArray commands;
+    for (int index = 0; index < 100; ++index)
+        commands += QStringLiteral(R"({"command":"relmove","by":[%1,0,0]},
+                                      {"command":"place","id":0}%2)" )
+                        .arg(index).arg(index == 99 ? QString{} : QStringLiteral(","))
+                        .toUtf8();
+    const QByteArray job = QByteArrayLiteral(R"({"models":[{"label":"0","path":"0"}],"commands":[)") +
+                           commands + QByteArrayLiteral("]}");
+    const QString jobPath = writeJob(directory, QStringLiteral("job.json"), job);
+    const QByteArray report = QByteArrayLiteral(R"({
+      "schemaVersion":3,"mode":"layered_package",
+      "mapping":{"pixel2phy":0.5},
+      "layers":{"layerHeight":0.25,"count":1,"invertMask":false},
+      "output":{"attachToCanvas":false,"standardWidth":128,"standardHeight":128,
+                "canvasWidth":128,"canvasHeight":128,"bitsPerPixel":1}})");
+    QVERIFY(!writeJob(directory, QStringLiteral("export-report.json"), report).isEmpty());
+    QVERIFY(QDir(directory.path()).mkdir(QStringLiteral("0")));
+    QImage mask(128,128,QImage::Format_Mono);
+    mask.setColorTable({qRgb(0,0,0),qRgb(255,255,255)});mask.fill(1);
+    QVERIFY(mask.save(QDir(directory.filePath(QStringLiteral("0"))).filePath(
+                          QStringLiteral("1.bmp")),"BMP"));
+    QString error;
+    const auto document=JobPackageLoader::load(
+        jobPath,std::make_shared<CancellationToken>(),{},&error);
+    QVERIFY2(document,qPrintable(error));QCOMPARE(document->points.size(),size_t(100));
+    const auto stack=document->models[0].stack;QVERIFY(stack);QVERIFY(stack->downsampled);
+    QVERIFY(qint64(stack->gridSize.width())*stack->gridSize.height()<=10'201);
+    QCOMPARE(stack->solidGeometry->indices.size(),size_t(30));
+}
+
+void TestJob::incompleteLayeredPackageFallsBackToPoints() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    const QByteArray job = QByteArrayLiteral(R"({
+      "models":[{"label":"0","path":"0"},{"label":"unsafe","path":"../outside"}],
+      "commands":[
+        {"command":"relmove","by":[0,0,0]},{"command":"place","id":0},
+        {"command":"relmove","by":[1,0,0]},{"command":"place","id":1}
+      ]
+    })");
+    const QString jobPath = writeJob(directory, QStringLiteral("job.json"), job);
+    QVERIFY(QDir(directory.path()).mkdir(QStringLiteral("0")));
+    QString error;
+    auto document = JobPackageLoader::load(
+        jobPath, std::make_shared<CancellationToken>(), {}, &error);
+    QVERIFY2(document, qPrintable(error));
+    QVERIFY(document->layeredPackageDetected);
+    QCOMPARE(document->loadedStackCount(), 0);
+    QVERIFY(!document->packageWarnings.isEmpty());
+    QCOMPARE(document->models[0].stackState, JobModelStackState::Invalid);
+
+    QVERIFY(!writeJob(directory, QStringLiteral("export-report.json"), packageReport()).isEmpty());
+    QVERIFY(writeBinaryMask(QDir(directory.filePath(QStringLiteral("0"))).filePath(
+                                QStringLiteral("1.bmp")), {{0,0}}));
+    document = JobPackageLoader::load(
+        jobPath, std::make_shared<CancellationToken>(), {}, &error);
+    QVERIFY2(document, qPrintable(error));
+    QCOMPARE(document->points.size(), size_t(2));
+    QCOMPARE(document->loadedStackCount(), 0);
+    QCOMPARE(document->models[0].stackState, JobModelStackState::Invalid);
+    QCOMPARE(document->models[1].stackState, JobModelStackState::Invalid);
+    QVERIFY(document->packageWarnings.size() >= 2);
+
+    QVERIFY(writeBinaryMask(QDir(directory.filePath(QStringLiteral("0"))).filePath(
+                                QStringLiteral("2.bmp")), {{0,0}}));
+    document = JobPackageLoader::load(
+        jobPath, std::make_shared<CancellationToken>(), {}, &error);
+    QVERIFY2(document, qPrintable(error));
+    QCOMPARE(document->loadedStackCount(), 1);
+    QCOMPARE(document->models[0].stackState, JobModelStackState::Loaded);
+    QCOMPARE(document->models[1].stackState, JobModelStackState::Invalid);
+    QVERIFY(!document->packageWarnings.isEmpty());
 }
 
 void TestJob::previewMatchesExporterCoordinates() {

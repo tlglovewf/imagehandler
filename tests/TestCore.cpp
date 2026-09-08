@@ -7,6 +7,7 @@
 #include "io/ExportPreflight.h"
 #include "io/LayeredPackageExporter.h"
 #include "io/JobFileLoader.h"
+#include "io/JobPackageLoader.h"
 #include "io/SplitExporter.h"
 #include "imaging/ImageLoader.h"
 #include "imaging/MosaicBuilder.h"
@@ -193,12 +194,24 @@ void TestCore::maskStackGeometryAndSampling() {
     QVERIFY(std::any_of(solid->vertices.cbegin(),solid->vertices.cend(),
         [](const MaskStackVertex& value){return value.faceKind==1.0F&&std::abs(value.z-0.1F)<0.00001F;}));
     const auto exploded=MaskStackMeshBuilder::buildExploded(grid,token);
-    QVERIFY(exploded);QCOMPARE(exploded->layerStride,1);QCOMPARE(exploded->indices.size(),size_t(12));
+    QVERIFY(exploded);QCOMPARE(exploded->layerStride,1);QCOMPARE(exploded->indices.size(),size_t(18));
     MaskStackPreviewData oriented;oriented.gridSize={1,2};oriented.requestedOutputSize={1,2};
     oriented.physicalSize={1.0,2.0};oriented.columnLayers={1,0};oriented.layerHeight=0.1;oriented.layerCount=1;
     const auto orientedSolid=MaskStackMeshBuilder::buildSolid(oriented,token);QVERIFY(orientedSolid);
     QVERIFY(std::all_of(orientedSolid->vertices.cbegin(),orientedSolid->vertices.cend(),
         [](const MaskStackVertex& value){return value.y>=1.0F;}));
+
+    MaskStackPreviewData uniform;
+    uniform.gridSize={512,512};uniform.requestedOutputSize=uniform.gridSize;
+    uniform.physicalSize={512.0,512.0};uniform.layerHeight=0.1;uniform.layerCount=100;
+    uniform.columnLayers.fill(100,512*512);
+    const auto compressedSolid=MaskStackMeshBuilder::buildSolid(uniform,token);
+    QVERIFY(compressedSolid);
+    // One top rectangle and four merged boundary walls replace 264k+ cell faces.
+    QCOMPARE(compressedSolid->indices.size(),size_t(30));
+    const auto compressedExploded=MaskStackMeshBuilder::buildExploded(uniform,token);
+    QVERIFY(compressedExploded);QCOMPARE(compressedExploded->layerStride,1);
+    QCOMPARE(compressedExploded->indices.size(),size_t(600));
 
     QTemporaryDir directory;QVERIFY(directory.isValid());
     QImage source(2,1,QImage::Format_Grayscale8);source.scanLine(0)[0]=0;source.scanLine(0)[1]=255;
@@ -1328,12 +1341,15 @@ void TestCore::elementGroupingAndLayeredPackageReuse() {
     QCOMPARE(commands[5].toObject().value(QStringLiteral("id")).toInt(), 1);
     QCOMPARE(commands[7].toObject().value(QStringLiteral("id")).toInt(), 0);
 
-    const auto loaded = JobFileLoader::load(
+    const auto loaded = JobPackageLoader::load(
         jobFile.fileName(), std::make_shared<CancellationToken>(), {}, &error);
     QVERIFY2(loaded, qPrintable(error));
     QCOMPARE(loaded->models.size(), size_t(2));
     QCOMPARE(loaded->points.size(), size_t(4));
     QCOMPARE(loaded->points[3].placementId, qint64(3));
+    QVERIFY(loaded->layeredPackageDetected);
+    QCOMPARE(loaded->loadedStackCount(), 2);
+    QVERIFY(loaded->packageWarnings.isEmpty());
 
     QFile report(QDir(output).filePath(QStringLiteral("export-report.json")));
     QVERIFY(report.open(QIODevice::ReadOnly));

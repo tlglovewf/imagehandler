@@ -51,6 +51,7 @@ add_library(image_handler_core
     src/io/ExportPreflight.h src/io/ExportPreflight.cpp
     src/io/SplitExporter.h src/io/SplitExporter.cpp
     src/io/JobFileLoader.h src/io/JobFileLoader.cpp
+    src/io/JobPackageLoader.h src/io/JobPackageLoader.cpp
     src/tasks/TaskManager.h src/tasks/TaskManager.cpp
 )
 target_include_directories(image_handler_core
@@ -93,7 +94,7 @@ target_compile_definitions(job_preview_ui PUBLIC
 if(JOB_PREVIEW_HAS_VULKAN)
     target_include_directories(job_preview_ui PRIVATE ${Vulkan_INCLUDE_DIRS})
     set(JOB_SHADER_OUTPUTS)
-    foreach(JOB_SHADER IN ITEMS job_points.vert job_points.frag job_lines.vert job_lines.frag)
+    foreach(JOB_SHADER IN ITEMS job_points.vert job_points.frag job_lines.vert job_lines.frag job_stack.vert job_stack.frag)
         set(JOB_SHADER_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/shaders/${JOB_SHADER}")
         set(JOB_SHADER_PACK "${CMAKE_CURRENT_BINARY_DIR}/job_shaders/${JOB_SHADER}.qsb")
         set(JOB_SHADER_SPV "${CMAKE_CURRENT_BINARY_DIR}/job_shaders/${JOB_SHADER}.spv")

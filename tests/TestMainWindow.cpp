@@ -1,6 +1,7 @@
 #include "imaging/VipsSupport.h"
 #include "imaging/ImageLoader.h"
 #include "imaging/PatternDetector.h"
+#include "imaging/MaskStackMeshBuilder.h"
 #include "io/SplitExporter.h"
 #include "io/LayeredPackageExporter.h"
 #include "ui/LargeImageView.h"
@@ -63,6 +64,7 @@ private Q_SLOTS:
     void elementPointCloudWindowIsReused();
     void maskSliceWindowDefaultsAndReuse();
     void maskSliceMultiSelectionAndStackPlacement();
+    void layeredJobStackModesRender();
 
 private:
     QTemporaryDir settingsDirectory_;
@@ -194,6 +196,49 @@ void TestMainWindow::jobPreviewWorkspaceAndLinking() {
         QVERIFY(!importButton->isEnabled());
         QVERIFY(window.findChild<QLabel*>(QStringLiteral("jobVulkanError")));
     }
+}
+
+void TestMainWindow::layeredJobStackModesRender() {
+    JobPreviewWidget widget;
+    auto* mode = widget.findChild<QComboBox*>(QStringLiteral("jobStackDisplayMode"));
+    auto* status = widget.findChild<QLabel*>(QStringLiteral("jobPreviewStatus"));
+    QVERIFY(mode); QVERIFY(status); QVERIFY(!mode->isEnabled());
+    if (!widget.isVulkanAvailable()) QSKIP("Vulkan preview unavailable");
+
+    MaskStackPreviewData preview;
+    preview.gridSize = {2,2}; preview.requestedOutputSize = {2,2};
+    preview.physicalSize = {2.0,2.0}; preview.columnLayers = {1,2,2,1};
+    preview.layerHeight = 0.5; preview.layerCount = 2;
+    const auto token = std::make_shared<CancellationToken>();
+    preview.solidGeometry = MaskStackMeshBuilder::buildSolid(preview, token, {});
+    preview.explodedGeometry = MaskStackMeshBuilder::buildExploded(preview, token, {});
+    QVERIFY(preview.solidGeometry); QVERIFY(preview.explodedGeometry);
+
+    auto stack = std::make_shared<JobModelStack>();
+    stack->sourceSize = preview.requestedOutputSize; stack->gridSize = preview.gridSize;
+    stack->physicalSize = preview.physicalSize; stack->layerHeight = preview.layerHeight;
+    stack->layerCount = preview.layerCount; stack->solidGeometry = preview.solidGeometry;
+    stack->explodedGeometry = preview.explodedGeometry;
+    auto document = std::make_shared<JobDocument>();
+    document->layeredPackageDetected = true;
+    document->models.push_back({0,QStringLiteral("0"),QStringLiteral("0"),
+                                JobModelStackState::Loaded,stack,{}});
+    document->points.push_back({0,{0,0,0},1,0,{}});
+    document->bounds.include({0,0,0});
+    document->sceneBounds.include({0,0,0}); document->sceneBounds.include({2,2,1});
+
+    widget.resize(640,480); widget.setDocument(document); widget.show();
+    QTRY_VERIFY_WITH_TIMEOUT(mode->isEnabled(),1000);
+    QCOMPARE(mode->currentIndex(),0);
+    QCOMPARE(widget.stackDisplayMode(),JobStackDisplayMode::Solid);
+    QVERIFY(status->text().contains(QStringLiteral("模型 1/1")));
+    QTest::qWait(100);
+    const QImage solid = widget.grabFrame(); QVERIFY(!solid.isNull());
+    mode->setCurrentIndex(1);
+    QTRY_COMPARE(widget.stackDisplayMode(),JobStackDisplayMode::Exploded);
+    QTest::qWait(100);
+    const QImage exploded = widget.grabFrame(); QVERIFY(!exploded.isNull());
+    QVERIFY(solid != exploded);
 }
 
 void TestMainWindow::elementGroupingButtonUpdatesJobPreview() {

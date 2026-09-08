@@ -5,8 +5,6 @@
 #include <limits>
 
 namespace {
-constexpr std::size_t kMaximumExplodedQuads = 2'000'000;
-
 quint16 levelAt(const MaskStackPreviewData& preview, int x, int y) {
     if (x < 0 || y < 0 || x >= preview.gridSize.width() ||
         y >= preview.gridSize.height()) return 0;
@@ -44,16 +42,40 @@ std::shared_ptr<MaskStackGeometry> MaskStackMeshBuilder::buildSolid(
     const float pitchX = static_cast<float>(preview.physicalSize.width() / width);
     const float pitchY = static_cast<float>(preview.physicalSize.height() / height);
     const float layerHeight = static_cast<float>(preview.layerHeight);
-    if (progress) progress({QStringLiteral("生成连续堆叠实体"), 0, height});
+    // Merge coplanar cells into rectangles. Exported masks commonly contain large
+    // flat areas; emitting one quad per cell made a 512 x 512 preview consume
+    // hundreds of MB and multiplied that work for every Job placement.
+    std::vector<std::uint8_t> consumed(static_cast<std::size_t>(width) * height);
+    const qint64 progressTotal = qint64(width) + qint64(height) * 2;
+    if (progress) progress({QStringLiteral("生成连续堆叠实体"), 0, progressTotal});
     for (int y = 0; y < height; ++y) {
         if (token && token->isCancelled()) return {};
-        const float y0 = (height - y - 1) * pitchY;
-        const float y1 = (height - y) * pitchY;
         for (int x = 0; x < width; ++x) {
             const quint16 level = levelAt(preview, x, y);
-            if (level == 0) continue;
+            const std::size_t cell = static_cast<std::size_t>(y) * width + x;
+            if (level == 0 || consumed[cell]) continue;
+            int endX = x + 1;
+            while (endX < width && !consumed[static_cast<std::size_t>(y) * width + endX] &&
+                   levelAt(preview, endX, y) == level) ++endX;
+            int endY = y + 1;
+            for (; endY < height; ++endY) {
+                bool matches = true;
+                for (int nextX = x; nextX < endX; ++nextX) {
+                    const std::size_t next = static_cast<std::size_t>(endY) * width + nextX;
+                    if (consumed[next] || levelAt(preview, nextX, endY) != level) {
+                        matches = false;
+                        break;
+                    }
+                }
+                if (!matches) break;
+            }
+            for (int nextY = y; nextY < endY; ++nextY)
+                for (int nextX = x; nextX < endX; ++nextX)
+                    consumed[static_cast<std::size_t>(nextY) * width + nextX] = 1;
             const float x0 = x * pitchX;
-            const float x1 = (x + 1) * pitchX;
+            const float x1 = endX * pitchX;
+            const float y0 = (height - endY) * pitchY;
+            const float y1 = (height - y) * pitchY;
             const float top = level * layerHeight;
             const float layer = static_cast<float>(level);
             addQuad(result.get(), vertex(x0,y0,top,0,0,1,layer,0),
@@ -61,97 +83,151 @@ std::shared_ptr<MaskStackGeometry> MaskStackMeshBuilder::buildSolid(
                     vertex(x1,y1,top,0,0,1,layer,0),
                     vertex(x0,y1,top,0,0,1,layer,0));
 
-            const auto addWall = [&](quint16 neighbor, const MaskStackVertex& a,
-                                     const MaskStackVertex& b,
-                                     const MaskStackVertex& c,
-                                     const MaskStackVertex& d) {
-                if (neighbor >= level) return;
-                addQuad(result.get(), a, b, c, d);
-            };
-            const auto wallBottom = [&](quint16 neighbor) {
-                return neighbor * layerHeight;
-            };
-            const quint16 left = levelAt(preview, x - 1, y);
-            const quint16 right = levelAt(preview, x + 1, y);
-            const quint16 above = levelAt(preview, x, y - 1);
-            const quint16 below = levelAt(preview, x, y + 1);
-            addWall(left,
-                vertex(x0,y1,wallBottom(left),-1,0,0,layer,1),
-                vertex(x0,y0,wallBottom(left),-1,0,0,layer,1),
-                vertex(x0,y0,top,-1,0,0,layer,1),
-                vertex(x0,y1,top,-1,0,0,layer,1));
-            addWall(right,
-                vertex(x1,y0,wallBottom(right),1,0,0,layer,1),
-                vertex(x1,y1,wallBottom(right),1,0,0,layer,1),
-                vertex(x1,y1,top,1,0,0,layer,1),
-                vertex(x1,y0,top,1,0,0,layer,1));
-            addWall(above,
-                vertex(x1,y1,wallBottom(above),0,1,0,layer,1),
-                vertex(x0,y1,wallBottom(above),0,1,0,layer,1),
-                vertex(x0,y1,top,0,1,0,layer,1),
-                vertex(x1,y1,top,0,1,0,layer,1));
-            addWall(below,
-                vertex(x0,y0,wallBottom(below),0,-1,0,layer,1),
-                vertex(x1,y0,wallBottom(below),0,-1,0,layer,1),
-                vertex(x1,y0,top,0,-1,0,layer,1),
-                vertex(x0,y0,top,0,-1,0,layer,1));
         }
-        if (progress) progress({QStringLiteral("生成连续堆叠实体"), y + 1, height});
+        if (progress) progress({QStringLiteral("生成连续堆叠实体"), y + 1, progressTotal});
+    }
+
+    // Merge X-facing walls along Y when both their top and bottom levels match.
+    for (int x = 0; x < width; ++x) {
+        for (int side = 0; side < 2; ++side) {
+            int y = 0;
+            while (y < height) {
+                const quint16 level = levelAt(preview, x, y);
+                const quint16 neighbor = levelAt(preview, x + (side ? 1 : -1), y);
+                if (level == 0 || neighbor >= level) { ++y; continue; }
+                int endY = y + 1;
+                while (endY < height && levelAt(preview, x, endY) == level &&
+                       levelAt(preview, x + (side ? 1 : -1), endY) == neighbor) ++endY;
+                const float wallX = (x + side) * pitchX;
+                const float yLow = (height - endY) * pitchY;
+                const float yHigh = (height - y) * pitchY;
+                const float bottom = neighbor * layerHeight;
+                const float top = level * layerHeight;
+                const float layer = static_cast<float>(level);
+                if (!side)
+                    addQuad(result.get(), vertex(wallX,yHigh,bottom,-1,0,0,layer,1),
+                            vertex(wallX,yLow,bottom,-1,0,0,layer,1),
+                            vertex(wallX,yLow,top,-1,0,0,layer,1),
+                            vertex(wallX,yHigh,top,-1,0,0,layer,1));
+                else
+                    addQuad(result.get(), vertex(wallX,yLow,bottom,1,0,0,layer,1),
+                            vertex(wallX,yHigh,bottom,1,0,0,layer,1),
+                            vertex(wallX,yHigh,top,1,0,0,layer,1),
+                            vertex(wallX,yLow,top,1,0,0,layer,1));
+                y = endY;
+            }
+        }
+        if (progress) progress({QStringLiteral("生成连续堆叠实体"), height + x + 1,
+                                progressTotal});
+    }
+
+    // Merge Y-facing walls along X using the same level-pair criterion.
+    for (int y = 0; y < height; ++y) {
+        for (int side = 0; side < 2; ++side) {
+            int x = 0;
+            while (x < width) {
+                const quint16 level = levelAt(preview, x, y);
+                const quint16 neighbor = levelAt(preview, x, y + (side ? 1 : -1));
+                if (level == 0 || neighbor >= level) { ++x; continue; }
+                int endX = x + 1;
+                while (endX < width && levelAt(preview, endX, y) == level &&
+                       levelAt(preview, endX, y + (side ? 1 : -1)) == neighbor) ++endX;
+                const float x0 = x * pitchX;
+                const float x1 = endX * pitchX;
+                const float wallY = (height - y - (side ? 1 : 0)) * pitchY;
+                const float bottom = neighbor * layerHeight;
+                const float top = level * layerHeight;
+                const float layer = static_cast<float>(level);
+                if (!side)
+                    addQuad(result.get(), vertex(x1,wallY,bottom,0,1,0,layer,1),
+                            vertex(x0,wallY,bottom,0,1,0,layer,1),
+                            vertex(x0,wallY,top,0,1,0,layer,1),
+                            vertex(x1,wallY,top,0,1,0,layer,1));
+                else
+                    addQuad(result.get(), vertex(x0,wallY,bottom,0,-1,0,layer,1),
+                            vertex(x1,wallY,bottom,0,-1,0,layer,1),
+                            vertex(x1,wallY,top,0,-1,0,layer,1),
+                            vertex(x0,wallY,top,0,-1,0,layer,1));
+                x = endX;
+            }
+        }
+        if (progress) progress({QStringLiteral("生成连续堆叠实体"),
+                                qint64(height) + width + y + 1, progressTotal});
     }
     return result;
 }
 
 std::shared_ptr<MaskStackGeometry> MaskStackMeshBuilder::buildExploded(
     const MaskStackPreviewData& preview, const CancellationTokenPtr& token,
-    const Progress& progress) {
+    const Progress& progress, std::size_t maximumQuads) {
     auto result = std::make_shared<MaskStackGeometry>();
     const int width = preview.gridSize.width();
     const int height = preview.gridSize.height();
     if (width <= 0 || height <= 0 || preview.columnLayers.size() != width * height ||
         preview.layerHeight <= 0.0 || preview.layerCount <= 0) return result;
 
-    std::size_t estimatedRuns = 0;
+    struct HeightRectangle { int x0, x1, y0, y1; quint16 level; };
+    std::vector<HeightRectangle> rectangles;
+    std::vector<std::uint8_t> consumed(static_cast<std::size_t>(width) * height);
+    std::size_t estimatedQuads = 0;
     for (int y = 0; y < height; ++y) {
-        quint16 previous = 0;
+        if (token && token->isCancelled()) return {};
         for (int x = 0; x < width; ++x) {
-            const quint16 current = levelAt(preview, x, y);
-            if (current > previous) estimatedRuns += current - previous;
-            previous = current;
+            const quint16 level = levelAt(preview, x, y);
+            const std::size_t cell = static_cast<std::size_t>(y) * width + x;
+            if (level == 0 || consumed[cell]) continue;
+            int endX = x + 1;
+            while (endX < width && !consumed[static_cast<std::size_t>(y) * width + endX] &&
+                   levelAt(preview, endX, y) == level) ++endX;
+            int endY = y + 1;
+            for (; endY < height; ++endY) {
+                bool matches = true;
+                for (int nextX = x; nextX < endX; ++nextX) {
+                    const std::size_t next = static_cast<std::size_t>(endY) * width + nextX;
+                    if (consumed[next] || levelAt(preview, nextX, endY) != level) {
+                        matches = false;
+                        break;
+                    }
+                }
+                if (!matches) break;
+            }
+            for (int nextY = y; nextY < endY; ++nextY)
+                for (int nextX = x; nextX < endX; ++nextX)
+                    consumed[static_cast<std::size_t>(nextY) * width + nextX] = 1;
+            rectangles.push_back({x, endX, y, endY, level});
+            if (estimatedQuads > std::numeric_limits<std::size_t>::max() - level)
+                estimatedQuads = std::numeric_limits<std::size_t>::max();
+            else
+                estimatedQuads += level;
         }
     }
+    maximumQuads = std::max<std::size_t>(1, maximumQuads);
+    const double requiredStride = std::ceil(double(estimatedQuads) / maximumQuads);
     result->layerStride = std::max<int>(1, static_cast<int>(
-        std::ceil(double(estimatedRuns) / kMaximumExplodedQuads)));
+        std::min<double>(preview.layerCount, requiredStride)));
 
     const float pitchX = static_cast<float>(preview.physicalSize.width() / width);
     const float pitchY = static_cast<float>(preview.physicalSize.height() / height);
     const float layerHeight = static_cast<float>(preview.layerHeight);
-    const int visibleLayers = (preview.layerCount + result->layerStride - 1) /
-                              result->layerStride;
-    if (progress) progress({QStringLiteral("生成分层爆炸预览"), 0, visibleLayers});
-    int completed = 0;
-    for (int layer = 1; layer <= preview.layerCount; layer += result->layerStride) {
+    if (progress) progress({QStringLiteral("生成分层爆炸预览"), 0,
+                            static_cast<qint64>(rectangles.size())});
+    qint64 completed = 0;
+    for (const HeightRectangle& rectangle : rectangles) {
         if (token && token->isCancelled()) return {};
-        const float z = layer * layerHeight;
-        for (int y = 0; y < height; ++y) {
-            int x = 0;
-            while (x < width) {
-                while (x < width && levelAt(preview, x, y) < layer) ++x;
-                const int begin = x;
-                while (x < width && levelAt(preview, x, y) >= layer) ++x;
-                if (begin == x) continue;
-                const float x0 = begin * pitchX;
-                const float x1 = x * pitchX;
-                const float y0 = (height - y - 1) * pitchY;
-                const float y1 = (height - y) * pitchY;
-                const float layerValue = static_cast<float>(layer);
-                addQuad(result.get(), vertex(x0,y0,z,0,0,1,layerValue,2),
-                        vertex(x1,y0,z,0,0,1,layerValue,2),
-                        vertex(x1,y1,z,0,0,1,layerValue,2),
-                        vertex(x0,y1,z,0,0,1,layerValue,2));
-            }
+        const float x0 = rectangle.x0 * pitchX;
+        const float x1 = rectangle.x1 * pitchX;
+        const float y0 = (height - rectangle.y1) * pitchY;
+        const float y1 = (height - rectangle.y0) * pitchY;
+        for (int layer = 1; layer <= rectangle.level; layer += result->layerStride) {
+            const float z = layer * layerHeight;
+            const float layerValue = static_cast<float>(layer);
+            addQuad(result.get(), vertex(x0,y0,z,0,0,1,layerValue,2),
+                    vertex(x1,y0,z,0,0,1,layerValue,2),
+                    vertex(x1,y1,z,0,0,1,layerValue,2),
+                    vertex(x0,y1,z,0,0,1,layerValue,2));
         }
         if (progress) progress({QStringLiteral("生成分层爆炸预览"), ++completed,
-                                visibleLayers});
+                                static_cast<qint64>(rectangles.size())});
     }
     return result;
 }

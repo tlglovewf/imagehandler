@@ -3,7 +3,10 @@
 #include <QMetaType>
 #include <QColor>
 #include <QPoint>
+#include <QSize>
+#include <QSizeF>
 #include <QString>
+#include <QStringList>
 #include <QVector3D>
 #include <limits>
 #include <memory>
@@ -11,11 +14,30 @@
 
 enum class JobDocumentSource { ImportedFile, GeneratedPreview, ExportedFile };
 class JobSpatialIndex;
+struct MaskStackGeometry;
+
+enum class JobModelStackState { NotDetected, Loaded, Invalid };
+
+struct JobModelStack {
+    QSize sourceSize;
+    QSize gridSize;
+    QSizeF physicalSize;
+    double layerHeight = 0.0;
+    int layerCount = 0;
+    bool downsampled = false;
+    std::shared_ptr<const MaskStackGeometry> solidGeometry;
+    std::shared_ptr<const MaskStackGeometry> explodedGeometry;
+};
+
+using JobModelStackPtr = std::shared_ptr<const JobModelStack>;
 
 struct JobModel {
     qint64 id = -1;
     QString label;
     QString path;
+    JobModelStackState stackState = JobModelStackState::NotDetected;
+    JobModelStackPtr stack;
+    QString stackError;
 };
 
 struct JobCoordinate {
@@ -75,14 +97,22 @@ struct JobDocument {
     std::vector<JobModel> models;
     std::vector<JobPoint> points;
     JobBounds bounds;
+    JobBounds sceneBounds;
     std::shared_ptr<JobSpatialIndex> spatialIndex;
     // Prefix sums in placement order; entry 0 is zero and entry N+1 includes point N.
     std::vector<JobCoordinate> idPrefixSums;
     // Indexed by placementId. Empty for manually imported files.
     std::vector<QPoint> linkedCells;
+    bool layeredPackageDetected = false;
+    QStringList packageWarnings;
 
     [[nodiscard]] bool isLinked() const noexcept {
         return !linkedCells.empty() && linkedCells.size() == points.size();
+    }
+
+    [[nodiscard]] int loadedStackCount() const noexcept {
+        return static_cast<int>(std::count_if(models.cbegin(), models.cend(),
+            [](const JobModel& model) { return model.stackState == JobModelStackState::Loaded; }));
     }
 };
 

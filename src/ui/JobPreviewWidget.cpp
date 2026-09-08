@@ -1,14 +1,17 @@
 #include "ui/JobPreviewWidget.h"
+#include "domain/MaskSliceModels.h"
 #include "imaging/JobLabelLod.h"
 #include "imaging/JobPreviewMath.h"
 #include "imaging/JobSpatialIndex.h"
 
 #include <QCheckBox>
+#include <QComboBox>
 #include <QFile>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
+#include <QSignalBlocker>
 #include <QStyleHints>
 #include <QVBoxLayout>
 #include <algorithm>
@@ -42,12 +45,18 @@ constexpr size_t kMaximumLabelCandidates = 65536;
 
 struct PointVertex { float x, y, z, id, r, g, b; };
 struct LineVertex { float x, y, r, g, b; };
+struct StackInstance { float x, y, z, id, layerCount, padding[3]; };
 struct alignas(16) CameraUniform {
     float mvp[16];
     float selectedId = -1.0F;
     float hoveredId = -1.0F;
     float viewportSize[2]{1.0F,1.0F};
+    float stackExplode = 1.0F;
+    float padding[3]{};
 };
+static_assert(sizeof(MaskStackVertex) == 32);
+static_assert(sizeof(StackInstance) == 32);
+static_assert(sizeof(CameraUniform) == 96);
 
 class JobVulkanWindow;
 
@@ -73,8 +82,18 @@ private:
     bool upload(Buffer* buffer, const void* data, VkDeviceSize size, VkBufferUsageFlags usage);
     VkShaderModule loadShader(const QString& resourcePath);
     VkPipeline createPipeline(VkShaderModule vertex, VkShaderModule fragment,
-                              VkPrimitiveTopology topology, bool pointPipeline);
+                               VkPrimitiveTopology topology, bool pointPipeline);
+    VkPipeline createStackPipeline(VkShaderModule vertex, VkShaderModule fragment);
     void rebuildPointBuffer();
+    void rebuildStackBuffers();
+
+    struct StackBuffers {
+        Buffer vertex;
+        Buffer index;
+        Buffer instances;
+        std::uint32_t indexCount = 0;
+        std::uint32_t instanceCount = 0;
+    };
 
     JobVulkanWindow* window_ = nullptr;
     QVulkanDeviceFunctions* deviceFunctions_ = nullptr;
@@ -84,7 +103,9 @@ private:
     VkDescriptorPool descriptorPool_ = VK_NULL_HANDLE;
     VkPipeline pointPipeline_ = VK_NULL_HANDLE;
     VkPipeline linePipeline_ = VK_NULL_HANDLE;
+    VkPipeline stackPipeline_ = VK_NULL_HANDLE;
     Buffer pointBuffer_;
+    std::vector<StackBuffers> stackBuffers_;
     std::vector<Buffer> uniformBuffers_;
     std::vector<Buffer> lineBuffers_;
     std::vector<VkDescriptorSet> descriptorSets_;
@@ -110,15 +131,17 @@ public:
         idToIndex_.clear();
         origin_ = {};
         if (document_ && document_->bounds.valid) {
-            origin_ = document_->bounds.center();
+            const JobBounds& scene = document_->sceneBounds.valid ? document_->sceneBounds
+                                                                  : document_->bounds;
+            origin_ = scene.center();
             idToIndex_.resize(document_->points.size(), -1);
             for (size_t index = 0; index < document_->points.size(); ++index) {
                 const qint64 id = document_->points[index].placementId;
                 if (id >= 0 && id < static_cast<qint64>(idToIndex_.size()))
                     idToIndex_[static_cast<size_t>(id)] = static_cast<qint64>(index);
             }
-            camera_.setSceneBounds(document_->bounds.minimum.relativeTo(origin_),
-                                   document_->bounds.maximum.relativeTo(origin_));
+            camera_.setSceneBounds(scene.minimum.relativeTo(origin_),
+                                   scene.maximum.relativeTo(origin_));
         } else {
             camera_.setSceneBounds({-0.5F, -0.5F, -0.5F}, {0.5F, 0.5F, 0.5F});
         }
@@ -126,6 +149,14 @@ public:
         activeKeys_.clear();
         interactionTimer_.stop();
         pointBufferDirty_ = true;
+        stackBufferDirty_ = true;
+        requestUpdate();
+    }
+
+    void setStackDisplayMode(JobStackDisplayMode mode) {
+        if (stackMode_ == mode) return;
+        stackMode_ = mode;
+        stackBufferDirty_ = true;
         requestUpdate();
     }
 
@@ -148,6 +179,8 @@ public:
     [[nodiscard]] qint64 selectedId() const { return selectedId_; }
     [[nodiscard]] qint64 hoveredId() const { return hoveredId_; }
     [[nodiscard]] bool takePointBufferDirty() { return std::exchange(pointBufferDirty_, false); }
+    [[nodiscard]] bool takeStackBufferDirty() { return std::exchange(stackBufferDirty_, false); }
+    [[nodiscard]] JobStackDisplayMode stackDisplayMode() const noexcept { return stackMode_; }
 
     QMatrix4x4 viewProjection() const {
         const QSize imageSize = swapChainImageSize().isValid() ? swapChainImageSize() : size();
@@ -625,6 +658,8 @@ private:
     qint64 hoveredId_ = -1;
     bool guidesVisible_ = true;
     bool pointBufferDirty_ = true;
+    bool stackBufferDirty_ = true;
+    JobStackDisplayMode stackMode_ = JobStackDisplayMode::Solid;
     Qt::MouseButton pressedButton_ = Qt::NoButton;
     QPointF pressPosition_;
     QPointF lastPosition_;
@@ -743,6 +778,76 @@ VkPipeline JobVulkanRenderer::createPipeline(VkShaderModule vertex, VkShaderModu
                ? pipeline : VK_NULL_HANDLE;
 }
 
+VkPipeline JobVulkanRenderer::createStackPipeline(VkShaderModule vertex,
+                                                   VkShaderModule fragment) {
+    VkPipelineShaderStageCreateInfo stages[2]{};
+    stages[0].sType = stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vertex;
+    stages[0].pName = "main";
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = fragment;
+    stages[1].pName = "main";
+    const VkVertexInputBindingDescription bindings[2]{
+        {0, sizeof(MaskStackVertex), VK_VERTEX_INPUT_RATE_VERTEX},
+        {1, sizeof(StackInstance), VK_VERTEX_INPUT_RATE_INSTANCE}};
+    const VkVertexInputAttributeDescription attributes[7]{
+        {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0},
+        {1, 0, VK_FORMAT_R32G32B32_SFLOAT, 12},
+        {2, 0, VK_FORMAT_R32_SFLOAT, 24},
+        {3, 0, VK_FORMAT_R32_SFLOAT, 28},
+        {4, 1, VK_FORMAT_R32G32B32_SFLOAT, 0},
+        {5, 1, VK_FORMAT_R32_SFLOAT, 12},
+        {6, 1, VK_FORMAT_R32_SFLOAT, 16}};
+    VkPipelineVertexInputStateCreateInfo input{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    input.vertexBindingDescriptionCount = 2;
+    input.pVertexBindingDescriptions = bindings;
+    input.vertexAttributeDescriptionCount = 7;
+    input.pVertexAttributeDescriptions = attributes;
+    VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo viewport{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    viewport.viewportCount = 1;
+    viewport.scissorCount = 1;
+    VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    raster.polygonMode = VK_POLYGON_MODE_FILL;
+    raster.cullMode = VK_CULL_MODE_BACK_BIT;
+    raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    raster.lineWidth = 1.0F;
+    VkPipelineMultisampleStateCreateInfo multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    multisample.rasterizationSamples = window_->sampleCountFlagBits();
+    VkPipelineDepthStencilStateCreateInfo depth{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    depth.depthTestEnable = VK_TRUE;
+    depth.depthWriteEnable = VK_TRUE;
+    depth.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+    VkPipelineColorBlendAttachmentState attachment{};
+    attachment.colorWriteMask = 0xF;
+    VkPipelineColorBlendStateCreateInfo blend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    blend.attachmentCount = 1;
+    blend.pAttachments = &attachment;
+    const VkDynamicState states[]{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dynamic.dynamicStateCount = 2;
+    dynamic.pDynamicStates = states;
+    VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    info.stageCount = 2;
+    info.pStages = stages;
+    info.pVertexInputState = &input;
+    info.pInputAssemblyState = &assembly;
+    info.pViewportState = &viewport;
+    info.pRasterizationState = &raster;
+    info.pMultisampleState = &multisample;
+    info.pDepthStencilState = &depth;
+    info.pColorBlendState = &blend;
+    info.pDynamicState = &dynamic;
+    info.layout = pipelineLayout_;
+    info.renderPass = window_->defaultRenderPass();
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    return deviceFunctions_->vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &info,
+                                                        nullptr, &pipeline) == VK_SUCCESS
+        ? pipeline : VK_NULL_HANDLE;
+}
+
 void JobVulkanRenderer::initResources() {
     device_ = window_->device();
     deviceFunctions_ = window_->vulkanInstance()->deviceFunctions(device_);
@@ -777,12 +882,17 @@ void JobVulkanRenderer::initResources() {
     VkShaderModule pointFragment = loadShader(QStringLiteral(":/job_shaders/job_points.frag.spv"));
     VkShaderModule lineVertex = loadShader(QStringLiteral(":/job_shaders/job_lines.vert.spv"));
     VkShaderModule lineFragment = loadShader(QStringLiteral(":/job_shaders/job_lines.frag.spv"));
+    VkShaderModule stackVertex = loadShader(QStringLiteral(":/job_shaders/job_stack.vert.spv"));
+    VkShaderModule stackFragment = loadShader(QStringLiteral(":/job_shaders/job_stack.frag.spv"));
     if (pointVertex && pointFragment) pointPipeline_ = createPipeline(pointVertex, pointFragment, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, true);
     if (lineVertex && lineFragment) linePipeline_ = createPipeline(lineVertex, lineFragment, VK_PRIMITIVE_TOPOLOGY_LINE_LIST, false);
-    for (VkShaderModule module : {pointVertex, pointFragment, lineVertex, lineFragment})
+    if (stackVertex && stackFragment) stackPipeline_ = createStackPipeline(stackVertex, stackFragment);
+    for (VkShaderModule module : {pointVertex, pointFragment, lineVertex, lineFragment,
+                                  stackVertex, stackFragment})
         if (module) deviceFunctions_->vkDestroyShaderModule(device_, module, nullptr);
     initialized_ = pointPipeline_ && linePipeline_;
     rebuildPointBuffer();
+    rebuildStackBuffers();
 }
 
 void JobVulkanRenderer::rebuildPointBuffer() {
@@ -795,8 +905,11 @@ void JobVulkanRenderer::rebuildPointBuffer() {
     const JobCoordinate origin = window_->origin();
     for (const JobPoint& point : document->points) {
         const QVector3D local = point.position.relativeTo(origin);
-        const QColor color = point.groupColor.isValid() ? point.groupColor
-                                                        : QColor(26, 191, 255);
+        QColor color = point.groupColor.isValid() ? point.groupColor : QColor(26, 191, 255);
+        if (document->layeredPackageDetected && point.placeId >= 0 &&
+            point.placeId < static_cast<qint64>(document->models.size()) &&
+            document->models[static_cast<size_t>(point.placeId)].stackState ==
+                JobModelStackState::Invalid) color = QColor(255, 145, 48);
         vertices.push_back({local.x(), local.y(), local.z(),
                             static_cast<float>(point.placementId), color.redF(),
                             color.greenF(), color.blueF()});
@@ -804,9 +917,69 @@ void JobVulkanRenderer::rebuildPointBuffer() {
     upload(&pointBuffer_, vertices.data(), vertices.size() * sizeof(PointVertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
 }
 
+void JobVulkanRenderer::rebuildStackBuffers() {
+    deviceFunctions_->vkDeviceWaitIdle(device_);
+    for (auto& buffers : stackBuffers_) {
+        destroyBuffer(&buffers.vertex);
+        destroyBuffer(&buffers.index);
+        destroyBuffer(&buffers.instances);
+    }
+    stackBuffers_.clear();
+    const auto& document = window_->document();
+    if (!document || document->loadedStackCount() <= 0) return;
+
+    struct PendingBatch {
+        std::shared_ptr<const MaskStackGeometry> geometry;
+        std::vector<StackInstance> instances;
+    };
+    std::map<const MaskStackGeometry*, PendingBatch> batches;
+    const JobCoordinate origin = window_->origin();
+    for (const JobPoint& point : document->points) {
+        if (point.placeId < 0 || point.placeId >= static_cast<qint64>(document->models.size()))
+            continue;
+        const JobModel& model = document->models[static_cast<size_t>(point.placeId)];
+        if (!model.stack) continue;
+        const auto geometry = window_->stackDisplayMode() == JobStackDisplayMode::Exploded
+            ? model.stack->explodedGeometry : model.stack->solidGeometry;
+        if (!geometry || geometry->vertices.empty() || geometry->indices.empty()) continue;
+        PendingBatch& batch = batches[geometry.get()];
+        batch.geometry = geometry;
+        const QVector3D local = point.position.relativeTo(origin);
+        batch.instances.push_back({local.x(), local.y(), local.z(),
+                                   static_cast<float>(point.placementId),
+                                   static_cast<float>(model.stack->layerCount), {0, 0, 0}});
+    }
+    stackBuffers_.reserve(batches.size());
+    for (const auto& [key, pending] : batches) {
+        Q_UNUSED(key);
+        StackBuffers buffers;
+        const auto& geometry = *pending.geometry;
+        if (!upload(&buffers.vertex, geometry.vertices.data(),
+                    geometry.vertices.size() * sizeof(MaskStackVertex),
+                    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) ||
+            !upload(&buffers.index, geometry.indices.data(),
+                    geometry.indices.size() * sizeof(std::uint32_t),
+                    VK_BUFFER_USAGE_INDEX_BUFFER_BIT) ||
+            !upload(&buffers.instances, pending.instances.data(),
+                    pending.instances.size() * sizeof(StackInstance),
+                    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)) {
+            destroyBuffer(&buffers.vertex);
+            destroyBuffer(&buffers.index);
+            destroyBuffer(&buffers.instances);
+            continue;
+        }
+        buffers.indexCount = static_cast<std::uint32_t>(std::min<std::size_t>(
+            geometry.indices.size(), std::numeric_limits<std::uint32_t>::max()));
+        buffers.instanceCount = static_cast<std::uint32_t>(std::min<std::size_t>(
+            pending.instances.size(), std::numeric_limits<std::uint32_t>::max()));
+        stackBuffers_.push_back(std::move(buffers));
+    }
+}
+
 void JobVulkanRenderer::startNextFrame() {
     if (!initialized_) { window_->frameReady(); return; }
     if (window_->takePointBufferDirty()) rebuildPointBuffer();
+    if (window_->takeStackBufferDirty()) rebuildStackBuffers();
     const int frame = window_->currentFrame();
     CameraUniform uniform;
     const QMatrix4x4 matrix = window_->viewProjection();
@@ -815,6 +988,7 @@ void JobVulkanRenderer::startNextFrame() {
     uniform.hoveredId = static_cast<float>(window_->hoveredId());
     uniform.viewportSize[0]=static_cast<float>(std::max(1,window_->swapChainImageSize().width()));
     uniform.viewportSize[1]=static_cast<float>(std::max(1,window_->swapChainImageSize().height()));
+    uniform.stackExplode = window_->stackDisplayMode() == JobStackDisplayMode::Exploded ? 1.2F : 1.0F;
     upload(&uniformBuffers_[frame], &uniform, sizeof(uniform), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
     const std::vector<LineVertex> lines = window_->buildLineVertices();
     if (!lines.empty()) upload(&lineBuffers_[frame], lines.data(), lines.size() * sizeof(LineVertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
@@ -834,11 +1008,25 @@ void JobVulkanRenderer::startNextFrame() {
     deviceFunctions_->vkCmdSetViewport(command, 0, 1, &viewport);
     deviceFunctions_->vkCmdSetScissor(command, 0, 1, &scissor);
     const auto& document = window_->document();
+    deviceFunctions_->vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                               pipelineLayout_, 0, 1,
+                                               &descriptorSets_[frame], 0, nullptr);
+    if (stackPipeline_ && !stackBuffers_.empty()) {
+        deviceFunctions_->vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                             stackPipeline_);
+        const VkDeviceSize offsets[2]{0, 0};
+        for (const StackBuffers& buffers : stackBuffers_) {
+            const VkBuffer vertexBuffers[2]{buffers.vertex.buffer, buffers.instances.buffer};
+            deviceFunctions_->vkCmdBindVertexBuffers(command, 0, 2, vertexBuffers, offsets);
+            deviceFunctions_->vkCmdBindIndexBuffer(command, buffers.index.buffer, 0,
+                                                    VK_INDEX_TYPE_UINT32);
+            deviceFunctions_->vkCmdDrawIndexed(command, buffers.indexCount,
+                                                buffers.instanceCount, 0, 0, 0);
+        }
+    }
     if (document && pointBuffer_.buffer) {
         const VkDeviceSize offset = 0;
         deviceFunctions_->vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pointPipeline_);
-        deviceFunctions_->vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                                   pipelineLayout_, 0, 1, &descriptorSets_[frame], 0, nullptr);
         deviceFunctions_->vkCmdBindVertexBuffers(command, 0, 1, &pointBuffer_.buffer, &offset);
         deviceFunctions_->vkCmdDraw(command, 6, static_cast<uint32_t>(document->points.size()), 0, 0);
     }
@@ -856,13 +1044,20 @@ void JobVulkanRenderer::releaseResources() {
     if (!deviceFunctions_) return;
     for (auto& buffer : lineBuffers_) destroyBuffer(&buffer);
     for (auto& buffer : uniformBuffers_) destroyBuffer(&buffer);
+    for (auto& buffers : stackBuffers_) {
+        destroyBuffer(&buffers.vertex);
+        destroyBuffer(&buffers.index);
+        destroyBuffer(&buffers.instances);
+    }
+    stackBuffers_.clear();
     destroyBuffer(&pointBuffer_);
     if (pointPipeline_) deviceFunctions_->vkDestroyPipeline(device_, pointPipeline_, nullptr);
     if (linePipeline_) deviceFunctions_->vkDestroyPipeline(device_, linePipeline_, nullptr);
+    if (stackPipeline_) deviceFunctions_->vkDestroyPipeline(device_, stackPipeline_, nullptr);
     if (pipelineLayout_) deviceFunctions_->vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr);
     if (descriptorPool_) deviceFunctions_->vkDestroyDescriptorPool(device_, descriptorPool_, nullptr);
     if (descriptorLayout_) deviceFunctions_->vkDestroyDescriptorSetLayout(device_, descriptorLayout_, nullptr);
-    pointPipeline_ = linePipeline_ = VK_NULL_HANDLE;
+    pointPipeline_ = linePipeline_ = stackPipeline_ = VK_NULL_HANDLE;
     pipelineLayout_ = VK_NULL_HANDLE; descriptorPool_ = VK_NULL_HANDLE; descriptorLayout_ = VK_NULL_HANDLE;
     initialized_ = false; deviceFunctions_ = nullptr; device_ = VK_NULL_HANDLE;
 }
@@ -949,6 +1144,13 @@ public:
         Q_UNUSED(visible);
 #endif
     }
+    void setStackMode(JobStackDisplayMode mode) {
+#if IMAGE_HANDLER_HAS_VULKAN_PREVIEW
+        if (window_) window_->setStackDisplayMode(mode);
+#else
+        Q_UNUSED(mode);
+#endif
+    }
     QImage grabFrame() {
 #if IMAGE_HANDLER_HAS_VULKAN_PREVIEW
         return window_ ? window_->grab() : QImage();
@@ -973,8 +1175,11 @@ JobPreviewWidget::JobPreviewWidget(QWidget* parent) : QWidget(parent) {
     auto* tools = new QHBoxLayout;
     fitButton_ = new QPushButton(QStringLiteral("适配全部")); fitButton_->setObjectName(QStringLiteral("jobFitAllButton"));
     guidesCheck_ = new QCheckBox(QStringLiteral("坐标轴与网格")); guidesCheck_->setObjectName(QStringLiteral("jobGuidesCheck")); guidesCheck_->setChecked(true);
+    stackModeCombo_ = new QComboBox; stackModeCombo_->setObjectName(QStringLiteral("jobStackDisplayMode"));
+    stackModeCombo_->addItems({QStringLiteral("连续实体"), QStringLiteral("分层爆炸")});
+    stackModeCombo_->setEnabled(false);
     statusLabel_ = new QLabel(QStringLiteral("未加载 Job")); statusLabel_->setObjectName(QStringLiteral("jobPreviewStatus"));
-    tools->addWidget(fitButton_); tools->addWidget(guidesCheck_); tools->addStretch(); tools->addWidget(statusLabel_);
+    tools->addWidget(fitButton_); tools->addWidget(guidesCheck_); tools->addWidget(stackModeCombo_); tools->addStretch(); tools->addWidget(statusLabel_);
     root->addLayout(tools);
     backend_ = new Backend(this, this);
     if (backend_->available()) root->addWidget(backend_->widget(), 1);
@@ -986,6 +1191,9 @@ JobPreviewWidget::JobPreviewWidget(QWidget* parent) : QWidget(parent) {
     }
     connect(fitButton_, &QPushButton::clicked, this, &JobPreviewWidget::fitAll);
     connect(guidesCheck_, &QCheckBox::toggled, this, [this](bool visible) { backend_->setGuides(visible); });
+    connect(stackModeCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            [this](int index) { setStackDisplayMode(index == 1 ? JobStackDisplayMode::Exploded
+                                                               : JobStackDisplayMode::Solid); });
     fitButton_->setEnabled(backend_->available()); guidesCheck_->setEnabled(backend_->available());
 }
 
@@ -993,13 +1201,33 @@ JobPreviewWidget::~JobPreviewWidget() { delete backend_; }
 
 void JobPreviewWidget::setDocument(const JobDocumentPtr& document) {
     document_ = document; selectedPlaceId_ = -1;
+    stackMode_ = JobStackDisplayMode::Solid;
+    { const QSignalBlocker blocker(stackModeCombo_); stackModeCombo_->setCurrentIndex(0); }
     backend_->setDocument(document_);
+    backend_->setStackMode(stackMode_);
+    const int loaded = document_ ? document_->loadedStackCount() : 0;
+    stackModeCombo_->setEnabled(backend_->available() && loaded > 0);
+    statusLabel_->setToolTip(document_ ? document_->packageWarnings.join(QLatin1Char('\n')) : QString{});
+    statusLabel_->setStyleSheet(document_ && !document_->packageWarnings.isEmpty()
+        ? QStringLiteral("QLabel { color: #ffb74d; }") : QString{});
     if (!document_) statusLabel_->setText(QStringLiteral("未加载 Job"));
+    else if (document_->layeredPackageDetected)
+        statusLabel_->setText(QStringLiteral("%1 个摆放 | 模型 %2/%3%4")
+            .arg(document_->points.size()).arg(loaded).arg(document_->models.size())
+            .arg([&] {
+                const bool downsampled = std::any_of(document_->models.cbegin(),
+                    document_->models.cend(), [](const JobModel& model) {
+                        return model.stack && model.stack->downsampled;
+                    });
+                QString suffix = downsampled ? QStringLiteral(" | 降采样预览") : QString{};
+                if (!document_->packageWarnings.isEmpty())
+                    suffix += QStringLiteral(" | 警告 %1").arg(document_->packageWarnings.size());
+                return suffix;
+            }()));
     else statusLabel_->setText(QStringLiteral("%1 个点 | %2")
-                                   .arg(document_->points.size())
-                                   .arg(document_->source == JobDocumentSource::ImportedFile
-                                            ? QStringLiteral("手动导入（不联动）")
-                                            : QStringLiteral("分割联动")));
+        .arg(document_->points.size())
+        .arg(document_->source == JobDocumentSource::ImportedFile
+                 ? QStringLiteral("手动导入（不联动）") : QStringLiteral("分割联动")));
 }
 
 bool JobPreviewWidget::isVulkanAvailable() const noexcept { return backend_ && backend_->available(); }
@@ -1011,4 +1239,12 @@ void JobPreviewWidget::setSelectedPlaceId(qint64 placeId, bool focus, bool prese
 
 void JobPreviewWidget::clearSelection() { setSelectedPlaceId(-1, false); }
 void JobPreviewWidget::fitAll() { if (backend_) backend_->fitAll(); }
+void JobPreviewWidget::setStackDisplayMode(JobStackDisplayMode mode) {
+    stackMode_ = mode;
+    if (stackModeCombo_ && stackModeCombo_->currentIndex() != (mode == JobStackDisplayMode::Exploded ? 1 : 0)) {
+        const QSignalBlocker blocker(stackModeCombo_);
+        stackModeCombo_->setCurrentIndex(mode == JobStackDisplayMode::Exploded ? 1 : 0);
+    }
+    if (backend_) backend_->setStackMode(mode);
+}
 QImage JobPreviewWidget::grabFrame() { return backend_ ? backend_->grabFrame() : QImage(); }

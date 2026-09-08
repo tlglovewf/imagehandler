@@ -2,6 +2,7 @@
 
 #include "domain/MaskSliceModels.h"
 
+#include <cstddef>
 #include <functional>
 
 class MaskStackMeshBuilder final {
@@ -13,5 +14,6 @@ public:
         const Progress& progress = {});
     [[nodiscard]] static std::shared_ptr<MaskStackGeometry> buildExploded(
         const MaskStackPreviewData& preview, const CancellationTokenPtr& token,
-        const Progress& progress = {});
+        const Progress& progress = {},
+        std::size_t maximumQuads = 2'000'000);
 };
