@@ -37,6 +37,10 @@
 #include <QtTest>
 #include <algorithm>
 
+#if IMAGE_HANDLER_HAS_VULKAN_PREVIEW
+#include <QVulkanWindow>
+#endif
+
 class TestMainWindow final : public QObject {
     Q_OBJECT
 private Q_SLOTS:
@@ -468,6 +472,44 @@ void TestMainWindow::segmentationStatisticsUpdates() {
     dialog.configure(document,grid,TraversalMode::SnakeZ,0.25,1.0,true,true,
                      directory.path(),QPoint(1,1));
     QVERIFY(previewElement->text().contains(QStringLiteral("预览块：2")));
+
+    auto* stack=dialog.findChild<MaskStackWidget*>(QStringLiteral("layeredExportStackView"));
+    QVERIFY(stack);
+    dialog.show();
+    tabs->setCurrentIndex(1);
+    QTRY_VERIFY_WITH_TIMEOUT(stack->preview()!=nullptr,5000);
+#if IMAGE_HANDLER_HAS_VULKAN_PREVIEW
+    if(stack->isVulkanAvailable()){
+        QVulkanWindow* renderWindow=nullptr;
+        for(QWindow* candidate:QGuiApplication::allWindows()){
+            if(candidate->objectName()==QStringLiteral("maskStackVulkanWindow")){
+                renderWindow=qobject_cast<QVulkanWindow*>(candidate);
+                break;
+            }
+        }
+        QVERIFY(renderWindow);
+        QVERIFY(renderWindow->flags().testFlag(QVulkanWindow::PersistentResources));
+
+        QImage frame;
+        QTRY_VERIFY_WITH_TIMEOUT(!(frame=stack->grabFrame()).isNull(),3000);
+        tabs->setCurrentIndex(0);
+        QTRY_VERIFY_WITH_TIMEOUT(!renderWindow->isExposed(),3000);
+        tabs->setCurrentIndex(1);
+        QTRY_VERIFY_WITH_TIMEOUT(renderWindow->isExposed(),3000);
+        QTRY_VERIFY_WITH_TIMEOUT(!(frame=stack->grabFrame()).isNull(),3000);
+        bool hasGeometry=false;
+        for(int y=0;y<frame.height()&&!hasGeometry;++y){
+            for(int x=0;x<frame.width();++x){
+                const QColor color=frame.pixelColor(x,y);
+                if(color.blue()>60||color.green()>60||color.red()>60){
+                    hasGeometry=true;
+                    break;
+                }
+            }
+        }
+        QVERIFY2(hasGeometry,"Layered export Vulkan preview was blank after changing tabs");
+    }
+#endif
 }
 
 void TestMainWindow::maskSliceWindowDefaultsAndReuse() {

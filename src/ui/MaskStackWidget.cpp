@@ -89,7 +89,10 @@ private:
 
 class StackVulkanWindow final : public QVulkanWindow {
 public:
-    StackVulkanWindow() { camera_.setContinuousOrbitEnabled(true); }
+    StackVulkanWindow() {
+        setFlags(PersistentResources);
+        camera_.setContinuousOrbitEnabled(true);
+    }
     QVulkanWindowRenderer* createRenderer() override {
         renderer_ = new StackVulkanRenderer(this);
         return renderer_;
@@ -166,6 +169,11 @@ public:
         linesDirty_ = false;
         *lines = lines_;
         return true;
+    }
+    void invalidateGraphicsResources() {
+        QMutexLocker lock(&mutex_);
+        geometryDirty_ = true;
+        linesDirty_ = true;
     }
     StackUniform uniform() const {
         QMutexLocker lock(&mutex_);
@@ -395,7 +403,7 @@ void StackVulkanRenderer::initResources(){device_=window_->device();functions_=w
 void StackVulkanRenderer::rebuildGeometry(){std::shared_ptr<const MaskStackGeometry> geometry;if(!window_->takeGeometry(&geometry))return;indexCount_=0;if(!geometry||geometry->vertices.empty()||geometry->indices.empty())return;if(upload(&vertexBuffer_,geometry->vertices.data(),geometry->vertices.size()*sizeof(MaskStackVertex),VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)&&upload(&indexBuffer_,geometry->indices.data(),geometry->indices.size()*sizeof(std::uint32_t),VK_BUFFER_USAGE_INDEX_BUFFER_BIT))indexCount_=static_cast<std::uint32_t>(std::min<std::size_t>(geometry->indices.size(),std::numeric_limits<std::uint32_t>::max()));}
 void StackVulkanRenderer::rebuildLines(){std::vector<StackLineVertex> lines;if(!window_->takeLines(&lines))return;lineCount_=0;if(lines.empty())return;if(upload(&lineBuffer_,lines.data(),lines.size()*sizeof(StackLineVertex),VK_BUFFER_USAGE_VERTEX_BUFFER_BIT))lineCount_=static_cast<std::uint32_t>(std::min<std::size_t>(lines.size(),std::numeric_limits<std::uint32_t>::max()));}
 void StackVulkanRenderer::startNextFrame(){if(!initialized_){window_->frameReady();return;}rebuildGeometry();rebuildLines();const int frame=window_->currentFrame();const StackUniform uniform=window_->uniform();upload(&uniformBuffers_[frame],&uniform,sizeof(uniform),VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);VkClearValue clears[2]{};clears[0].color={{0.025F,0.035F,0.065F,1.0F}};clears[1].depthStencil={1.0F,0};VkRenderPassBeginInfo begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};begin.renderPass=window_->defaultRenderPass();begin.framebuffer=window_->currentFramebuffer();begin.renderArea.extent={static_cast<uint32_t>(window_->swapChainImageSize().width()),static_cast<uint32_t>(window_->swapChainImageSize().height())};begin.clearValueCount=2;begin.pClearValues=clears;VkCommandBuffer command=window_->currentCommandBuffer();functions_->vkCmdBeginRenderPass(command,&begin,VK_SUBPASS_CONTENTS_INLINE);VkViewport viewport{0,0,float(begin.renderArea.extent.width),float(begin.renderArea.extent.height),0,1};VkRect2D scissor{{0,0},begin.renderArea.extent};functions_->vkCmdSetViewport(command,0,1,&viewport);functions_->vkCmdSetScissor(command,0,1,&scissor);functions_->vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelineLayout_,0,1,&descriptorSets_[frame],0,nullptr);const VkDeviceSize offset=0;if(indexCount_&&vertexBuffer_.buffer&&indexBuffer_.buffer){functions_->vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_GRAPHICS,surfacePipeline_);functions_->vkCmdBindVertexBuffers(command,0,1,&vertexBuffer_.buffer,&offset);functions_->vkCmdBindIndexBuffer(command,indexBuffer_.buffer,0,VK_INDEX_TYPE_UINT32);functions_->vkCmdDrawIndexed(command,indexCount_,1,0,0,0);}if(lineCount_&&lineBuffer_.buffer){functions_->vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_GRAPHICS,linePipeline_);functions_->vkCmdBindVertexBuffers(command,0,1,&lineBuffer_.buffer,&offset);functions_->vkCmdDraw(command,lineCount_,1,0,0);}functions_->vkCmdEndRenderPass(command);window_->frameReady();}
-void StackVulkanRenderer::releaseResources(){if(!functions_)return;for(auto& buffer:uniformBuffers_)destroyBuffer(&buffer);destroyBuffer(&vertexBuffer_);destroyBuffer(&indexBuffer_);destroyBuffer(&lineBuffer_);if(surfacePipeline_)functions_->vkDestroyPipeline(device_,surfacePipeline_,nullptr);if(linePipeline_)functions_->vkDestroyPipeline(device_,linePipeline_,nullptr);if(pipelineLayout_)functions_->vkDestroyPipelineLayout(device_,pipelineLayout_,nullptr);if(descriptorPool_)functions_->vkDestroyDescriptorPool(device_,descriptorPool_,nullptr);if(descriptorLayout_)functions_->vkDestroyDescriptorSetLayout(device_,descriptorLayout_,nullptr);initialized_=false;functions_=nullptr;device_=VK_NULL_HANDLE;}
+void StackVulkanRenderer::releaseResources(){if(!functions_)return;for(auto& buffer:uniformBuffers_)destroyBuffer(&buffer);destroyBuffer(&vertexBuffer_);destroyBuffer(&indexBuffer_);destroyBuffer(&lineBuffer_);if(surfacePipeline_)functions_->vkDestroyPipeline(device_,surfacePipeline_,nullptr);if(linePipeline_)functions_->vkDestroyPipeline(device_,linePipeline_,nullptr);if(pipelineLayout_)functions_->vkDestroyPipelineLayout(device_,pipelineLayout_,nullptr);if(descriptorPool_)functions_->vkDestroyDescriptorPool(device_,descriptorPool_,nullptr);if(descriptorLayout_)functions_->vkDestroyDescriptorSetLayout(device_,descriptorLayout_,nullptr);uniformBuffers_.clear();descriptorSets_.clear();surfacePipeline_=VK_NULL_HANDLE;linePipeline_=VK_NULL_HANDLE;pipelineLayout_=VK_NULL_HANDLE;descriptorPool_=VK_NULL_HANDLE;descriptorLayout_=VK_NULL_HANDLE;indexCount_=0;lineCount_=0;window_->invalidateGraphicsResources();initialized_=false;functions_=nullptr;device_=VK_NULL_HANDLE;}
 } // namespace
 #endif
 
