@@ -184,7 +184,48 @@ void JobTerrainCamera::orbit(const QPointF& pixelDelta) {
     pose_.azimuth = std::remainder(pose_.azimuth, 360.0F);
 }
 
-void JobTerrainCamera::translate(const QVector3D& delta) { pose_.pivot += delta; }
+void JobTerrainCamera::translate(const QVector3D& delta) {
+    const QVector3D next = pose_.pivot + delta;
+    if (std::isfinite(next.x()) && std::isfinite(next.y()) && std::isfinite(next.z()))
+        pose_.pivot = next;
+}
+
+bool JobTerrainCamera::groundIntersection(const QPointF& screen, const QSizeF& viewport,
+                                          const QMatrix4x4& viewProjection,
+                                          QVector3D* intersection) const {
+    QVector3D origin, direction, hit;
+    if (!intersection ||
+        !JobPreviewMath::screenRay(screen, viewport, viewProjection, &origin, &direction) ||
+        !JobPreviewMath::intersectHorizontalPlane(origin, direction, pose_.pivot.z(), &hit))
+        return false;
+    // Near the horizon a valid forward intersection can still be arbitrarily far
+    // away. Do not use such points as navigation anchors.
+    const float distance = (hit - eye()).length();
+    if (!std::isfinite(distance) || distance > pose_.distance * 10.0F) return false;
+    *intersection = hit;
+    return true;
+}
+
+void JobTerrainCamera::panOnGround(const QPointF& previous, const QPointF& current,
+                                  const QSizeF& viewport, const QMatrix4x4& viewProjection) {
+    const QPointF pixels = current - previous;
+    const float worldPerPixel = std::max(0.000001F,
+        2.0F * pose_.distance * std::tan(kFieldOfViewRadians * 0.5F) /
+            static_cast<float>(std::max(1.0, viewport.height())));
+    QVector3D before, after;
+    if (groundIntersection(previous, viewport, viewProjection, &before) &&
+        groundIntersection(current, viewport, viewProjection, &after)) {
+        QVector3D delta = before - after;
+        delta.setZ(0.0F);
+        const double limit = std::hypot(pixels.x(), pixels.y()) * worldPerPixel * 10.0;
+        if (std::isfinite(delta.length()) && delta.length() <= limit) {
+            translate(delta);
+            return;
+        }
+    }
+    translate(right() * float(-pixels.x()) * worldPerPixel +
+              groundForward() * float(pixels.y()) * worldPerPixel);
+}
 
 void JobTerrainCamera::zoomBy(float factor) {
     if (!std::isfinite(factor) || factor <= 0.0F) return;

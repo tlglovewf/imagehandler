@@ -181,6 +181,7 @@ void MainWindow::connectUi() {
     connect(view_,&LargeImageView::segmentationCellsSliceActivated,this,
             qOverload<const QVector<QPoint>&,const QPoint&>(&MainWindow::showMaskSlices));
     connect(jobView_,&JobPreviewWidget::placeSelected,this,&MainWindow::selectImageFromJob);
+    connect(jobView_,&JobPreviewWidget::placeActivated,this,&MainWindow::showJobStack);
     connect(previewTabs_,&QTabBar::currentChanged,this,&MainWindow::showPreviewTab);
     connect(previewLayoutMode_,qOverload<int>(&QComboBox::currentIndexChanged),this,&MainWindow::setPreviewLayoutMode);
     connect(jobPreviewTimer_,&QTimer::timeout,this,&MainWindow::rebuildJobPreview);
@@ -254,6 +255,7 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     saveSettings();
     if (elementCloudWindow_) elementCloudWindow_->cancelAndClear();
     if (maskSliceWindow_) maskSliceWindow_->cancelAndClear();
+    if (jobStackWindow_) jobStackWindow_->cancelAndClear();
     QMainWindow::closeEvent(event);
 }
 
@@ -598,7 +600,7 @@ void MainWindow::chooseSelectedBlocksExportDirectory() {
     }
 }
 
-void MainWindow::acceptDocument(const ImageDocumentPtr& doc){if(!doc)return;mergePreviewGeneration_=0;if(elementCloudWindow_)elementCloudWindow_->cancelAndClear();if(maskSliceWindow_)maskSliceWindow_->cancelAndClear();clearElementGrouping();document_=doc;segmentation_={};jobDocument_.reset();jobView_->setDocument({});pointCloudDocument_.reset();pointCloudView_->clear();selectedRow_=-1;selectedColumn_=-1;pathButton_->setChecked(false);lastTilePhase_.clear();lastTileCompleted_=-1;lastTileTotal_=-1;view_->setDocument(doc);showPreviewTab(0);updateSelectedCellLabel();imageInfo_->setText(QStringLiteral("%1 × %2 | %3").arg(doc->metadata.width).arg(doc->metadata.height).arg(pixelDescription(doc->metadata)));updateGridCountLabel();setBusyUi(tasks_->isBusy());}
+void MainWindow::acceptDocument(const ImageDocumentPtr& doc){if(!doc)return;mergePreviewGeneration_=0;if(elementCloudWindow_)elementCloudWindow_->cancelAndClear();if(maskSliceWindow_)maskSliceWindow_->cancelAndClear();if(jobStackWindow_)jobStackWindow_->cancelAndClear();clearElementGrouping();document_=doc;segmentation_={};jobDocument_.reset();jobView_->setDocument({});pointCloudDocument_.reset();pointCloudView_->clear();selectedRow_=-1;selectedColumn_=-1;pathButton_->setChecked(false);lastTilePhase_.clear();lastTileCompleted_=-1;lastTileTotal_=-1;view_->setDocument(doc);showPreviewTab(0);updateSelectedCellLabel();imageInfo_->setText(QStringLiteral("%1 × %2 | %3").arg(doc->metadata.width).arg(doc->metadata.height).arg(pixelDescription(doc->metadata)));updateGridCountLabel();setBusyUi(tasks_->isBusy());}
 
 void MainWindow::chooseJobFile(){const QString path=QFileDialog::getOpenFileName(this,QStringLiteral("选择 Job 文件"),lastJobDirectory_,QStringLiteral("Job 文件 (*.json *.aldl);;JSON (*.json);;ALDL (*.aldl)"));if(!path.isEmpty()){lastJobDirectory_=QFileInfo(path).absolutePath();loadJobFile(path,false);}}
 
@@ -667,7 +669,16 @@ void MainWindow::scheduleJobPreview(bool switchToJob){if(!jobView_->isVulkanAvai
 
 void MainWindow::rebuildJobPreview(){if(!document_||segmentation_.rows<=0||segmentation_.columns<=0)return;if(tasks_->isBusy()){jobPreviewTimer_->start();return;}const auto metadata=document_->metadata;const auto segmentation=segmentation_;const auto grouping=elementGrouping_;const auto mode=selectedTraversalMode();const JobPlacementOptions options{cloudPixelScale_->value(),reverseYSetting_};pendingAction_=PendingAction::JobPreviewBuild;if(!tasks_->start(QStringLiteral("生成 Job 预览"),[metadata,segmentation,grouping,mode,options](const auto&t,const auto&p,QString*e){return QVariant::fromValue(JobPreviewBuilder::build(metadata,segmentation,mode,options,t,p,e,grouping.valid?&grouping:nullptr));})){pendingAction_=PendingAction::None;jobPreviewTimer_->start();}}
 
-void MainWindow::acceptJobDocument(const JobDocumentPtr& document,bool preserveLink){if(!document)return;if(preserveLink){document->source=JobDocumentSource::ExportedFile;if(jobDocument_&&jobDocument_->isLinked()&&jobDocument_->points.size()==document->points.size())document->linkedCells=jobDocument_->linkedCells;else{const auto order=SplitExporter::traversal(segmentation_.rows,segmentation_.columns,selectedTraversalMode());if(order.size()==document->points.size())document->linkedCells=order;}if(elementGrouping_.matches(document_,segmentation_)&&document->linkedCells.size()==document->points.size())for(size_t i=0;i<document->points.size();++i){const QPoint cell=document->linkedCells[i];document->points[i].groupColor=elementGrouping_.colorAt(cell.y(),cell.x());}}jobDocument_=document;jobView_->setDocument(jobDocument_);if(jobDocument_->isLinked()&&selectedRow_>=0&&selectedColumn_>=0)selectJobFromImage(selectedRow_,selectedColumn_);else jobView_->clearSelection();if(!document->packageWarnings.isEmpty())statusBar()->showMessage(QStringLiteral("分层包有 %1 项警告：%2").arg(document->packageWarnings.size()).arg(document->packageWarnings.front()),12000);}
+void MainWindow::acceptJobDocument(const JobDocumentPtr& document,bool preserveLink){if(!document)return;if(jobStackWindow_)jobStackWindow_->cancelAndClear();if(preserveLink){document->source=JobDocumentSource::ExportedFile;if(jobDocument_&&jobDocument_->isLinked()&&jobDocument_->points.size()==document->points.size())document->linkedCells=jobDocument_->linkedCells;else{const auto order=SplitExporter::traversal(segmentation_.rows,segmentation_.columns,selectedTraversalMode());if(order.size()==document->points.size())document->linkedCells=order;}}jobDocument_=document;jobView_->setDocument(jobDocument_);if(jobDocument_->isLinked()&&selectedRow_>=0&&selectedColumn_>=0)selectJobFromImage(selectedRow_,selectedColumn_);else jobView_->clearSelection();}
+
+void MainWindow::showJobStack(qint64 placementId){
+    if(!jobDocument_||placementId<0)return;
+    if(!jobStackWindow_){
+        jobStackWindow_=new MaskSliceWindow(this);
+        jobStackWindow_->setObjectName(QStringLiteral("jobStackWindow"));
+    }
+    jobStackWindow_->showJobPlacement(jobDocument_,placementId);
+}
 
 void MainWindow::setPreviewLayoutMode(int mode){if(!previewSplitter_||!imagePreviewHost_||!jobView_||!pointCloudView_)return;if(previewTabs_&&previewTabs_->currentIndex()==2){imagePreviewHost_->hide();jobView_->hide();pointCloudView_->show();return;}pointCloudView_->hide();if(mode==1){imagePreviewHost_->show();jobView_->show();previewSplitter_->setSizes({1,1,0});}else showPreviewTab(previewTabs_?previewTabs_->currentIndex():0);}
 

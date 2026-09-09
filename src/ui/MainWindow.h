@@ -87,6 +87,7 @@ private:
     void showPreviewTab(int index);
     void selectJobFromImage(int row, int column);
     void selectImageFromJob(qint64 placeId);
+    void showJobStack(qint64 placementId);
     void restoreSettings();
     void saveSettings() const;
     void resetParameters();
@@ -115,6 +116,7 @@ private:
     PointCloudWidget* pointCloudView_ = nullptr;
     ElementPointCloudWindow* elementCloudWindow_ = nullptr;
     MaskSliceWindow* maskSliceWindow_ = nullptr;
+    MaskSliceWindow* jobStackWindow_ = nullptr;
     QWidget* imagePreviewHost_ = nullptr;
     QSplitter* previewSplitter_ = nullptr;
     QTabBar* previewTabs_ = nullptr;

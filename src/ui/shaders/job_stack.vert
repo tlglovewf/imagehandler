@@ -7,6 +7,7 @@ layout(location = 3) in float inFaceKind;
 layout(location = 4) in vec3 inInstancePosition;
 layout(location = 5) in float inInstanceId;
 layout(location = 6) in float inLayerCount;
+layout(location = 7) in vec3 inInstanceScale;
 
 layout(std140, binding = 0) uniform Camera {
     mat4 mvp;
@@ -19,7 +20,7 @@ layout(std140, binding = 0) uniform Camera {
 layout(location = 0) out vec3 color;
 
 void main() {
-    vec3 local = inPosition;
+    vec3 local = inPosition * inInstanceScale;
     if (inFaceKind > 1.5) local.z *= camera.stackExplode;
     gl_Position = camera.mvp * vec4(local + inInstancePosition, 1.0);
 

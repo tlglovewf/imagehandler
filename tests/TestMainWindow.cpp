@@ -2,6 +2,8 @@
 #include "imaging/ImageLoader.h"
 #include "imaging/PatternDetector.h"
 #include "imaging/MaskStackMeshBuilder.h"
+#include "imaging/JobSpatialIndex.h"
+#include "imaging/JobStackLod.h"
 #include "io/SplitExporter.h"
 #include "io/LayeredPackageExporter.h"
 #include "ui/LargeImageView.h"
@@ -32,7 +34,6 @@
 #include <QSettings>
 #include <QTemporaryDir>
 #include <QTabBar>
-#include <QTabWidget>
 #include <QTimer>
 #include <QWindow>
 #include <QtTest>
@@ -65,6 +66,7 @@ private Q_SLOTS:
     void maskSliceWindowDefaultsAndReuse();
     void maskSliceMultiSelectionAndStackPlacement();
     void layeredJobStackModesRender();
+    void largeLayeredJobFrameCompletes();
 
 private:
     QTemporaryDir settingsDirectory_;
@@ -192,6 +194,13 @@ void TestMainWindow::jobPreviewWorkspaceAndLinking() {
         QVERIFY(QMetaObject::invokeMethod(jobView,"placeSelected",Qt::DirectConnection,Q_ARG(qint64,0)));
         QCOMPARE(tabs->currentIndex(),0);
         layoutMode->setCurrentIndex(1);QTRY_VERIFY(imageView->isVisible());QTRY_VERIFY(jobView->isVisible());
+        QVERIFY(QMetaObject::invokeMethod(jobView,"placeActivated",Qt::DirectConnection,
+                                          Q_ARG(qint64,0)));
+        auto* jobStack=window.findChild<MaskSliceWindow*>(QStringLiteral("jobStackWindow"));
+        QVERIFY(jobStack);QVERIFY(jobStack->isVisible());
+        auto* jobStackStatus=jobStack->findChild<QLabel*>(QStringLiteral("maskStackSamplingInfo"));
+        QVERIFY(jobStackStatus);
+        QTRY_VERIFY_WITH_TIMEOUT(jobStackStatus->text().contains(QStringLiteral("临时预览")),3000);
     }else{
         QVERIFY(!importButton->isEnabled());
         QVERIFY(window.findChild<QLabel*>(QStringLiteral("jobVulkanError")));
@@ -200,9 +209,9 @@ void TestMainWindow::jobPreviewWorkspaceAndLinking() {
 
 void TestMainWindow::layeredJobStackModesRender() {
     JobPreviewWidget widget;
-    auto* mode = widget.findChild<QComboBox*>(QStringLiteral("jobStackDisplayMode"));
     auto* status = widget.findChild<QLabel*>(QStringLiteral("jobPreviewStatus"));
-    QVERIFY(mode); QVERIFY(status); QVERIFY(!mode->isEnabled());
+    QVERIFY(status);
+    QVERIFY(!widget.findChild<QComboBox*>(QStringLiteral("jobStackDisplayMode")));
     if (!widget.isVulkanAvailable()) QSKIP("Vulkan preview unavailable");
 
     MaskStackPreviewData preview;
@@ -211,14 +220,14 @@ void TestMainWindow::layeredJobStackModesRender() {
     preview.layerHeight = 0.5; preview.layerCount = 2;
     const auto token = std::make_shared<CancellationToken>();
     preview.solidGeometry = MaskStackMeshBuilder::buildSolid(preview, token, {});
-    preview.explodedGeometry = MaskStackMeshBuilder::buildExploded(preview, token, {});
-    QVERIFY(preview.solidGeometry); QVERIFY(preview.explodedGeometry);
+    QVERIFY(preview.solidGeometry);
 
     auto stack = std::make_shared<JobModelStack>();
     stack->sourceSize = preview.requestedOutputSize; stack->gridSize = preview.gridSize;
     stack->physicalSize = preview.physicalSize; stack->layerHeight = preview.layerHeight;
     stack->layerCount = preview.layerCount; stack->solidGeometry = preview.solidGeometry;
-    stack->explodedGeometry = preview.explodedGeometry;
+    stack->lodLevels = JobStackLod::buildPyramid(preview.gridSize,preview.columnLayers,token);
+    QVERIFY(!stack->lodLevels.empty());
     auto document = std::make_shared<JobDocument>();
     document->layeredPackageDetected = true;
     document->models.push_back({0,QStringLiteral("0"),QStringLiteral("0"),
@@ -228,17 +237,50 @@ void TestMainWindow::layeredJobStackModesRender() {
     document->sceneBounds.include({0,0,0}); document->sceneBounds.include({2,2,1});
 
     widget.resize(640,480); widget.setDocument(document); widget.show();
-    QTRY_VERIFY_WITH_TIMEOUT(mode->isEnabled(),1000);
-    QCOMPARE(mode->currentIndex(),0);
-    QCOMPARE(widget.stackDisplayMode(),JobStackDisplayMode::Solid);
-    QVERIFY(status->text().contains(QStringLiteral("模型 1/1")));
+    QVERIFY(status->text().contains(QStringLiteral("1 个点")));
     QTest::qWait(100);
-    const QImage solid = widget.grabFrame(); QVERIFY(!solid.isNull());
-    mode->setCurrentIndex(1);
-    QTRY_COMPARE(widget.stackDisplayMode(),JobStackDisplayMode::Exploded);
-    QTest::qWait(100);
-    const QImage exploded = widget.grabFrame(); QVERIFY(!exploded.isNull());
-    QVERIFY(solid != exploded);
+    QVERIFY(!widget.grabFrame().isNull());
+}
+
+void TestMainWindow::largeLayeredJobFrameCompletes() {
+    JobPreviewWidget widget;
+    if (!widget.isVulkanAvailable()) QSKIP("Vulkan preview unavailable");
+
+    MaskStackPreviewData preview;
+    preview.gridSize={2,2};preview.requestedOutputSize={2,2};
+    preview.physicalSize={0.002,0.002};preview.columnLayers={1,2,2,1};
+    preview.layerHeight=0.001;preview.layerCount=2;
+    const auto token=std::make_shared<CancellationToken>();
+    preview.solidGeometry=MaskStackMeshBuilder::buildSolid(preview,token,{});
+    auto stack=std::make_shared<JobModelStack>();
+    stack->sourceSize=preview.requestedOutputSize;stack->gridSize=preview.gridSize;
+    stack->physicalSize=preview.physicalSize;stack->layerHeight=preview.layerHeight;
+    stack->layerCount=preview.layerCount;stack->solidGeometry=preview.solidGeometry;
+    stack->lodLevels=JobStackLod::buildPyramid(preview.gridSize,preview.columnLayers,token);
+
+    constexpr int side=450;
+    auto document=std::make_shared<JobDocument>();
+    document->layeredPackageDetected=true;
+    document->models.push_back({0,QStringLiteral("0"),QStringLiteral("0"),
+                                JobModelStackState::Loaded,stack,{}});
+    document->points.reserve(side*side);
+    for(int y=0;y<side;++y)for(int x=0;x<side;++x) {
+        const qint64 id=static_cast<qint64>(y)*side+x;
+        const JobCoordinate position{x*0.002,y*0.002,0.0};
+        document->points.push_back({0,position,id,id,{}});
+        document->bounds.include(position);
+    }
+    document->sceneBounds=document->bounds;
+    document->sceneBounds.include({0.9,0.9,0.002});
+    document->placementSpatialIndex=JobPlacementSpatialIndex::build(*document,token);
+    QVERIFY(document->placementSpatialIndex);
+
+    widget.resize(640,480);widget.setDocument(document);widget.show();
+    auto* status=widget.findChild<QLabel*>(QStringLiteral("jobPreviewStatus"));
+    QVERIFY(status);
+    QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(QStringLiteral("个点")),5000);
+    QImage frame;
+    QTRY_VERIFY_WITH_TIMEOUT(!(frame=widget.grabFrame()).isNull(),5000);
 }
 
 void TestMainWindow::elementGroupingButtonUpdatesJobPreview() {
@@ -393,6 +435,10 @@ void TestMainWindow::denseJobPointCanBeSelectedAfterOrbit() {
     const QImage selectedFrame=jobView->grabFrame();QVERIFY(!selectedFrame.isNull());
     bool hasYellow=false;for(int y=0;y<selectedFrame.height()&&!hasYellow;++y)for(int x=0;x<selectedFrame.width();++x){const QColor color=selectedFrame.pixelColor(x,y);if(color.red()>180&&color.green()>140&&color.blue()<100){hasYellow=true;break;}}
     QVERIFY2(hasYellow,"Selected Vulkan point was not highlighted yellow");
+    QSignalSpy pointActivation(jobView,&JobPreviewWidget::placeActivated);
+    QTest::mouseDClick(renderWindow,Qt::LeftButton,Qt::NoModifier,
+                       {qRound(cyanPixel.x()/pixelRatio),qRound(cyanPixel.y()/pixelRatio)});
+    QTRY_VERIFY_WITH_TIMEOUT(!pointActivation.isEmpty(),1000);
 }
 
 void TestMainWindow::settingsPersistenceAndReset() {
@@ -485,7 +531,9 @@ void TestMainWindow::segmentationStatisticsUpdates() {
     auto* reverse=dialog.findChild<QCheckBox*>(QStringLiteral("layeredExportReverseY"));
     auto* summary=dialog.findChild<QLabel*>(QStringLiteral("layeredExportSummary"));
     auto* start=dialog.findChild<QPushButton*>(QStringLiteral("layeredExportStart"));
-    auto* tabs=dialog.findChild<QTabWidget*>(QStringLiteral("layeredExportTabs"));
+    auto* mainSplitter=dialog.findChild<QSplitter*>(QStringLiteral("layeredExportMainSplitter"));
+    auto* settingsPanel=dialog.findChild<QWidget*>(QStringLiteral("layeredExportSettingsPanel"));
+    auto* previewPanel=dialog.findChild<QWidget*>(QStringLiteral("layeredExportPreviewPanel"));
     auto* attach=dialog.findChild<QCheckBox*>(QStringLiteral("ck_attach"));
     auto* canvasWidth=dialog.findChild<QSpinBox*>(QStringLiteral("o_w"));
     auto* canvasHeight=dialog.findChild<QSpinBox*>(QStringLiteral("o_h"));
@@ -496,10 +544,12 @@ void TestMainWindow::segmentationStatisticsUpdates() {
     auto* previewElement=dialog.findChild<QLabel*>(QStringLiteral("layeredExportPreviewElement"));
     QVERIFY(layer);QVERIFY(maximum);QVERIFY(strategy);QVERIFY(width);QVERIFY(height);
     QVERIFY(invert);QVERIFY(reverse);QVERIFY(summary);QVERIFY(start);
-    QVERIFY(tabs);QVERIFY(attach);QVERIFY(canvasWidth);QVERIFY(canvasHeight);QVERIFY(rotation);
+    QVERIFY(mainSplitter);QVERIFY(settingsPanel);QVERIFY(previewPanel);
+    QVERIFY(attach);QVERIFY(canvasWidth);QVERIFY(canvasHeight);QVERIFY(rotation);
     QVERIFY(scaleX);QVERIFY(scaleY);QVERIFY(sampling);QVERIFY(previewElement);
-    QCOMPARE(tabs->count(),2);QCOMPARE(tabs->tabText(0),QStringLiteral("导出设置"));
-    QCOMPARE(tabs->tabText(1),QStringLiteral("导出预览"));
+    QCOMPARE(mainSplitter->count(),2);
+    QCOMPARE(mainSplitter->widget(0),settingsPanel);QCOMPARE(mainSplitter->widget(1),previewPanel);
+    QVERIFY(settingsPanel->maximumWidth()<=400);
     QVERIFY(attach->isChecked());QCOMPARE(canvasWidth->value(),1920);QCOMPARE(canvasHeight->value(),1080);
     QCOMPARE(rotation->value(),0.0);QCOMPARE(scaleX->value(),1.0);QCOMPARE(scaleY->value(),1.0);
     QCOMPARE(sampling->currentIndex(),0);QVERIFY(previewElement->text().contains(QStringLiteral("预览块：0")));
@@ -521,7 +571,6 @@ void TestMainWindow::segmentationStatisticsUpdates() {
     auto* stack=dialog.findChild<MaskStackWidget*>(QStringLiteral("layeredExportStackView"));
     QVERIFY(stack);
     dialog.show();
-    tabs->setCurrentIndex(1);
     QTRY_VERIFY_WITH_TIMEOUT(stack->preview()!=nullptr,5000);
 #if IMAGE_HANDLER_HAS_VULKAN_PREVIEW
     if(stack->isVulkanAvailable()){
@@ -537,11 +586,7 @@ void TestMainWindow::segmentationStatisticsUpdates() {
 
         QImage frame;
         QTRY_VERIFY_WITH_TIMEOUT(!(frame=stack->grabFrame()).isNull(),3000);
-        tabs->setCurrentIndex(0);
-        QTRY_VERIFY_WITH_TIMEOUT(!renderWindow->isExposed(),3000);
-        tabs->setCurrentIndex(1);
         QTRY_VERIFY_WITH_TIMEOUT(renderWindow->isExposed(),3000);
-        QTRY_VERIFY_WITH_TIMEOUT(!(frame=stack->grabFrame()).isNull(),3000);
         bool hasGeometry=false;
         for(int y=0;y<frame.height()&&!hasGeometry;++y){
             for(int x=0;x<frame.width();++x){
@@ -552,7 +597,7 @@ void TestMainWindow::segmentationStatisticsUpdates() {
                 }
             }
         }
-        QVERIFY2(hasGeometry,"Layered export Vulkan preview was blank after changing tabs");
+        QVERIFY2(hasGeometry,"Layered export Vulkan preview was blank in the side-by-side layout");
     }
 #endif
 }

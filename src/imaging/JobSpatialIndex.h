@@ -4,6 +4,7 @@
 #include "domain/Models.h"
 
 #include <QMatrix4x4>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -36,9 +37,34 @@ private:
     [[nodiscard]] float nodeRayPriority(const Node& node, const QVector3D& origin,
                                         const QVector3D& direction, float angularRadius,
                                         const JobCoordinate& coordinateOrigin) const;
-    bool nodeVisible(const Node& node, const QMatrix4x4& matrix,
-                     const JobCoordinate& coordinateOrigin) const;
 
+    std::vector<quint32> indices_;
+    std::vector<Node> nodes_;
+};
+
+class JobPlacementSpatialIndex {
+public:
+    static std::shared_ptr<JobPlacementSpatialIndex> build(
+        const JobDocument& document, const CancellationTokenPtr& token);
+    void queryVisible(const QMatrix4x4& viewProjection,
+                      const JobCoordinate& coordinateOrigin,
+                      std::vector<quint32>* candidates,
+                      size_t maximumCandidates = std::numeric_limits<size_t>::max()) const;
+
+private:
+    struct Bounds { JobCoordinate minimum; JobCoordinate maximum; quint32 pointIndex = 0; };
+    struct Node {
+        JobCoordinate minimum;
+        JobCoordinate maximum;
+        quint32 begin = 0;
+        quint32 count = 0;
+        qint32 left = -1;
+        qint32 right = -1;
+        [[nodiscard]] bool leaf() const noexcept { return left < 0; }
+    };
+
+    qint32 buildNode(quint32 begin, quint32 count, const CancellationTokenPtr& token);
+    std::vector<Bounds> bounds_;
     std::vector<quint32> indices_;
     std::vector<Node> nodes_;
 };

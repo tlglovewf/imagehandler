@@ -3,6 +3,7 @@
 #include "imaging/JobLabelLod.h"
 #include "imaging/JobPreviewMath.h"
 #include "imaging/JobSpatialIndex.h"
+#include "imaging/JobStackLod.h"
 #include "imaging/VipsSupport.h"
 #include "io/JobFileLoader.h"
 #include "io/JobPackageLoader.h"
@@ -33,10 +34,16 @@ private Q_SLOTS:
     void guidesUsePointZeroAndFullBounds();
     void terrainCameraIsGroundOrientedAndClamped();
     void terrainCameraContinuousOrbitCrossesPoles();
+    void terrainCameraPanNearHorizonStaysBounded();
+    void terrainCameraPanKeepsGroundAnchor();
     void millionPointPreviewScale();
     void layeredPackageLoadsStacksAndSceneBounds();
-    void layeredPackageUsesInstanceAwareLod();
+    void modelPathsAssignStablePointColors();
+    void layeredPackageKeepsSharedLodDetail();
     void incompleteLayeredPackageFallsBackToPoints();
+    void stackLodPyramidAndFrameBudget();
+    void placementVisibilityUsesEntityBounds();
+    void largePlacementVisibilityIsNotSpatiallyTruncated();
 };
 
 namespace {
@@ -180,18 +187,32 @@ void TestJob::layeredPackageLoadsStacksAndSceneBounds() {
     const auto document = JobPackageLoader::load(
         jobPath, std::make_shared<CancellationToken>(), {}, &error);
     QVERIFY2(document, qPrintable(error));
-    QVERIFY(document->layeredPackageDetected);
-    QCOMPARE(document->loadedStackCount(), 1);
+    QVERIFY(!document->layeredPackageDetected);
+    QCOMPARE(document->loadedStackCount(), 0);
     QVERIFY(document->packageWarnings.isEmpty());
-    QCOMPARE(document->models[0].stackState, JobModelStackState::Loaded);
-    const auto stack = document->models[0].stack;
-    QVERIFY(stack); QCOMPARE(stack->sourceSize, QSize(2,2));
-    QCOMPARE(stack->gridSize, QSize(2,2)); QCOMPARE(stack->physicalSize, QSizeF(1,1));
-    QCOMPARE(stack->layerCount, 2); QCOMPARE(stack->layerHeight, 0.25);
-    QVERIFY(stack->solidGeometry); QVERIFY(!stack->solidGeometry->indices.empty());
-    QVERIFY(stack->explodedGeometry); QVERIFY(!stack->explodedGeometry->indices.empty());
+    QCOMPARE(document->models[0].stackState, JobModelStackState::NotDetected);
+    const auto loaded = JobPackageLoader::loadStack(
+        document, 0, 17, std::make_shared<CancellationToken>(), {}, &error);
+    QVERIFY2(loaded.preview, qPrintable(error));
+    QCOMPARE(loaded.requestGeneration, quint64(17));
+    QCOMPARE(loaded.placementId, qint64(0));
+    QCOMPARE(loaded.modelPath, QStringLiteral("0"));
+    QCOMPARE(loaded.preview->requestedOutputSize, QSize(2,2));
+    QCOMPARE(loaded.preview->gridSize, QSize(2,2));
+    QCOMPARE(loaded.preview->physicalSize, QSizeF(1,1));
+    QCOMPARE(loaded.preview->layerCount, 2);
+    QCOMPARE(loaded.preview->layerHeight, 0.25);
+    QCOMPARE(loaded.thumbnails.size(), 2);
+    QCOMPARE(loaded.thumbnails[0].size(), QSize(2,2));
+    QCOMPARE(loaded.thumbnails[0].pixelColor(0,0), QColor(Qt::white));
+    QCOMPARE(loaded.thumbnails[0].pixelColor(1,1), QColor(Qt::white));
+    QCOMPARE(loaded.thumbnails[1].pixelColor(1,0), QColor(Qt::white));
+    QCOMPARE(loaded.thumbnails[1].pixelColor(0,0), QColor(Qt::black));
+    QVERIFY(loaded.preview->solidGeometry);
+    QVERIFY(loaded.preview->explodedGeometry);
+    QVERIFY(!loaded.preview->solidGeometry->indices.empty());
     QCOMPARE(document->sceneBounds.minimum, (JobCoordinate{0,0,0}));
-    QCOMPARE(document->sceneBounds.maximum, (JobCoordinate{3,4,1.5}));
+    QCOMPARE(document->sceneBounds.maximum, (JobCoordinate{2,3,1}));
 
     QVERIFY(!writeJob(directory, QStringLiteral("export-report.json"),
                       packageReport(2, true)).isEmpty());
@@ -201,12 +222,119 @@ void TestJob::layeredPackageLoadsStacksAndSceneBounds() {
     const auto inverted = JobPackageLoader::load(
         jobPath, std::make_shared<CancellationToken>(), {}, &error);
     QVERIFY2(inverted, qPrintable(error));
-    QCOMPARE(inverted->loadedStackCount(), 1);
-    QVERIFY(inverted->models[0].stack->solidGeometry);
-    QVERIFY(!inverted->models[0].stack->solidGeometry->indices.empty());
+    const auto invertedStack = JobPackageLoader::loadStack(
+        inverted, 1, 18, std::make_shared<CancellationToken>(), {}, &error);
+    QVERIFY2(invertedStack.preview, qPrintable(error));
+    QVERIFY(invertedStack.preview->solidGeometry);
+    QVERIFY(!invertedStack.preview->solidGeometry->indices.empty());
 }
 
-void TestJob::layeredPackageUsesInstanceAwareLod() {
+void TestJob::modelPathsAssignStablePointColors() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    const QByteArray job = QByteArrayLiteral(R"({
+      "models":[{"label":"a","path":"folder\\A"},
+                {"label":"same","path":"folder/A"},
+                {"label":"b","path":"folder/B"}],
+      "commands":[
+        {"command":"relmove","by":[0,0,0]},{"command":"place","id":0},
+        {"command":"relmove","by":[1,0,0]},{"command":"place","id":1},
+        {"command":"relmove","by":[2,0,0]},{"command":"place","id":2}
+      ]})");
+    const QString jobPath = writeJob(directory, QStringLiteral("job.json"), job);
+    QString error;
+    const auto first = JobPackageLoader::load(
+        jobPath, std::make_shared<CancellationToken>(), {}, &error);
+    const auto second = JobPackageLoader::load(
+        jobPath, std::make_shared<CancellationToken>(), {}, &error);
+    QVERIFY2(first && second, qPrintable(error));
+    QVERIFY(first->points[0].groupColor.isValid());
+    QCOMPARE(first->points[0].groupColor, first->points[1].groupColor);
+    QVERIFY(first->points[0].groupColor != first->points[2].groupColor);
+    for (std::size_t index = 0; index < first->points.size(); ++index)
+        QCOMPARE(first->points[index].groupColor, second->points[index].groupColor);
+}
+
+void TestJob::stackLodPyramidAndFrameBudget() {
+    const QSize baseSize(128,64);
+    QVector<quint16> heights(baseSize.width()*baseSize.height(),0);
+    heights[baseSize.width()*17+93]=77;
+    const auto levels=JobStackLod::buildPyramid(
+        baseSize,heights,std::make_shared<CancellationToken>());
+    QCOMPARE(levels.size(),size_t(3));
+    QCOMPARE(levels.front().gridSize,QSize(32,16));
+    QCOMPARE(levels.back().gridSize,baseSize);
+    for(const auto& level:levels) {
+        QVERIFY(std::find(level.columnLayers.cbegin(),level.columnLayers.cend(),quint16(77))!=
+                level.columnLayers.cend());
+        const int mappedX=93*level.gridSize.width()/baseSize.width();
+        const int mappedY=17*level.gridSize.height()/baseSize.height();
+        QCOMPARE(level.columnLayers[static_cast<std::size_t>(mappedY)*
+                                    level.gridSize.width()+mappedX],quint16(77));
+        QCOMPARE(level.columnLayers[static_cast<std::size_t>(
+                     level.gridSize.height()-1-mappedY)*level.gridSize.width()+mappedX],quint16(0));
+    }
+    QCOMPARE(JobStackLod::chooseLevel(levels,20,10,true),0);
+    QCOMPARE(JobStackLod::chooseLevel(levels,120,60,false),2);
+
+    JobFrameBudgetController budget;
+    const qint64 initial=budget.triangleBudget();
+    for(int i=0;i<3;++i)budget.recordFrame(20.0,true);
+    QVERIFY(budget.triangleBudget()<initial);QVERIFY(budget.qualityOffset()<0);
+    const qint64 reduced=budget.triangleBudget();
+    budget.recordFrame(40.0,true);
+    QVERIFY(budget.triangleBudget()<reduced);
+    budget.reset();
+    budget.recordFrame(500.0,true);
+    QVERIFY(budget.triangleBudget()<initial);
+    budget.reset();
+    for(int i=0;i<30;++i)budget.recordFrame(10.0,false);
+    QVERIFY(budget.triangleBudget()>initial);
+    QVERIFY(budget.framesPerSecond()>90.0);
+}
+
+void TestJob::placementVisibilityUsesEntityBounds() {
+    auto stack=std::make_shared<JobModelStack>();
+    stack->physicalSize={2.5,0.5};stack->layerCount=2;stack->layerHeight=0.25;
+    JobDocument document;
+    document.models.push_back({0,QStringLiteral("0"),QStringLiteral("0"),
+                               JobModelStackState::Loaded,stack,{}});
+    document.points.push_back({0,{-2.0,0.0,0.0},0,0,{}});
+    const auto token=std::make_shared<CancellationToken>();
+    document.placementSpatialIndex=JobPlacementSpatialIndex::build(document,token);
+    QVERIFY(document.placementSpatialIndex);
+    QMatrix4x4 identity;
+    std::vector<quint32> visible;
+    document.placementSpatialIndex->queryVisible(identity,{},&visible);
+    QCOMPARE(visible,std::vector<quint32>({0}));
+
+    document.points[0].position.x=-4.0;
+    document.placementSpatialIndex=JobPlacementSpatialIndex::build(document,token);
+    document.placementSpatialIndex->queryVisible(identity,{},&visible);
+    QVERIFY(visible.empty());
+}
+
+void TestJob::largePlacementVisibilityIsNotSpatiallyTruncated() {
+    constexpr int placementCount=200'257;
+    auto stack=std::make_shared<JobModelStack>();
+    stack->physicalSize={0.001,0.001};stack->layerCount=1;stack->layerHeight=0.001;
+    JobDocument document;
+    document.models.push_back({0,QStringLiteral("0"),QStringLiteral("0"),
+                               JobModelStackState::Loaded,stack,{}});
+    document.points.reserve(placementCount);
+    for(int index=0;index<placementCount;++index) {
+        const double x=-0.8+1.6*index/(placementCount-1.0);
+        document.points.push_back({0,{x,0.0,0.5},index,index,{}});
+    }
+    const auto token=std::make_shared<CancellationToken>();
+    const auto spatial=JobPlacementSpatialIndex::build(document,token);
+    QVERIFY(spatial);
+    QMatrix4x4 identity;
+    std::vector<quint32> visible;
+    spatial->queryVisible(identity,{},&visible,std::numeric_limits<std::size_t>::max());
+    QCOMPARE(visible.size(),static_cast<std::size_t>(placementCount));
+}
+
+void TestJob::layeredPackageKeepsSharedLodDetail() {
     QTemporaryDir directory; QVERIFY(directory.isValid());
     QByteArray commands;
     for (int index = 0; index < 100; ++index)
@@ -233,9 +361,12 @@ void TestJob::layeredPackageUsesInstanceAwareLod() {
     const auto document=JobPackageLoader::load(
         jobPath,std::make_shared<CancellationToken>(),{},&error);
     QVERIFY2(document,qPrintable(error));QCOMPARE(document->points.size(),size_t(100));
-    const auto stack=document->models[0].stack;QVERIFY(stack);QVERIFY(stack->downsampled);
-    QVERIFY(qint64(stack->gridSize.width())*stack->gridSize.height()<=10'201);
-    QCOMPARE(stack->solidGeometry->indices.size(),size_t(30));
+    QVERIFY(!document->models[0].stack);
+    const auto stack=JobPackageLoader::loadStack(
+        document,57,21,std::make_shared<CancellationToken>(),{},&error);
+    QVERIFY2(stack.preview,qPrintable(error));QVERIFY(!stack.preview->downsampled);
+    QCOMPARE(stack.preview->gridSize,QSize(128,128));
+    QCOMPARE(stack.preview->solidGeometry->indices.size(),size_t(30));
 }
 
 void TestJob::incompleteLayeredPackageFallsBackToPoints() {
@@ -253,10 +384,12 @@ void TestJob::incompleteLayeredPackageFallsBackToPoints() {
     auto document = JobPackageLoader::load(
         jobPath, std::make_shared<CancellationToken>(), {}, &error);
     QVERIFY2(document, qPrintable(error));
-    QVERIFY(document->layeredPackageDetected);
+    QVERIFY(!document->layeredPackageDetected);
     QCOMPARE(document->loadedStackCount(), 0);
-    QVERIFY(!document->packageWarnings.isEmpty());
-    QCOMPARE(document->models[0].stackState, JobModelStackState::Invalid);
+    QVERIFY(document->packageWarnings.isEmpty());
+    auto loaded = JobPackageLoader::loadStack(
+        document, 0, 1, std::make_shared<CancellationToken>(), {}, &error);
+    QVERIFY(!loaded.preview); QVERIFY(error.contains(QStringLiteral("export-report.json")));
 
     QVERIFY(!writeJob(directory, QStringLiteral("export-report.json"), packageReport()).isEmpty());
     QVERIFY(writeBinaryMask(QDir(directory.filePath(QStringLiteral("0"))).filePath(
@@ -266,19 +399,21 @@ void TestJob::incompleteLayeredPackageFallsBackToPoints() {
     QVERIFY2(document, qPrintable(error));
     QCOMPARE(document->points.size(), size_t(2));
     QCOMPARE(document->loadedStackCount(), 0);
-    QCOMPARE(document->models[0].stackState, JobModelStackState::Invalid);
-    QCOMPARE(document->models[1].stackState, JobModelStackState::Invalid);
-    QVERIFY(document->packageWarnings.size() >= 2);
+    loaded = JobPackageLoader::loadStack(
+        document, 0, 2, std::make_shared<CancellationToken>(), {}, &error);
+    QVERIFY(!loaded.preview); QVERIFY(error.contains(QStringLiteral("切片")));
 
     QVERIFY(writeBinaryMask(QDir(directory.filePath(QStringLiteral("0"))).filePath(
                                 QStringLiteral("2.bmp")), {{0,0}}));
     document = JobPackageLoader::load(
         jobPath, std::make_shared<CancellationToken>(), {}, &error);
     QVERIFY2(document, qPrintable(error));
-    QCOMPARE(document->loadedStackCount(), 1);
-    QCOMPARE(document->models[0].stackState, JobModelStackState::Loaded);
-    QCOMPARE(document->models[1].stackState, JobModelStackState::Invalid);
-    QVERIFY(!document->packageWarnings.isEmpty());
+    loaded = JobPackageLoader::loadStack(
+        document, 0, 3, std::make_shared<CancellationToken>(), {}, &error);
+    QVERIFY2(loaded.preview, qPrintable(error));
+    const auto unsafe = JobPackageLoader::loadStack(
+        document, 1, 4, std::make_shared<CancellationToken>(), {}, &error);
+    QVERIFY(!unsafe.preview); QVERIFY(error.contains(QStringLiteral("安全相对路径")));
 }
 
 void TestJob::previewMatchesExporterCoordinates() {
@@ -434,6 +569,66 @@ void TestJob::terrainCameraContinuousOrbitCrossesPoles() {
     for(int i=0;i<16;++i)QVERIFY(std::isfinite(belowPole.constData()[i]));
     camera.setContinuousOrbitEnabled(false);
     QCOMPARE(camera.pose().elevation,camera.minimumElevation());
+}
+
+void TestJob::terrainCameraPanNearHorizonStaysBounded() {
+    JobTerrainCamera camera;
+    camera.setSceneBounds({-50,-50,0},{50,50,0});
+    camera.orbit({0,-1000}); // Reach the supported five-degree elevation.
+    const QSizeF viewport(800,600);
+    const auto matrix = [&] {
+        QMatrix4x4 projection, correction;
+        projection.perspective(45.0F, 800.0F/600.0F,
+            camera.pose().distance * 0.001F,
+            camera.pose().distance + camera.sceneRadius() * 8.0F);
+        correction(1,1) = -1.0F;
+        correction(2,2) = 0.5F;
+        correction(2,3) = 0.5F;
+        return correction * projection * camera.viewMatrix();
+    };
+    // The horizon is inside the viewport even though elevation is clamped.
+    const double horizon = 300.0 - std::tan(5.0 * 3.141592653589793 / 180.0) *
+                                        300.0 / std::tan(22.5 * 3.141592653589793 / 180.0);
+    const QPointF previous(400,horizon+0.1), current(400,horizon+1.1);
+    QVector3D rayOrigin, direction, before, after;
+    const auto rawIntersection = [&](const QPointF& screen, QVector3D* hit) {
+        return JobPreviewMath::screenRay(screen,viewport,matrix(),&rayOrigin,&direction) &&
+            JobPreviewMath::intersectHorizontalPlane(rayOrigin,direction,0,hit);
+    };
+    QVERIFY(rawIntersection(previous,&before));
+    QVERIFY(rawIntersection(current,&after));
+    QVERIFY((before-after).length() > camera.pose().distance * 100.0F);
+    QVERIFY(!camera.groundIntersection(previous,viewport,matrix(),&before));
+    const float distance = camera.pose().distance;
+    for (int i=0; i<100; ++i) {
+        const QVector3D pivot = camera.pose().pivot;
+        camera.panOnGround(previous,current,viewport,matrix());
+        QVERIFY((camera.pose().pivot-pivot).length() < distance * 0.02F);
+        QCOMPARE(camera.pose().pivot.z(),0.0F);
+        bool invertible = false;
+        const QMatrix4x4 inverse = matrix().inverted(&invertible);
+        Q_UNUSED(inverse);
+        QVERIFY(invertible);
+    }
+    const QVector3D pivot = camera.pose().pivot;
+    camera.translate({std::numeric_limits<float>::infinity(),0,0});
+    QCOMPARE(camera.pose().pivot,pivot);
+}
+
+void TestJob::terrainCameraPanKeepsGroundAnchor() {
+    JobTerrainCamera camera;
+    camera.setSceneBounds({-50,-50,0},{50,50,0});
+    const QSizeF viewport(800,600);
+    QMatrix4x4 projection, correction;
+    projection.perspective(45.0F,800.0F/600.0F,0.1F,1000.0F);
+    correction(1,1)=-1; correction(2,2)=0.5F; correction(2,3)=0.5F;
+    const QMatrix4x4 mvp=correction*projection*camera.viewMatrix();
+    QVector3D before,after;
+    QVERIFY(camera.groundIntersection({400,300},viewport,mvp,&before));
+    QVERIFY(camera.groundIntersection({410,310},viewport,mvp,&after));
+    const QVector3D pivot=camera.pose().pivot;
+    camera.panOnGround({400,300},{410,310},viewport,mvp);
+    QVERIFY((camera.pose().pivot-pivot-(before-after)).length()<0.001F);
 }
 
 void TestJob::millionPointPreviewScale() {

@@ -1347,9 +1347,18 @@ void TestCore::elementGroupingAndLayeredPackageReuse() {
     QCOMPARE(loaded->models.size(), size_t(2));
     QCOMPARE(loaded->points.size(), size_t(4));
     QCOMPARE(loaded->points[3].placementId, qint64(3));
-    QVERIFY(loaded->layeredPackageDetected);
-    QCOMPARE(loaded->loadedStackCount(), 2);
+    QVERIFY(!loaded->layeredPackageDetected);
+    QCOMPARE(loaded->loadedStackCount(), 0);
     QVERIFY(loaded->packageWarnings.isEmpty());
+    QCOMPARE(loaded->points[0].groupColor, loaded->points[3].groupColor);
+    QCOMPARE(loaded->points[1].groupColor, loaded->points[2].groupColor);
+    QVERIFY(loaded->points[0].groupColor != loaded->points[1].groupColor);
+    const auto firstStack = JobPackageLoader::loadStack(
+        loaded, 0, 1, std::make_shared<CancellationToken>(), {}, &error);
+    const auto reusedStack = JobPackageLoader::loadStack(
+        loaded, 3, 2, std::make_shared<CancellationToken>(), {}, &error);
+    QVERIFY2(firstStack.preview && reusedStack.preview, qPrintable(error));
+    QCOMPARE(firstStack.modelPath, reusedStack.modelPath);
 
     QFile report(QDir(output).filePath(QStringLiteral("export-report.json")));
     QVERIFY(report.open(QIODevice::ReadOnly));

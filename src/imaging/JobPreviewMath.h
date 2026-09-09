@@ -70,6 +70,11 @@ public:
 
     void orbit(const QPointF& pixelDelta);
     void translate(const QVector3D& delta);
+    [[nodiscard]] bool groundIntersection(const QPointF& screen, const QSizeF& viewport,
+                                           const QMatrix4x4& viewProjection,
+                                           QVector3D* intersection) const;
+    void panOnGround(const QPointF& previous, const QPointF& current,
+                     const QSizeF& viewport, const QMatrix4x4& viewProjection);
     void zoomBy(float factor);
 
     [[nodiscard]] QVector3D eye() const;

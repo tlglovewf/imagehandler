@@ -3,15 +3,15 @@
 #include "imaging/JobLabelLod.h"
 #include "imaging/JobPreviewMath.h"
 #include "imaging/JobSpatialIndex.h"
+#include "imaging/JobStackLod.h"
+#include "imaging/MaskStackMeshBuilder.h"
 
 #include <QCheckBox>
-#include <QComboBox>
 #include <QFile>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
-#include <QSignalBlocker>
 #include <QStyleHints>
 #include <QVBoxLayout>
 #include <algorithm>
@@ -24,20 +24,27 @@
 
 #if IMAGE_HANDLER_HAS_VULKAN_PREVIEW
 #include <QElapsedTimer>
+#include <QFutureWatcher>
 #include <QFocusEvent>
 #include <QKeyEvent>
 #include <QMatrix4x4>
 #include <QMouseEvent>
 #include <QSet>
 #include <QTimer>
+#include <QThreadPool>
 #include <QVulkanFunctions>
 #include <QVulkanInstance>
 #include <QVulkanWindow>
 #include <QVector4D>
 #include <QWheelEvent>
 #include <cstring>
+#include <set>
+#include <tuple>
+#include <QtConcurrent>
 
 namespace {
+
+enum class JobStackDisplayMode { Solid, Exploded };
 
 constexpr float kPi = 3.14159265358979323846F;
 constexpr int kMaximumOrdinaryLabels = 4096;
@@ -45,7 +52,7 @@ constexpr size_t kMaximumLabelCandidates = 65536;
 
 struct PointVertex { float x, y, z, id, r, g, b; };
 struct LineVertex { float x, y, r, g, b; };
-struct StackInstance { float x, y, z, id, layerCount, padding[3]; };
+struct StackInstance { float x, y, z, id, layerCount, scaleX, scaleY, scaleZ; };
 struct alignas(16) CameraUniform {
     float mvp[16];
     float selectedId = -1.0F;
@@ -57,6 +64,51 @@ struct alignas(16) CameraUniform {
 static_assert(sizeof(MaskStackVertex) == 32);
 static_assert(sizeof(StackInstance) == 32);
 static_assert(sizeof(CameraUniform) == 96);
+
+struct LodCacheKey {
+    const JobModelStack* stack = nullptr;
+    JobStackDisplayMode mode = JobStackDisplayMode::Solid;
+    int level = 0;
+    friend bool operator<(const LodCacheKey& left, const LodCacheKey& right) {
+        return std::tie(left.stack, left.mode, left.level) <
+               std::tie(right.stack, right.mode, right.level);
+    }
+};
+
+struct LodBuildResult {
+    LodCacheKey key;
+    std::shared_ptr<const MaskStackGeometry> geometry;
+    quint64 generation = 0;
+};
+
+struct GeometrySelection {
+    std::shared_ptr<const MaskStackGeometry> geometry;
+    int level = -1;
+};
+
+struct LodCacheEntry {
+    std::shared_ptr<const MaskStackGeometry> geometry;
+    std::size_t byteSize = 0;
+    quint64 lastUsed = 0;
+};
+
+std::shared_ptr<const MaskStackGeometry> buildLodGeometry(
+    const JobModelStackPtr& stack, int level, JobStackDisplayMode mode,
+    const CancellationTokenPtr& token) {
+    if (!stack || level < 0 || level >= static_cast<int>(stack->lodLevels.size())) return {};
+    const JobStackHeightLevel& source = stack->lodLevels[static_cast<std::size_t>(level)];
+    MaskStackPreviewData preview;
+    preview.gridSize = source.gridSize;
+    preview.requestedOutputSize = stack->sourceSize;
+    preview.physicalSize = stack->physicalSize;
+    preview.columnLayers = QVector<quint16>(source.columnLayers.cbegin(),
+                                            source.columnLayers.cend());
+    preview.layerHeight = stack->layerHeight;
+    preview.layerCount = stack->layerCount;
+    return mode == JobStackDisplayMode::Solid
+        ? MaskStackMeshBuilder::buildSolid(preview, token, {})
+        : MaskStackMeshBuilder::buildExploded(preview, token, {}, 100'000);
+}
 
 class JobVulkanWindow;
 
@@ -75,23 +127,33 @@ private:
         VkDeviceMemory memory = VK_NULL_HANDLE;
         VkDeviceSize capacity = 0;
         VkDeviceSize allocationSize = 0;
+        void* mapped = nullptr;
     };
 
-    bool createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, Buffer* buffer);
+    bool createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, Buffer* buffer,
+                      bool deviceLocal = false);
     void destroyBuffer(Buffer* buffer);
     bool upload(Buffer* buffer, const void* data, VkDeviceSize size, VkBufferUsageFlags usage);
+    bool uploadStatic(Buffer* buffer, const void* data, VkDeviceSize size,
+                      VkBufferUsageFlags usage, int frame);
     VkShaderModule loadShader(const QString& resourcePath);
     VkPipeline createPipeline(VkShaderModule vertex, VkShaderModule fragment,
                                VkPrimitiveTopology topology, bool pointPipeline);
     VkPipeline createStackPipeline(VkShaderModule vertex, VkShaderModule fragment);
     void rebuildPointBuffer();
-    void rebuildStackBuffers();
+    void rebuildStackBuffers(int frame);
 
-    struct StackBuffers {
+    struct MeshBuffers {
+        std::shared_ptr<const MaskStackGeometry> geometry;
         Buffer vertex;
         Buffer index;
-        Buffer instances;
         std::uint32_t indexCount = 0;
+        std::size_t byteSize = 0;
+        int lodLevel = -1;
+    };
+    struct StackBatch {
+        const MeshBuffers* mesh = nullptr;
+        Buffer instances;
         std::uint32_t instanceCount = 0;
     };
 
@@ -105,10 +167,20 @@ private:
     VkPipeline linePipeline_ = VK_NULL_HANDLE;
     VkPipeline stackPipeline_ = VK_NULL_HANDLE;
     Buffer pointBuffer_;
-    std::vector<StackBuffers> stackBuffers_;
+    std::uint32_t pointCount_ = 0;
+    std::map<const MaskStackGeometry*, MeshBuffers> meshCache_;
+    std::set<const MaskStackGeometry*> failedGpuMeshes_;
+    std::vector<std::map<const MaskStackGeometry*, StackBatch>> stackFrames_;
+    std::vector<quint64> stackFrameRevisions_;
+    std::vector<std::vector<Buffer>> stagingFrames_;
     std::vector<Buffer> uniformBuffers_;
     std::vector<Buffer> lineBuffers_;
     std::vector<VkDescriptorSet> descriptorSets_;
+    VkQueryPool timestampPool_ = VK_NULL_HANDLE;
+    float timestampPeriod_ = 0.0F;
+    std::uint64_t timestampMask_ = 0;
+    std::size_t gpuMeshBytes_ = 0;
+    quint64 uploadedDocumentGeneration_ = std::numeric_limits<quint64>::max();
     bool initialized_ = false;
 };
 
@@ -116,8 +188,33 @@ class JobVulkanWindow final : public QVulkanWindow {
 public:
     JobVulkanWindow() {
         setFlags(PersistentResources);
+        lodPool_.setMaxThreadCount(2);
         interactionTimer_.setInterval(16);
         QObject::connect(&interactionTimer_, &QTimer::timeout, this, [this] { tickInteraction(); });
+        settleTimer_.setSingleShot(true);
+        settleTimer_.setInterval(200);
+        QObject::connect(&settleTimer_, &QTimer::timeout, this, [this] {
+            interacting_ = false;
+            markStackBuffersDirty();
+            recoveryFramesRemaining_ = 120;
+            recoveryTimer_.start();
+            requestUpdate();
+        });
+        recoveryTimer_.setTimerType(Qt::PreciseTimer);
+        recoveryTimer_.setInterval(16);
+        QObject::connect(&recoveryTimer_, &QTimer::timeout, this, [this] {
+            if (interacting_ || recoveryFramesRemaining_-- <= 0) {
+                recoveryTimer_.stop();
+                return;
+            }
+            requestUpdate();
+        });
+    }
+
+    ~JobVulkanWindow() override {
+        if (lodToken_) lodToken_->cancel();
+        lodPool_.clear();
+        lodPool_.waitForDone();
     }
 
     QVulkanWindowRenderer* createRenderer() override {
@@ -126,13 +223,21 @@ public:
     }
 
     void setDocument(const JobDocumentPtr& document) {
+        if (lodToken_) lodToken_->cancel();
+        lodToken_ = std::make_shared<CancellationToken>();
+        ++documentGeneration_;
+        lodCache_.clear();
+        pendingLods_.clear();
+        failedLods_.clear();
+        lodCacheBytes_ = 0;
+        lodUseSerial_ = 0;
+        frameBudget_.reset();
         document_ = document;
         selectedId_ = hoveredId_ = -1;
         idToIndex_.clear();
         origin_ = {};
         if (document_ && document_->bounds.valid) {
-            const JobBounds& scene = document_->sceneBounds.valid ? document_->sceneBounds
-                                                                  : document_->bounds;
+            const JobBounds& scene = document_->bounds;
             origin_ = scene.center();
             idToIndex_.resize(document_->points.size(), -1);
             for (size_t index = 0; index < document_->points.size(); ++index) {
@@ -146,17 +251,20 @@ public:
             camera_.setSceneBounds({-0.5F, -0.5F, -0.5F}, {0.5F, 0.5F, 0.5F});
         }
         animationActive_ = false;
+        interacting_ = false;
         activeKeys_.clear();
         interactionTimer_.stop();
+        recoveryTimer_.stop();
+        recoveryFramesRemaining_ = 0;
         pointBufferDirty_ = true;
-        stackBufferDirty_ = true;
+        markStackBuffersDirty();
         requestUpdate();
     }
 
     void setStackDisplayMode(JobStackDisplayMode mode) {
         if (stackMode_ == mode) return;
         stackMode_ = mode;
-        stackBufferDirty_ = true;
+        markStackBuffersDirty();
         requestUpdate();
     }
 
@@ -178,9 +286,64 @@ public:
     [[nodiscard]] JobCoordinate origin() const { return origin_; }
     [[nodiscard]] qint64 selectedId() const { return selectedId_; }
     [[nodiscard]] qint64 hoveredId() const { return hoveredId_; }
+    [[nodiscard]] qint64 pointIndexForPlacement(qint64 id) const {
+        return id >= 0 && id < static_cast<qint64>(idToIndex_.size())
+            ? idToIndex_[static_cast<std::size_t>(id)] : -1;
+    }
     [[nodiscard]] bool takePointBufferDirty() { return std::exchange(pointBufferDirty_, false); }
-    [[nodiscard]] bool takeStackBufferDirty() { return std::exchange(stackBufferDirty_, false); }
+    [[nodiscard]] quint64 stackBufferRevision() const noexcept { return stackBufferRevision_; }
     [[nodiscard]] JobStackDisplayMode stackDisplayMode() const noexcept { return stackMode_; }
+    [[nodiscard]] bool interacting() const noexcept { return interacting_; }
+    [[nodiscard]] JobFrameBudgetController& frameBudget() noexcept { return frameBudget_; }
+
+    GeometrySelection geometryFor(const JobModelStackPtr& stack, int desiredLevel) {
+        if (!stack) return {};
+        if (stack->lodLevels.empty()) {
+            auto geometry = stackMode_ == JobStackDisplayMode::Exploded
+                ? stack->explodedGeometry : stack->solidGeometry;
+            if (!geometry) geometry = stack->solidGeometry;
+            return {geometry, 0};
+        }
+        desiredLevel = std::clamp(desiredLevel, 0,
+                                  static_cast<int>(stack->lodLevels.size()) - 1);
+        const LodCacheKey desired{stack.get(), stackMode_, desiredLevel};
+        if (auto found = lodCache_.find(desired); found != lodCache_.end()) {
+            found->second.lastUsed = ++lodUseSerial_;
+            return {found->second.geometry, desiredLevel};
+        }
+        if (stackMode_ == JobStackDisplayMode::Solid && desiredLevel == 0 &&
+            stack->solidGeometry) {
+            insertLod(desired, stack->solidGeometry);
+            return {stack->solidGeometry, 0};
+        }
+        scheduleLod(stack, desired);
+        for (int level = desiredLevel - 1; level >= 0; --level) {
+            const LodCacheKey fallback{stack.get(), stackMode_, level};
+            if (auto found = lodCache_.find(fallback); found != lodCache_.end()) {
+                found->second.lastUsed = ++lodUseSerial_;
+                return {found->second.geometry, level};
+            }
+        }
+        if (stack->solidGeometry) return {stack->solidGeometry, 0};
+        return {};
+    }
+
+    void visiblePlacements(std::vector<quint32>* result, std::size_t maximum) const {
+        if (!result) return;
+        result->clear();
+        if (!document_) return;
+        if (document_->placementSpatialIndex)
+            document_->placementSpatialIndex->queryVisible(
+                viewProjection(), origin_, result, maximum);
+        else {
+            result->reserve(std::min(document_->points.size(), maximum));
+            for (quint32 index = 0; index < document_->points.size(); ++index)
+                if (document_->points[index].placeId >= 0) {
+                    result->push_back(index);
+                    if (result->size() >= maximum) break;
+                }
+        }
+    }
 
     QMatrix4x4 viewProjection() const {
         const QSize imageSize = swapChainImageSize().isValid() ? swapChainImageSize() : size();
@@ -198,11 +361,14 @@ public:
         lines.reserve(128 * 2 + 4096 * 36);
         const QMatrix4x4 mvp = viewProjection();
         if (guidesVisible_) appendGuides(lines, mvp);
-        appendLabels(lines, mvp);
+        if (interacting_) appendPriorityLabels(lines, mvp);
+        else appendLabels(lines, mvp);
         return lines;
     }
 
     std::function<void(qint64)> selectedCallback;
+    std::function<void(qint64)> activatedCallback;
+    std::function<void(double,std::size_t,std::size_t,qint64,int,int)> renderStatsCallback;
 
 protected:
     void mousePressEvent(QMouseEvent* event) override {
@@ -230,7 +396,7 @@ protected:
                     panOnGround(lastPosition_, event->position());
                 } else
                     zoomAt(pressPosition_, std::exp(float(delta.y()) * 0.01F));
-                requestUpdate();
+                noteInteraction();
             }
             lastPosition_ = event->position();
             event->accept();
@@ -258,7 +424,7 @@ protected:
     void wheelEvent(QWheelEvent* event) override {
         cancelAnimation();
         zoomAt(event->position(), std::exp(-float(event->angleDelta().y()) * 0.0012F));
-        requestUpdate(); event->accept();
+        noteInteraction(); event->accept();
     }
 
     void keyPressEvent(QKeyEvent* event) override {
@@ -304,12 +470,89 @@ protected:
         if (event->button() != Qt::LeftButton) return;
         selectedId_ = pick(event->position(), 8.0F, true);
         if (selectedCallback) selectedCallback(selectedId_);
-        if (selectedId_ >= 0) focusSelected(false);
+        if (selectedId_ >= 0 && activatedCallback) activatedCallback(selectedId_);
+        requestUpdate();
         event->accept();
     }
 
 private:
     friend class JobVulkanRenderer;
+
+    void scheduleLod(const JobModelStackPtr& stack, const LodCacheKey& key) {
+        if (!stack || activeLodBuilds_ >= 2 || pendingLods_.contains(key) ||
+            failedLods_.contains(key) ||
+            (lodToken_ && lodToken_->isCancelled())) return;
+        pendingLods_.insert(key);
+        ++activeLodBuilds_;
+        const quint64 generation = documentGeneration_;
+        const auto token = lodToken_;
+        auto* watcher = new QFutureWatcher<LodBuildResult>(this);
+        QObject::connect(watcher, &QFutureWatcher<LodBuildResult>::finished, this,
+                         [this, watcher, key, generation] {
+            const LodBuildResult result = watcher->result();
+            watcher->deleteLater();
+            pendingLods_.erase(key);
+            activeLodBuilds_ = std::max(0, activeLodBuilds_ - 1);
+            if (generation == documentGeneration_ && result.geometry) {
+                if (insertLod(key, result.geometry)) {
+                    markStackBuffersDirty();
+                } else failedLods_.insert(key);
+            } else if (generation == documentGeneration_ &&
+                       lodToken_ && !lodToken_->isCancelled()) failedLods_.insert(key);
+            requestUpdate();
+        });
+        watcher->setFuture(QtConcurrent::run(&lodPool_, [stack, key, token, generation] {
+            return LodBuildResult{key,
+                buildLodGeometry(stack, key.level, key.mode, token), generation};
+        }));
+    }
+
+    void noteInteraction() {
+        interacting_ = true;
+        recoveryTimer_.stop();
+        recoveryFramesRemaining_ = 0;
+        settleTimer_.start();
+        requestUpdate();
+    }
+
+    void markStackBuffersDirty() {
+        // Camera interaction reuses the last complete batches. Any model/mode/LOD
+        // changes are folded into the single rebuild scheduled by settleTimer_.
+        if (interacting_) return;
+        ++stackBufferRevision_;
+        if (stackBufferRevision_ == 0) ++stackBufferRevision_;
+    }
+
+    bool insertLod(const LodCacheKey& key,
+                   const std::shared_ptr<const MaskStackGeometry>& geometry) {
+        if (!geometry) return false;
+        constexpr std::size_t maximumBytes = 256U * 1024U * 1024U;
+        const std::size_t bytes = geometry->vertices.size() * sizeof(MaskStackVertex) +
+                                  geometry->indices.size() * sizeof(std::uint32_t);
+        if (bytes > maximumBytes) return false;
+        if (auto existing = lodCache_.find(key); existing != lodCache_.end()) {
+            existing->second.lastUsed = ++lodUseSerial_;
+            return true;
+        }
+        while (lodCacheBytes_ + bytes > maximumBytes && !lodCache_.empty()) {
+            auto victim = lodCache_.end();
+            for (auto candidate = lodCache_.begin(); candidate != lodCache_.end(); ++candidate) {
+                if (candidate->first.stack == key.stack && candidate->first.mode == key.mode &&
+                    candidate->first.level == key.level) continue;
+                if (victim == lodCache_.end() ||
+                    candidate->second.lastUsed < victim->second.lastUsed ||
+                    (candidate->second.lastUsed == victim->second.lastUsed &&
+                     candidate->first.level > victim->first.level)) victim = candidate;
+            }
+            if (victim == lodCache_.end()) break;
+            lodCacheBytes_ -= std::min(lodCacheBytes_, victim->second.byteSize);
+            lodCache_.erase(victim);
+        }
+        if (lodCacheBytes_ + bytes > maximumBytes) return false;
+        lodCache_[key] = {geometry, bytes, ++lodUseSerial_};
+        lodCacheBytes_ += bytes;
+        return true;
+    }
 
     QVector3D localPosition(const JobPoint& point) const { return point.position.relativeTo(origin_); }
 
@@ -348,27 +591,12 @@ private:
     }
 
     bool groundIntersection(const QPointF& screen, QVector3D* intersection) const {
-        QVector3D rayOrigin, rayDirection;
-        return JobPreviewMath::screenRay(screen, QSizeF(width(), height()), viewProjection(),
-                                         &rayOrigin, &rayDirection) &&
-               JobPreviewMath::intersectHorizontalPlane(rayOrigin, rayDirection,
-                                                         camera_.pose().pivot.z(), intersection);
+        return camera_.groundIntersection(screen, QSizeF(width(), height()),
+                                           viewProjection(), intersection);
     }
 
     void panOnGround(const QPointF& previous, const QPointF& current) {
-        QVector3D before, after;
-        if (groundIntersection(previous, &before) && groundIntersection(current, &after)) {
-            QVector3D delta = before - after;
-            delta.setZ(0.0F);
-            camera_.translate(delta);
-            return;
-        }
-        const QPointF pixels = current - previous;
-        const float worldPerPixel = std::max(0.000001F,
-            2.0F * camera_.pose().distance * std::tan(22.5F * kPi / 180.0F) /
-                std::max(1, height()));
-        camera_.translate(camera_.right() * float(-pixels.x()) * worldPerPixel +
-                          camera_.groundForward() * float(pixels.y()) * worldPerPixel);
+        camera_.panOnGround(previous, current, QSizeF(width(), height()), viewProjection());
     }
 
     void zoomAt(const QPointF& screen, float factor) {
@@ -450,7 +678,7 @@ private:
             if (!movement.isNull()) camera_.translate(movement.normalized() * amount);
             changed = true;
         }
-        if (changed) requestUpdate();
+        if (changed) noteInteraction();
         stopInteractionTimerIfIdle();
     }
 
@@ -572,6 +800,20 @@ private:
         return text;
     }
 
+    void appendPriorityLabels(std::vector<LineVertex>& lines, const QMatrix4x4& mvp) const {
+        const auto add = [&](qint64 id, const QVector3D& color) {
+            if (id < 0 || id >= static_cast<qint64>(idToIndex_.size())) return;
+            const qint64 index = idToIndex_[static_cast<std::size_t>(id)];
+            if (index < 0) return;
+            QPointF screen;
+            if (project(localPosition(document_->points[static_cast<std::size_t>(index)]),
+                        mvp, &screen))
+                appendText(lines, screen, QString::number(id), color);
+        };
+        add(hoveredId_, {1.0F, 0.50F, 0.15F});
+        add(selectedId_, {1.0F, 0.85F, 0.0F});
+    }
+
     void appendLabels(std::vector<LineVertex>& lines, const QMatrix4x4& mvp) const {
         if (document_->points.empty()) return;
         std::vector<quint32> visible;
@@ -607,13 +849,13 @@ private:
             appendText(lines, screen, text, {0.72F, 0.82F, 0.90F});
         };
         const JobLabelLodDecision lod = JobLabelLod::decide(spacing, static_cast<qint64>(document_->points.size()));
-        if (lod.level == JobLabelLodLevel::Individual) {
+        if (!interacting_ && lod.level == JobLabelLodLevel::Individual) {
             for (const ProjectedPoint& point : projected) {
                 const qint64 id=document_->points[point.pointIndex].placementId;
                 if (id == selectedId_ || id == hoveredId_) continue;
                 addOrdinary(point.screen, QString::number(id));
             }
-        } else if (lod.level == JobLabelLodLevel::Range) {
+        } else if (!interacting_ && lod.level == JobLabelLodLevel::Range) {
             const qint64 group = lod.rangeSize;
             struct RangeAnchor { QPointF screenSum; qint64 visibleCount=0; };
             std::map<qint64,RangeAnchor> anchors;
@@ -630,16 +872,7 @@ private:
                             QStringLiteral("%1~%2").arg(firstId).arg(lastId));
             }
         }
-        const auto addPriority = [&](qint64 id, const QVector3D& color) {
-            if (id < 0 || id >= static_cast<qint64>(idToIndex_.size())) return;
-            const qint64 index = idToIndex_[static_cast<size_t>(id)];
-            if (index < 0) return;
-            QPointF screen;
-            if (project(localPosition(document_->points[static_cast<size_t>(index)]), mvp, &screen))
-                appendText(lines, screen, QString::number(id), color);
-        };
-        addPriority(hoveredId_, {1.0F, 0.50F, 0.15F});
-        addPriority(selectedId_, {1.0F, 0.85F, 0.0F});
+        appendPriorityLabels(lines, mvp);
     }
 
     JobVulkanRenderer* renderer_ = nullptr;
@@ -658,16 +891,37 @@ private:
     qint64 hoveredId_ = -1;
     bool guidesVisible_ = true;
     bool pointBufferDirty_ = true;
-    bool stackBufferDirty_ = true;
+    quint64 stackBufferRevision_ = 1;
     JobStackDisplayMode stackMode_ = JobStackDisplayMode::Solid;
     Qt::MouseButton pressedButton_ = Qt::NoButton;
     QPointF pressPosition_;
     QPointF lastPosition_;
     bool dragging_ = false;
     mutable QElapsedTimer hoverTimer_;
+    QElapsedTimer statsTimer_;
+    QTimer settleTimer_;
+    QTimer recoveryTimer_;
+    QThreadPool lodPool_;
+    CancellationTokenPtr lodToken_ = std::make_shared<CancellationToken>();
+    std::map<LodCacheKey, LodCacheEntry> lodCache_;
+    std::set<LodCacheKey> pendingLods_;
+    std::set<LodCacheKey> failedLods_;
+    std::size_t lodCacheBytes_ = 0;
+    quint64 lodUseSerial_ = 0;
+    JobFrameBudgetController frameBudget_;
+    quint64 documentGeneration_ = 0;
+    int activeLodBuilds_ = 0;
+    int recoveryFramesRemaining_ = 0;
+    bool interacting_ = false;
+    std::size_t lastVisibleCount_ = 0;
+    std::size_t lastProxyCount_ = 0;
+    qint64 lastTriangleCount_ = 0;
+    int lastMinimumLod_ = -1;
+    int lastMaximumLod_ = -1;
 };
 
-bool JobVulkanRenderer::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, Buffer* buffer) {
+bool JobVulkanRenderer::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, Buffer* buffer,
+                                     bool deviceLocal) {
     if (!buffer || size == 0) return false;
     VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     info.size = size; info.usage = usage; info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
@@ -676,12 +930,19 @@ bool JobVulkanRenderer::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage
     deviceFunctions_->vkGetBufferMemoryRequirements(device_, buffer->buffer, &requirements);
     VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     allocation.allocationSize = requirements.size;
-    allocation.memoryTypeIndex = window_->hostVisibleMemoryIndex();
+    allocation.memoryTypeIndex = deviceLocal ? window_->deviceLocalMemoryIndex()
+                                             : window_->hostVisibleMemoryIndex();
     if (deviceFunctions_->vkAllocateMemory(device_, &allocation, nullptr, &buffer->memory) != VK_SUCCESS) {
         deviceFunctions_->vkDestroyBuffer(device_, buffer->buffer, nullptr); buffer->buffer = VK_NULL_HANDLE; return false;
     }
     if (deviceFunctions_->vkBindBufferMemory(device_, buffer->buffer, buffer->memory, 0) != VK_SUCCESS) {
         destroyBuffer(buffer); return false;
+    }
+    if (!deviceLocal) {
+        if (deviceFunctions_->vkMapMemory(device_, buffer->memory, 0, VK_WHOLE_SIZE, 0,
+                                          &buffer->mapped) != VK_SUCCESS) {
+            destroyBuffer(buffer); return false;
+        }
     }
     buffer->capacity = size;
     buffer->allocationSize = requirements.size;
@@ -690,6 +951,8 @@ bool JobVulkanRenderer::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage
 
 void JobVulkanRenderer::destroyBuffer(Buffer* buffer) {
     if (!buffer || !deviceFunctions_) return;
+    if (buffer->mapped && buffer->memory)
+        deviceFunctions_->vkUnmapMemory(device_, buffer->memory);
     if (buffer->buffer) deviceFunctions_->vkDestroyBuffer(device_, buffer->buffer, nullptr);
     if (buffer->memory) deviceFunctions_->vkFreeMemory(device_, buffer->memory, nullptr);
     *buffer = {};
@@ -701,13 +964,40 @@ bool JobVulkanRenderer::upload(Buffer* buffer, const void* data, VkDeviceSize si
         destroyBuffer(buffer);
         if (!createBuffer(std::max<VkDeviceSize>(size, size * 3 / 2), usage, buffer)) return false;
     }
-    void* mapped = nullptr;
-    if (deviceFunctions_->vkMapMemory(device_, buffer->memory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS) return false;
-    std::memcpy(mapped, data, static_cast<size_t>(size));
+    if (!buffer->mapped) return false;
+    std::memcpy(buffer->mapped, data, static_cast<size_t>(size));
     VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
     range.memory = buffer->memory; range.offset = 0; range.size = VK_WHOLE_SIZE;
     deviceFunctions_->vkFlushMappedMemoryRanges(device_, 1, &range);
-    deviceFunctions_->vkUnmapMemory(device_, buffer->memory);
+    return true;
+}
+
+bool JobVulkanRenderer::uploadStatic(Buffer* buffer, const void* data, VkDeviceSize size,
+                                     VkBufferUsageFlags usage, int frame) {
+    if (!buffer || !data || size == 0 || frame < 0 ||
+        frame >= static_cast<int>(stagingFrames_.size())) return false;
+    destroyBuffer(buffer);
+    if (!createBuffer(size, usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT, buffer, true)) return false;
+    Buffer staging;
+    if (!createBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, &staging) ||
+        !upload(&staging, data, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) {
+        destroyBuffer(&staging); destroyBuffer(buffer); return false;
+    }
+    VkBufferCopy copy{0,0,size};
+    VkCommandBuffer command = window_->currentCommandBuffer();
+    deviceFunctions_->vkCmdCopyBuffer(command, staging.buffer, buffer->buffer, 1, &copy);
+    VkBufferMemoryBarrier barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = usage & VK_BUFFER_USAGE_INDEX_BUFFER_BIT
+        ? VK_ACCESS_INDEX_READ_BIT : VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.buffer = buffer->buffer;
+    barrier.offset = 0;
+    barrier.size = size;
+    deviceFunctions_->vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 0, nullptr, 1, &barrier, 0, nullptr);
+    stagingFrames_[frame].push_back(std::move(staging));
     return true;
 }
 
@@ -791,18 +1081,19 @@ VkPipeline JobVulkanRenderer::createStackPipeline(VkShaderModule vertex,
     const VkVertexInputBindingDescription bindings[2]{
         {0, sizeof(MaskStackVertex), VK_VERTEX_INPUT_RATE_VERTEX},
         {1, sizeof(StackInstance), VK_VERTEX_INPUT_RATE_INSTANCE}};
-    const VkVertexInputAttributeDescription attributes[7]{
+    const VkVertexInputAttributeDescription attributes[8]{
         {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0},
         {1, 0, VK_FORMAT_R32G32B32_SFLOAT, 12},
         {2, 0, VK_FORMAT_R32_SFLOAT, 24},
         {3, 0, VK_FORMAT_R32_SFLOAT, 28},
         {4, 1, VK_FORMAT_R32G32B32_SFLOAT, 0},
         {5, 1, VK_FORMAT_R32_SFLOAT, 12},
-        {6, 1, VK_FORMAT_R32_SFLOAT, 16}};
+        {6, 1, VK_FORMAT_R32_SFLOAT, 16},
+        {7, 1, VK_FORMAT_R32G32B32_SFLOAT, 20}};
     VkPipelineVertexInputStateCreateInfo input{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     input.vertexBindingDescriptionCount = 2;
     input.pVertexBindingDescriptions = bindings;
-    input.vertexAttributeDescriptionCount = 7;
+    input.vertexAttributeDescriptionCount = 8;
     input.pVertexAttributeDescriptions = attributes;
     VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
     assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -862,6 +1153,34 @@ void JobVulkanRenderer::initResources() {
     if (deviceFunctions_->vkCreatePipelineLayout(device_, &pipelineInfo, nullptr, &pipelineLayout_) != VK_SUCCESS) return;
     const int frames = window_->concurrentFrameCount();
     uniformBuffers_.resize(frames); lineBuffers_.resize(frames); descriptorSets_.resize(frames);
+    stackFrames_.resize(frames);
+    stackFrameRevisions_.resize(frames);
+    stagingFrames_.resize(frames);
+    VkPhysicalDeviceProperties physicalProperties{};
+    QVulkanFunctions* instanceFunctions = window_->vulkanInstance()->functions();
+    instanceFunctions->vkGetPhysicalDeviceProperties(
+        window_->physicalDevice(), &physicalProperties);
+    timestampPeriod_ = physicalProperties.limits.timestampPeriod;
+    std::uint32_t queueFamilyCount = 0;
+    instanceFunctions->vkGetPhysicalDeviceQueueFamilyProperties(
+        window_->physicalDevice(), &queueFamilyCount, nullptr);
+    std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+    instanceFunctions->vkGetPhysicalDeviceQueueFamilyProperties(
+        window_->physicalDevice(), &queueFamilyCount, queueFamilies.data());
+    const std::uint32_t family = window_->graphicsQueueFamilyIndex();
+    const std::uint32_t validBits = family < queueFamilies.size()
+        ? queueFamilies[family].timestampValidBits : 0;
+    timestampMask_ = validBits == 0 ? 0
+        : validBits >= 64 ? std::numeric_limits<std::uint64_t>::max()
+                          : (std::uint64_t{1} << validBits) - 1;
+    if (timestampPeriod_ > 0.0F && timestampMask_ != 0) {
+        VkQueryPoolCreateInfo queryInfo{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+        queryInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        queryInfo.queryCount = static_cast<std::uint32_t>(frames * 2);
+        if (deviceFunctions_->vkCreateQueryPool(device_, &queryInfo, nullptr,
+                                                 &timestampPool_) != VK_SUCCESS)
+            timestampPool_ = VK_NULL_HANDLE;
+    }
     VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, static_cast<uint32_t>(frames)};
     VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     poolInfo.maxSets = frames; poolInfo.poolSizeCount = 1; poolInfo.pPoolSizes = &poolSize;
@@ -882,105 +1201,280 @@ void JobVulkanRenderer::initResources() {
     VkShaderModule pointFragment = loadShader(QStringLiteral(":/job_shaders/job_points.frag.spv"));
     VkShaderModule lineVertex = loadShader(QStringLiteral(":/job_shaders/job_lines.vert.spv"));
     VkShaderModule lineFragment = loadShader(QStringLiteral(":/job_shaders/job_lines.frag.spv"));
-    VkShaderModule stackVertex = loadShader(QStringLiteral(":/job_shaders/job_stack.vert.spv"));
-    VkShaderModule stackFragment = loadShader(QStringLiteral(":/job_shaders/job_stack.frag.spv"));
     if (pointVertex && pointFragment) pointPipeline_ = createPipeline(pointVertex, pointFragment, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, true);
     if (lineVertex && lineFragment) linePipeline_ = createPipeline(lineVertex, lineFragment, VK_PRIMITIVE_TOPOLOGY_LINE_LIST, false);
-    if (stackVertex && stackFragment) stackPipeline_ = createStackPipeline(stackVertex, stackFragment);
-    for (VkShaderModule module : {pointVertex, pointFragment, lineVertex, lineFragment,
-                                  stackVertex, stackFragment})
+    for (VkShaderModule module : {pointVertex, pointFragment, lineVertex, lineFragment})
         if (module) deviceFunctions_->vkDestroyShaderModule(device_, module, nullptr);
     initialized_ = pointPipeline_ && linePipeline_;
     rebuildPointBuffer();
-    rebuildStackBuffers();
 }
 
 void JobVulkanRenderer::rebuildPointBuffer() {
     deviceFunctions_->vkDeviceWaitIdle(device_);
     destroyBuffer(&pointBuffer_);
+    pointCount_ = 0;
     const auto& document = window_->document();
     if (!document || document->points.empty()) return;
     std::vector<PointVertex> vertices;
-    vertices.reserve(document->points.size());
+    const std::size_t maximumPoints = document->points.size();
+    const std::size_t stride = std::max<std::size_t>(1,
+        (document->points.size() + maximumPoints - 1) / maximumPoints);
+    vertices.reserve(std::min(document->points.size(), maximumPoints));
     const JobCoordinate origin = window_->origin();
-    for (const JobPoint& point : document->points) {
+    for (std::size_t pointIndex = 0; pointIndex < document->points.size(); pointIndex += stride) {
+        const JobPoint& point = document->points[pointIndex];
         const QVector3D local = point.position.relativeTo(origin);
         QColor color = point.groupColor.isValid() ? point.groupColor : QColor(26, 191, 255);
-        if (document->layeredPackageDetected && point.placeId >= 0 &&
-            point.placeId < static_cast<qint64>(document->models.size()) &&
-            document->models[static_cast<size_t>(point.placeId)].stackState ==
-                JobModelStackState::Invalid) color = QColor(255, 145, 48);
         vertices.push_back({local.x(), local.y(), local.z(),
                             static_cast<float>(point.placementId), color.redF(),
                             color.greenF(), color.blueF()});
     }
-    upload(&pointBuffer_, vertices.data(), vertices.size() * sizeof(PointVertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+    if (upload(&pointBuffer_, vertices.data(), vertices.size() * sizeof(PointVertex),
+               VK_BUFFER_USAGE_VERTEX_BUFFER_BIT))
+        pointCount_ = static_cast<std::uint32_t>(vertices.size());
 }
 
-void JobVulkanRenderer::rebuildStackBuffers() {
-    deviceFunctions_->vkDeviceWaitIdle(device_);
-    for (auto& buffers : stackBuffers_) {
-        destroyBuffer(&buffers.vertex);
-        destroyBuffer(&buffers.index);
-        destroyBuffer(&buffers.instances);
+void JobVulkanRenderer::rebuildStackBuffers(int frame) {
+    if (frame < 0 || frame >= static_cast<int>(stackFrames_.size()) ||
+        frame >= static_cast<int>(stackFrameRevisions_.size())) return;
+    for (auto& staging : stagingFrames_[frame]) destroyBuffer(&staging);
+    stagingFrames_[frame].clear();
+    if (uploadedDocumentGeneration_ != window_->documentGeneration_) {
+        deviceFunctions_->vkDeviceWaitIdle(device_);
+        for (auto& bufferedFrame : stackFrames_) {
+            for (auto& [key, batch] : bufferedFrame) {
+                Q_UNUSED(key);
+                destroyBuffer(&batch.instances);
+            }
+            bufferedFrame.clear();
+        }
+        for (auto& [key, mesh] : meshCache_) {
+            Q_UNUSED(key);
+            destroyBuffer(&mesh.vertex); destroyBuffer(&mesh.index);
+        }
+        meshCache_.clear(); failedGpuMeshes_.clear(); gpuMeshBytes_ = 0;
+        std::fill(stackFrameRevisions_.begin(), stackFrameRevisions_.end(), 0);
+        uploadedDocumentGeneration_ = window_->documentGeneration_;
     }
-    stackBuffers_.clear();
+    const quint64 revision = window_->stackBufferRevision();
+    if (stackFrameRevisions_[frame] == revision) return;
+    auto& frameBatches = stackFrames_[frame];
+    for (auto& [key, batch] : frameBatches) {
+        Q_UNUSED(key);
+        batch.instanceCount = 0;
+    }
     const auto& document = window_->document();
-    if (!document || document->loadedStackCount() <= 0) return;
+    if (!document || document->loadedStackCount() <= 0) {
+        stackFrameRevisions_[frame] = revision;
+        return;
+    }
+
+    struct Candidate {
+        quint32 pointIndex = 0;
+        JobModelStackPtr stack;
+        double projectedWidth = 0.0;
+        double projectedHeight = 0.0;
+        double area = 0.0;
+        int priority = 0;
+    };
+    const QSizeF viewport(std::max(1, window_->width()), std::max(1, window_->height()));
+    const qint64 triangleBudget = window_->frameBudget().triangleBudget();
+    const std::size_t viewportLimit = static_cast<std::size_t>(std::clamp(
+        viewport.width() * viewport.height() / (window_->interacting() ? 12.0 : 6.0),
+        10'000.0, window_->interacting() ? 20'000.0 : 40'000.0));
+    const std::size_t budgetLimit = static_cast<std::size_t>(std::max<qint64>(
+        1'000, triangleBudget / 12));
+    const std::size_t processingLimit = std::min(viewportLimit, budgetLimit);
+    std::vector<quint32> visible;
+    window_->visiblePlacements(&visible, processingLimit);
+    const std::size_t visiblePlacementCount = visible.size();
+    std::vector<quint32> priorityPlacements;
+    for (qint64 id : {window_->selectedId(), window_->hoveredId()}) {
+        const qint64 pointIndex = window_->pointIndexForPlacement(id);
+        if (pointIndex >= 0)
+            priorityPlacements.push_back(static_cast<quint32>(pointIndex));
+    }
+    for (quint32 priority : priorityPlacements) {
+        if (std::find(visible.cbegin(), visible.cend(), priority) != visible.cend()) continue;
+        if (!visible.empty()) visible.back() = priority;
+        else visible.push_back(priority);
+    }
+    std::vector<Candidate> candidates;
+    candidates.reserve(visible.size());
+    const QMatrix4x4 mvp = window_->viewProjection();
+    const JobCoordinate origin = window_->origin();
+    for (quint32 pointIndex : visible) {
+        if (pointIndex >= document->points.size()) continue;
+        const JobPoint& point = document->points[pointIndex];
+        if (point.placeId < 0 || point.placeId >= static_cast<qint64>(document->models.size())) continue;
+        const JobModel& model = document->models[static_cast<std::size_t>(point.placeId)];
+        if (!model.stack) continue;
+        const QVector3D base = point.position.relativeTo(origin);
+        const QVector3D extent(static_cast<float>(model.stack->physicalSize.width()),
+                               static_cast<float>(model.stack->physicalSize.height()),
+                               static_cast<float>(model.stack->layerCount * model.stack->layerHeight));
+        double minimumX = std::numeric_limits<double>::max();
+        double minimumY = std::numeric_limits<double>::max();
+        double maximumX = std::numeric_limits<double>::lowest();
+        double maximumY = std::numeric_limits<double>::lowest();
+        int projected = 0;
+        for (int mask = 0; mask < 8; ++mask) {
+            QPointF screen;
+            const QVector3D corner = base + QVector3D((mask & 1) ? extent.x() : 0.0F,
+                                                       (mask & 2) ? extent.y() : 0.0F,
+                                                       (mask & 4) ? extent.z() : 0.0F);
+            if (!JobPreviewMath::project(corner, mvp, viewport, &screen)) continue;
+            minimumX = std::min(minimumX, screen.x()); maximumX = std::max(maximumX, screen.x());
+            minimumY = std::min(minimumY, screen.y()); maximumY = std::max(maximumY, screen.y());
+            ++projected;
+        }
+        const double projectedWidth = projected ? std::max(1.0, maximumX - minimumX)
+                                                : viewport.width();
+        const double projectedHeight = projected ? std::max(1.0, maximumY - minimumY)
+                                                 : viewport.height();
+        const int priority = point.placementId == window_->selectedId() ? 2
+                           : point.placementId == window_->hoveredId() ? 1 : 0;
+        candidates.push_back({pointIndex, model.stack, projectedWidth, projectedHeight,
+                              projectedWidth * projectedHeight, priority});
+    }
+    std::stable_sort(candidates.begin(), candidates.end(), [](const Candidate& left,
+                                                               const Candidate& right) {
+        if (left.priority != right.priority) return left.priority > right.priority;
+        return left.area > right.area;
+    });
 
     struct PendingBatch {
         std::shared_ptr<const MaskStackGeometry> geometry;
         std::vector<StackInstance> instances;
+        int lodLevel = -1;
     };
     std::map<const MaskStackGeometry*, PendingBatch> batches;
-    const JobCoordinate origin = window_->origin();
-    for (const JobPoint& point : document->points) {
-        if (point.placeId < 0 || point.placeId >= static_cast<qint64>(document->models.size()))
+    qint64 usedTriangles = 0;
+    std::size_t proxyCount = 0;
+    int minimumLod = std::numeric_limits<int>::max();
+    int maximumLod = -1;
+    for (const Candidate& candidate : candidates) {
+        const JobPoint& point = document->points[candidate.pointIndex];
+        int desiredLevel = JobStackLod::chooseLevel(candidate.stack->lodLevels,
+            candidate.projectedWidth, candidate.projectedHeight, window_->interacting(),
+            window_->frameBudget().qualityOffset() + (candidate.priority > 0 ? 1 : 0));
+        GeometrySelection selection = window_->geometryFor(candidate.stack, desiredLevel);
+        qint64 triangles = selection.geometry
+            ? static_cast<qint64>(selection.geometry->indices.size() / 3) : 0;
+        constexpr std::size_t maximumGpuMeshBytes = 256U * 1024U * 1024U;
+        const auto gpuMeshUnavailable = [&](const GeometrySelection& value) {
+            if (!value.geometry) return true;
+            const std::size_t bytes = value.geometry->vertices.size() * sizeof(MaskStackVertex) +
+                                      value.geometry->indices.size() * sizeof(std::uint32_t);
+            return failedGpuMeshes_.contains(value.geometry.get()) ||
+                (!meshCache_.contains(value.geometry.get()) &&
+                  gpuMeshBytes_ + bytes > maximumGpuMeshBytes);
+        };
+        if (selection.geometry && candidate.priority == 0 &&
+            (gpuMeshUnavailable(selection) ||
+             usedTriangles + triangles > triangleBudget)) {
+            for (int lowerLevel = selection.level - 1; lowerLevel >= 0; --lowerLevel) {
+                GeometrySelection lower = window_->geometryFor(candidate.stack, lowerLevel);
+                if (!lower.geometry) continue;
+                const qint64 lowerTriangles = static_cast<qint64>(lower.geometry->indices.size() / 3);
+                selection = std::move(lower);
+                triangles = lowerTriangles;
+                if (!gpuMeshUnavailable(selection) &&
+                    usedTriangles + triangles <= triangleBudget) break;
+            }
+        }
+        const bool unavailable = !selection.geometry || gpuMeshUnavailable(selection) ||
+            (candidate.priority == 0 && usedTriangles + triangles > triangleBudget);
+        if (unavailable) {
+            ++proxyCount;
             continue;
-        const JobModel& model = document->models[static_cast<size_t>(point.placeId)];
-        if (!model.stack) continue;
-        const auto geometry = window_->stackDisplayMode() == JobStackDisplayMode::Exploded
-            ? model.stack->explodedGeometry : model.stack->solidGeometry;
+        }
+        const auto geometry = selection.geometry;
         if (!geometry || geometry->vertices.empty() || geometry->indices.empty()) continue;
         PendingBatch& batch = batches[geometry.get()];
         batch.geometry = geometry;
+        batch.lodLevel = selection.level;
         const QVector3D local = point.position.relativeTo(origin);
         batch.instances.push_back({local.x(), local.y(), local.z(),
                                    static_cast<float>(point.placementId),
-                                   static_cast<float>(model.stack->layerCount), {0, 0, 0}});
+                                   static_cast<float>(candidate.stack->layerCount),
+                                   1.0F, 1.0F, 1.0F});
+        usedTriangles += triangles;
+        minimumLod = std::min(minimumLod, selection.level);
+        maximumLod = std::max(maximumLod, selection.level);
     }
-    stackBuffers_.reserve(batches.size());
+    const auto makeGpuRoom = [&](std::size_t bytes) {
+        constexpr std::size_t maximumBytes = 256U * 1024U * 1024U;
+        return gpuMeshBytes_ + bytes <= maximumBytes;
+    };
     for (const auto& [key, pending] : batches) {
-        Q_UNUSED(key);
-        StackBuffers buffers;
+        auto mesh = meshCache_.find(key);
+        if (mesh == meshCache_.end()) {
+            if (failedGpuMeshes_.contains(key)) continue;
+            MeshBuffers created;
+            created.geometry = pending.geometry;
+            const auto& geometry = *pending.geometry;
+            const std::size_t meshBytes = geometry.vertices.size() * sizeof(MaskStackVertex) +
+                                          geometry.indices.size() * sizeof(std::uint32_t);
+            if (!makeGpuRoom(meshBytes)) continue;
+            if (!uploadStatic(&created.vertex, geometry.vertices.data(),
+                        geometry.vertices.size() * sizeof(MaskStackVertex),
+                        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, frame) ||
+                !uploadStatic(&created.index, geometry.indices.data(),
+                        geometry.indices.size() * sizeof(std::uint32_t),
+                        VK_BUFFER_USAGE_INDEX_BUFFER_BIT, frame)) {
+                destroyBuffer(&created.vertex); destroyBuffer(&created.index);
+                failedGpuMeshes_.insert(key);
+                continue;
+            }
+            created.indexCount = static_cast<std::uint32_t>(std::min<std::size_t>(
+                geometry.indices.size(), std::numeric_limits<std::uint32_t>::max()));
+            created.byteSize = meshBytes;
+            created.lodLevel = pending.lodLevel;
+            mesh = meshCache_.emplace(key, std::move(created)).first;
+            gpuMeshBytes_ += meshBytes;
+        }
+        StackBatch& batch = frameBatches[key];
+        batch.mesh = &mesh->second;
         const auto& geometry = *pending.geometry;
-        if (!upload(&buffers.vertex, geometry.vertices.data(),
-                    geometry.vertices.size() * sizeof(MaskStackVertex),
-                    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) ||
-            !upload(&buffers.index, geometry.indices.data(),
-                    geometry.indices.size() * sizeof(std::uint32_t),
-                    VK_BUFFER_USAGE_INDEX_BUFFER_BIT) ||
-            !upload(&buffers.instances, pending.instances.data(),
+        Q_UNUSED(geometry);
+        if (!upload(&batch.instances, pending.instances.data(),
                     pending.instances.size() * sizeof(StackInstance),
                     VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)) {
-            destroyBuffer(&buffers.vertex);
-            destroyBuffer(&buffers.index);
-            destroyBuffer(&buffers.instances);
+            batch.instanceCount = 0;
             continue;
         }
-        buffers.indexCount = static_cast<std::uint32_t>(std::min<std::size_t>(
-            geometry.indices.size(), std::numeric_limits<std::uint32_t>::max()));
-        buffers.instanceCount = static_cast<std::uint32_t>(std::min<std::size_t>(
+        batch.instanceCount = static_cast<std::uint32_t>(std::min<std::size_t>(
             pending.instances.size(), std::numeric_limits<std::uint32_t>::max()));
-        stackBuffers_.push_back(std::move(buffers));
     }
+    window_->lastVisibleCount_ = visiblePlacementCount;
+    window_->lastProxyCount_ = proxyCount;
+    window_->lastTriangleCount_ = usedTriangles;
+    window_->lastMinimumLod_ = minimumLod == std::numeric_limits<int>::max() ? -1 : minimumLod;
+    window_->lastMaximumLod_ = maximumLod;
+    stackFrameRevisions_[frame] = revision;
 }
 
 void JobVulkanRenderer::startNextFrame() {
     if (!initialized_) { window_->frameReady(); return; }
-    if (window_->takePointBufferDirty()) rebuildPointBuffer();
-    if (window_->takeStackBufferDirty()) rebuildStackBuffers();
+    QElapsedTimer cpuFrameTimer;
+    cpuFrameTimer.start();
     const int frame = window_->currentFrame();
+    bool recordedGpuTime = false;
+    double gpuMilliseconds = 0.0;
+    if (timestampPool_) {
+        std::uint64_t timestamps[2]{};
+        if (deviceFunctions_->vkGetQueryPoolResults(device_, timestampPool_, frame * 2, 2,
+                sizeof(timestamps), timestamps, sizeof(std::uint64_t),
+                VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+            const std::uint64_t elapsedTicks = (timestamps[1] - timestamps[0]) & timestampMask_;
+            const double milliseconds = double(elapsedTicks) *
+                                        timestampPeriod_ / 1'000'000.0;
+            gpuMilliseconds = milliseconds;
+            recordedGpuTime = true;
+        }
+    }
+    if (window_->takePointBufferDirty()) rebuildPointBuffer();
     CameraUniform uniform;
     const QMatrix4x4 matrix = window_->viewProjection();
     std::memcpy(uniform.mvp, matrix.constData(), sizeof(uniform.mvp));
@@ -1002,6 +1496,11 @@ void JobVulkanRenderer::startNextFrame() {
                                static_cast<uint32_t>(window_->swapChainImageSize().height())};
     begin.clearValueCount = 2; begin.pClearValues = clearValues;
     VkCommandBuffer command = window_->currentCommandBuffer();
+    if (timestampPool_) {
+        deviceFunctions_->vkCmdResetQueryPool(command, timestampPool_, frame * 2, 2);
+        deviceFunctions_->vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                               timestampPool_, frame * 2);
+    }
     deviceFunctions_->vkCmdBeginRenderPass(command, &begin, VK_SUBPASS_CONTENTS_INLINE);
     VkViewport viewport{0, 0, float(begin.renderArea.extent.width), float(begin.renderArea.extent.height), 0, 1};
     VkRect2D scissor{{0,0}, begin.renderArea.extent};
@@ -1011,24 +1510,11 @@ void JobVulkanRenderer::startNextFrame() {
     deviceFunctions_->vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                                pipelineLayout_, 0, 1,
                                                &descriptorSets_[frame], 0, nullptr);
-    if (stackPipeline_ && !stackBuffers_.empty()) {
-        deviceFunctions_->vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                             stackPipeline_);
-        const VkDeviceSize offsets[2]{0, 0};
-        for (const StackBuffers& buffers : stackBuffers_) {
-            const VkBuffer vertexBuffers[2]{buffers.vertex.buffer, buffers.instances.buffer};
-            deviceFunctions_->vkCmdBindVertexBuffers(command, 0, 2, vertexBuffers, offsets);
-            deviceFunctions_->vkCmdBindIndexBuffer(command, buffers.index.buffer, 0,
-                                                    VK_INDEX_TYPE_UINT32);
-            deviceFunctions_->vkCmdDrawIndexed(command, buffers.indexCount,
-                                                buffers.instanceCount, 0, 0, 0);
-        }
-    }
     if (document && pointBuffer_.buffer) {
         const VkDeviceSize offset = 0;
         deviceFunctions_->vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pointPipeline_);
         deviceFunctions_->vkCmdBindVertexBuffers(command, 0, 1, &pointBuffer_.buffer, &offset);
-        deviceFunctions_->vkCmdDraw(command, 6, static_cast<uint32_t>(document->points.size()), 0, 0);
+        deviceFunctions_->vkCmdDraw(command, 6, pointCount_, 0, 0);
     }
     if (!lines.empty() && lineBuffers_[frame].buffer) {
         const VkDeviceSize offset = 0;
@@ -1037,6 +1523,26 @@ void JobVulkanRenderer::startNextFrame() {
         deviceFunctions_->vkCmdDraw(command, static_cast<uint32_t>(lines.size()), 1, 0, 0);
     }
     deviceFunctions_->vkCmdEndRenderPass(command);
+    if (timestampPool_)
+        deviceFunctions_->vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                               timestampPool_, frame * 2 + 1);
+    const double cpuMilliseconds = cpuFrameTimer.nsecsElapsed() / 1'000'000.0;
+    const double measuredMilliseconds = std::max(cpuMilliseconds,
+        recordedGpuTime ? gpuMilliseconds : 0.0);
+    const qint64 previousBudget = window_->frameBudget().triangleBudget();
+    const int previousQuality = window_->frameBudget().qualityOffset();
+    window_->frameBudget().recordFrame(measuredMilliseconds, window_->interacting());
+    if (!window_->interacting() &&
+        (previousBudget != window_->frameBudget().triangleBudget() ||
+         previousQuality != window_->frameBudget().qualityOffset()))
+        window_->markStackBuffersDirty();
+    if (window_->renderStatsCallback &&
+        (!window_->statsTimer_.isValid() || window_->statsTimer_.elapsed() >= 250)) {
+        window_->statsTimer_.restart();
+        window_->renderStatsCallback(window_->frameBudget().framesPerSecond(),
+            window_->lastVisibleCount_, window_->lastProxyCount_, window_->lastTriangleCount_,
+            window_->lastMinimumLod_, window_->lastMaximumLod_);
+    }
     window_->frameReady();
 }
 
@@ -1044,13 +1550,23 @@ void JobVulkanRenderer::releaseResources() {
     if (!deviceFunctions_) return;
     for (auto& buffer : lineBuffers_) destroyBuffer(&buffer);
     for (auto& buffer : uniformBuffers_) destroyBuffer(&buffer);
-    for (auto& buffers : stackBuffers_) {
-        destroyBuffer(&buffers.vertex);
-        destroyBuffer(&buffers.index);
-        destroyBuffer(&buffers.instances);
+    for (auto& frame : stackFrames_)
+        for (auto& [key, batch] : frame) {
+            Q_UNUSED(key);
+            destroyBuffer(&batch.instances);
+        }
+    stackFrames_.clear();
+    for (auto& frame : stagingFrames_)
+        for (auto& staging : frame) destroyBuffer(&staging);
+    stagingFrames_.clear();
+    for (auto& [key, mesh] : meshCache_) {
+        Q_UNUSED(key);
+        destroyBuffer(&mesh.vertex);
+        destroyBuffer(&mesh.index);
     }
-    stackBuffers_.clear();
+    meshCache_.clear();
     destroyBuffer(&pointBuffer_);
+    if (timestampPool_) deviceFunctions_->vkDestroyQueryPool(device_, timestampPool_, nullptr);
     if (pointPipeline_) deviceFunctions_->vkDestroyPipeline(device_, pointPipeline_, nullptr);
     if (linePipeline_) deviceFunctions_->vkDestroyPipeline(device_, linePipeline_, nullptr);
     if (stackPipeline_) deviceFunctions_->vkDestroyPipeline(device_, stackPipeline_, nullptr);
@@ -1060,6 +1576,7 @@ void JobVulkanRenderer::releaseResources() {
     pointPipeline_ = linePipeline_ = stackPipeline_ = VK_NULL_HANDLE;
     pipelineLayout_ = VK_NULL_HANDLE; descriptorPool_ = VK_NULL_HANDLE; descriptorLayout_ = VK_NULL_HANDLE;
     initialized_ = false; deviceFunctions_ = nullptr; device_ = VK_NULL_HANDLE;
+    timestampPool_ = VK_NULL_HANDLE; timestampPeriod_ = 0.0F; timestampMask_ = 0;
 }
 
 } // namespace
@@ -1086,6 +1603,9 @@ public:
         window_->selectedCallback = [this](qint64 id) {
             owner_->selectedPlaceId_=id;
             Q_EMIT owner_->placeSelected(id);
+        };
+        window_->activatedCallback = [this](qint64 id) {
+            Q_EMIT owner_->placeActivated(id);
         };
         container_ = QWidget::createWindowContainer(window_, host);
         container_->setFocusPolicy(Qt::StrongFocus);
@@ -1144,13 +1664,6 @@ public:
         Q_UNUSED(visible);
 #endif
     }
-    void setStackMode(JobStackDisplayMode mode) {
-#if IMAGE_HANDLER_HAS_VULKAN_PREVIEW
-        if (window_) window_->setStackDisplayMode(mode);
-#else
-        Q_UNUSED(mode);
-#endif
-    }
     QImage grabFrame() {
 #if IMAGE_HANDLER_HAS_VULKAN_PREVIEW
         return window_ ? window_->grab() : QImage();
@@ -1175,11 +1688,8 @@ JobPreviewWidget::JobPreviewWidget(QWidget* parent) : QWidget(parent) {
     auto* tools = new QHBoxLayout;
     fitButton_ = new QPushButton(QStringLiteral("适配全部")); fitButton_->setObjectName(QStringLiteral("jobFitAllButton"));
     guidesCheck_ = new QCheckBox(QStringLiteral("坐标轴与网格")); guidesCheck_->setObjectName(QStringLiteral("jobGuidesCheck")); guidesCheck_->setChecked(true);
-    stackModeCombo_ = new QComboBox; stackModeCombo_->setObjectName(QStringLiteral("jobStackDisplayMode"));
-    stackModeCombo_->addItems({QStringLiteral("连续实体"), QStringLiteral("分层爆炸")});
-    stackModeCombo_->setEnabled(false);
     statusLabel_ = new QLabel(QStringLiteral("未加载 Job")); statusLabel_->setObjectName(QStringLiteral("jobPreviewStatus"));
-    tools->addWidget(fitButton_); tools->addWidget(guidesCheck_); tools->addWidget(stackModeCombo_); tools->addStretch(); tools->addWidget(statusLabel_);
+    tools->addWidget(fitButton_); tools->addWidget(guidesCheck_); tools->addStretch(); tools->addWidget(statusLabel_);
     root->addLayout(tools);
     backend_ = new Backend(this, this);
     if (backend_->available()) root->addWidget(backend_->widget(), 1);
@@ -1191,9 +1701,6 @@ JobPreviewWidget::JobPreviewWidget(QWidget* parent) : QWidget(parent) {
     }
     connect(fitButton_, &QPushButton::clicked, this, &JobPreviewWidget::fitAll);
     connect(guidesCheck_, &QCheckBox::toggled, this, [this](bool visible) { backend_->setGuides(visible); });
-    connect(stackModeCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this,
-            [this](int index) { setStackDisplayMode(index == 1 ? JobStackDisplayMode::Exploded
-                                                               : JobStackDisplayMode::Solid); });
     fitButton_->setEnabled(backend_->available()); guidesCheck_->setEnabled(backend_->available());
 }
 
@@ -1201,33 +1708,14 @@ JobPreviewWidget::~JobPreviewWidget() { delete backend_; }
 
 void JobPreviewWidget::setDocument(const JobDocumentPtr& document) {
     document_ = document; selectedPlaceId_ = -1;
-    stackMode_ = JobStackDisplayMode::Solid;
-    { const QSignalBlocker blocker(stackModeCombo_); stackModeCombo_->setCurrentIndex(0); }
     backend_->setDocument(document_);
-    backend_->setStackMode(stackMode_);
-    const int loaded = document_ ? document_->loadedStackCount() : 0;
-    stackModeCombo_->setEnabled(backend_->available() && loaded > 0);
-    statusLabel_->setToolTip(document_ ? document_->packageWarnings.join(QLatin1Char('\n')) : QString{});
-    statusLabel_->setStyleSheet(document_ && !document_->packageWarnings.isEmpty()
-        ? QStringLiteral("QLabel { color: #ffb74d; }") : QString{});
+    statusLabel_->setToolTip(QString{});
+    statusLabel_->setStyleSheet(QString{});
     if (!document_) statusLabel_->setText(QStringLiteral("未加载 Job"));
-    else if (document_->layeredPackageDetected)
-        statusLabel_->setText(QStringLiteral("%1 个摆放 | 模型 %2/%3%4")
-            .arg(document_->points.size()).arg(loaded).arg(document_->models.size())
-            .arg([&] {
-                const bool downsampled = std::any_of(document_->models.cbegin(),
-                    document_->models.cend(), [](const JobModel& model) {
-                        return model.stack && model.stack->downsampled;
-                    });
-                QString suffix = downsampled ? QStringLiteral(" | 降采样预览") : QString{};
-                if (!document_->packageWarnings.isEmpty())
-                    suffix += QStringLiteral(" | 警告 %1").arg(document_->packageWarnings.size());
-                return suffix;
-            }()));
     else statusLabel_->setText(QStringLiteral("%1 个点 | %2")
         .arg(document_->points.size())
         .arg(document_->source == JobDocumentSource::ImportedFile
-                 ? QStringLiteral("手动导入（不联动）") : QStringLiteral("分割联动")));
+                 ? QStringLiteral("双击坐标查看堆叠") : QStringLiteral("分割联动")));
 }
 
 bool JobPreviewWidget::isVulkanAvailable() const noexcept { return backend_ && backend_->available(); }
@@ -1239,12 +1727,4 @@ void JobPreviewWidget::setSelectedPlaceId(qint64 placeId, bool focus, bool prese
 
 void JobPreviewWidget::clearSelection() { setSelectedPlaceId(-1, false); }
 void JobPreviewWidget::fitAll() { if (backend_) backend_->fitAll(); }
-void JobPreviewWidget::setStackDisplayMode(JobStackDisplayMode mode) {
-    stackMode_ = mode;
-    if (stackModeCombo_ && stackModeCombo_->currentIndex() != (mode == JobStackDisplayMode::Exploded ? 1 : 0)) {
-        const QSignalBlocker blocker(stackModeCombo_);
-        stackModeCombo_->setCurrentIndex(mode == JobStackDisplayMode::Exploded ? 1 : 0);
-    }
-    if (backend_) backend_->setStackMode(mode);
-}
 QImage JobPreviewWidget::grabFrame() { return backend_ ? backend_->grabFrame() : QImage(); }

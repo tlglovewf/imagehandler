@@ -21,10 +21,11 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QPixmap>
+#include <QScrollArea>
+#include <QSizePolicy>
 #include <QSpinBox>
 #include <QSplitter>
 #include <QSignalBlocker>
-#include <QTabWidget>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <algorithm>
@@ -38,18 +39,39 @@ LayeredExportDialog::LayeredExportDialog(QWidget* parent)
     setModal(true);
     resize(1180, 760);
     auto* root = new QVBoxLayout(this);
-    tabs_ = new QTabWidget;
-    tabs_->setObjectName(QStringLiteral("layeredExportTabs"));
+    auto* mainSplitter = new QSplitter(Qt::Horizontal);
+    mainSplitter->setObjectName(QStringLiteral("layeredExportMainSplitter"));
+    mainSplitter->setChildrenCollapsible(false);
 
+    auto* settingsPanel = new QWidget;
+    settingsPanel->setObjectName(QStringLiteral("layeredExportSettingsPanel"));
+    settingsPanel->setMinimumWidth(320);
+    settingsPanel->setMaximumWidth(400);
+    auto* settingsPanelLayout = new QVBoxLayout(settingsPanel);
+    settingsPanelLayout->setContentsMargins(0, 0, 0, 0);
+    auto* settingsTitle = new QLabel(QStringLiteral("导出设置"));
+    settingsTitle->setObjectName(QStringLiteral("layeredExportSettingsTitle"));
+    QFont settingsTitleFont = settingsTitle->font();
+    settingsTitleFont.setBold(true);
+    settingsTitle->setFont(settingsTitleFont);
+    settingsPanelLayout->addWidget(settingsTitle);
+
+    auto* settingsScroll = new QScrollArea;
+    settingsScroll->setObjectName(QStringLiteral("layeredExportSettingsScroll"));
+    settingsScroll->setWidgetResizable(true);
+    settingsScroll->setFrameShape(QFrame::NoFrame);
+    settingsScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     auto* settingsPage = new QWidget;
     auto* settingsLayout = new QVBoxLayout(settingsPage);
+    settingsLayout->setContentsMargins(0, 0, 6, 0);
     auto* directoryRow = new QHBoxLayout;
     directoryButton_ = new QPushButton(QStringLiteral("选择导出目录"));
     directoryButton_->setObjectName(QStringLiteral("layeredExportChooseDirectory"));
     directoryLabel_ = new QLabel(QStringLiteral("未选择"));
     directoryLabel_->setObjectName(QStringLiteral("layeredExportDirectory"));
     directoryLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    directoryLabel_->setMinimumWidth(300);
+    directoryLabel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    directoryLabel_->setWordWrap(true);
     directoryRow->addWidget(directoryButton_);
     directoryRow->addWidget(directoryLabel_, 1);
     settingsLayout->addLayout(directoryRow);
@@ -119,10 +141,20 @@ LayeredExportDialog::LayeredExportDialog(QWidget* parent)
     summaryLabel_->setObjectName(QStringLiteral("layeredExportSummary"));
     summaryLabel_->setWordWrap(true); settingsLayout->addWidget(summaryLabel_);
     settingsLayout->addStretch();
-    tabs_->addTab(settingsPage, QStringLiteral("导出设置"));
+    settingsScroll->setWidget(settingsPage);
+    settingsPanelLayout->addWidget(settingsScroll, 1);
+    mainSplitter->addWidget(settingsPanel);
 
     auto* previewPage = new QWidget;
+    previewPage->setObjectName(QStringLiteral("layeredExportPreviewPanel"));
     auto* previewLayout = new QVBoxLayout(previewPage);
+    previewLayout->setContentsMargins(6, 0, 0, 0);
+    auto* previewTitle = new QLabel(QStringLiteral("导出预览"));
+    previewTitle->setObjectName(QStringLiteral("layeredExportPreviewTitle"));
+    QFont previewTitleFont = previewTitle->font();
+    previewTitleFont.setBold(true);
+    previewTitle->setFont(previewTitleFont);
+    previewLayout->addWidget(previewTitle);
     previewElementLabel_ = new QLabel(QStringLiteral("预览块：--"));
     previewElementLabel_->setObjectName(QStringLiteral("layeredExportPreviewElement"));
     previewLayout->addWidget(previewElementLabel_);
@@ -159,8 +191,11 @@ LayeredExportDialog::LayeredExportDialog(QWidget* parent)
     previewStatusLabel_ = new QLabel(QStringLiteral("等待生成预览"));
     previewStatusLabel_->setObjectName(QStringLiteral("layeredExportPreviewStatus"));
     previewLayout->addWidget(previewStatusLabel_);
-    tabs_->addTab(previewPage, QStringLiteral("导出预览"));
-    root->addWidget(tabs_, 1);
+    mainSplitter->addWidget(previewPage);
+    mainSplitter->setStretchFactor(0, 0);
+    mainSplitter->setStretchFactor(1, 1);
+    mainSplitter->setSizes({360, 820});
+    root->addWidget(mainSplitter, 1);
 
     auto* progressRow = new QHBoxLayout;
     statusLabel_ = new QLabel(QStringLiteral("就绪")); statusLabel_->setObjectName(QStringLiteral("layeredExportStatus"));

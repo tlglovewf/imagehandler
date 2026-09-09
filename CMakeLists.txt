@@ -34,6 +34,7 @@ add_library(image_handler_core
     src/imaging/JobLabelLod.h src/imaging/JobLabelLod.cpp
     src/imaging/JobPreviewMath.h src/imaging/JobPreviewMath.cpp
     src/imaging/JobSpatialIndex.h src/imaging/JobSpatialIndex.cpp
+    src/imaging/JobStackLod.h src/imaging/JobStackLod.cpp
     src/imaging/PointCloudBuilder.h src/imaging/PointCloudBuilder.cpp
     src/imaging/PointCloudMath.h src/imaging/PointCloudMath.cpp
     src/imaging/MaskSliceGenerator.h src/imaging/MaskSliceGenerator.cpp
@@ -94,7 +95,7 @@ target_compile_definitions(job_preview_ui PUBLIC
 if(JOB_PREVIEW_HAS_VULKAN)
     target_include_directories(job_preview_ui PRIVATE ${Vulkan_INCLUDE_DIRS})
     set(JOB_SHADER_OUTPUTS)
-    foreach(JOB_SHADER IN ITEMS job_points.vert job_points.frag job_lines.vert job_lines.frag job_stack.vert job_stack.frag)
+    foreach(JOB_SHADER IN ITEMS job_points.vert job_points.frag job_lines.vert job_lines.frag)
         set(JOB_SHADER_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/shaders/${JOB_SHADER}")
         set(JOB_SHADER_PACK "${CMAKE_CURRENT_BINARY_DIR}/job_shaders/${JOB_SHADER}.qsb")
         set(JOB_SHADER_SPV "${CMAKE_CURRENT_BINARY_DIR}/job_shaders/${JOB_SHADER}.spv")

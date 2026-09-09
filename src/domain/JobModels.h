@@ -7,6 +7,7 @@
 #include <QSizeF>
 #include <QString>
 #include <QStringList>
+#include <QVector>
 #include <QVector3D>
 #include <limits>
 #include <memory>
@@ -14,9 +15,15 @@
 
 enum class JobDocumentSource { ImportedFile, GeneratedPreview, ExportedFile };
 class JobSpatialIndex;
+class JobPlacementSpatialIndex;
 struct MaskStackGeometry;
 
 enum class JobModelStackState { NotDetected, Loaded, Invalid };
+
+struct JobStackHeightLevel {
+    QSize gridSize;
+    std::vector<quint16> columnLayers;
+};
 
 struct JobModelStack {
     QSize sourceSize;
@@ -25,6 +32,8 @@ struct JobModelStack {
     double layerHeight = 0.0;
     int layerCount = 0;
     bool downsampled = false;
+    // Coarsest to finest. Geometry is generated lazily from these immutable levels.
+    std::vector<JobStackHeightLevel> lodLevels;
     std::shared_ptr<const MaskStackGeometry> solidGeometry;
     std::shared_ptr<const MaskStackGeometry> explodedGeometry;
 };
@@ -99,6 +108,7 @@ struct JobDocument {
     JobBounds bounds;
     JobBounds sceneBounds;
     std::shared_ptr<JobSpatialIndex> spatialIndex;
+    std::shared_ptr<JobPlacementSpatialIndex> placementSpatialIndex;
     // Prefix sums in placement order; entry 0 is zero and entry N+1 includes point N.
     std::vector<JobCoordinate> idPrefixSums;
     // Indexed by placementId. Empty for manually imported files.

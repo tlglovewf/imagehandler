@@ -1,6 +1,7 @@
 #pragma once
 
 #include "domain/MaskSliceModels.h"
+#include "domain/JobModels.h"
 
 #include <QWidget>
 #include <optional>
@@ -33,6 +34,7 @@ public:
                      const QVector<MaskSliceElement>& elements,
                      const QPoint& activeCell, const PointCloudSettings& mapping);
     void setPointCloudSettings(const PointCloudSettings& mapping);
+    void showJobPlacement(const JobDocumentPtr& document, qint64 placementId);
     void cancelAndClear();
     [[nodiscard]] const std::optional<MaskSliceAnalysis>& analysis() const noexcept {
         return analysis_;
@@ -52,6 +54,9 @@ private:
     void scheduleStackAnalysis();
     void startAnalysis();
     void startStackAnalysis();
+    void setJobMode(bool enabled);
+    void populateJobLayers(const MaskStackPreviewDataPtr& preview,
+                           const QVector<QImage>& thumbnails);
     void chooseExportDirectory();
     void startExport(const QString& directory, bool overwrite);
     void updateDimensionMapping();
@@ -79,6 +84,7 @@ private:
     QLabel* statusLabel_ = nullptr;
     QLabel* percentLabel_ = nullptr;
     QWidget* elementListContainer_ = nullptr;
+    QWidget* settingsContainer_ = nullptr;
     QListWidget* elementList_ = nullptr;
     QDoubleSpinBox* layerHeight_ = nullptr;
     QSpinBox* outputWidth_ = nullptr;
@@ -110,6 +116,9 @@ private:
     bool pendingStackAnalysis_ = false;
     bool updatingDimensions_ = false;
     bool clearing_ = false;
+    bool jobMode_ = false;
+    JobDocumentPtr jobDocument_;
+    qint64 jobPlacementId_ = -1;
     quint64 analysisRevision_ = 0;
     quint64 stackRevision_ = 0;
 };

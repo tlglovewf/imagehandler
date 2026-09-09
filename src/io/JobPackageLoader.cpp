@@ -1,6 +1,7 @@
 #include "io/JobPackageLoader.h"
 
 #include "domain/MaskSliceModels.h"
+#include "imaging/JobStackLod.h"
 #include "imaging/MaskStackMeshBuilder.h"
 #include "io/JobFileLoader.h"
 
@@ -17,6 +18,7 @@
 #include <limits>
 #include <map>
 #include <new>
+#include <set>
 
 namespace {
 constexpr int kMaximumStackPreviewSide = 512;
@@ -29,11 +31,6 @@ struct PackageSettings {
     int layerCount = 0;
     QSize outputSize;
     bool invertMask = false;
-};
-
-struct CachedStack {
-    JobModelStackPtr stack;
-    QString error;
 };
 
 bool positiveFinite(const QJsonValue& value, double* result) {
@@ -130,16 +127,6 @@ bool isInsideRoot(const QDir& root, const QString& relativePath, QString* absolu
     return true;
 }
 
-bool anyModelDirectoryExists(const JobDocument& document, const QDir& root) {
-    for (const JobModel& model : document.models) {
-        QString path;
-        if (!isInsideRoot(root, model.path, &path)) continue;
-        const QFileInfo info(path);
-        if (info.isDir()) return true;
-    }
-    return false;
-}
-
 quint16 readLe16(const uchar* bytes, qsizetype offset) {
     return quint16(bytes[offset]) | (quint16(bytes[offset + 1]) << 8);
 }
@@ -227,7 +214,7 @@ bool inspectBinaryBmp(const uchar* bytes, qint64 size, const QSize& expected,
 
 bool accumulateBinaryBmp(const QString& path, const QSize& expected, const QSize& grid,
                          int layer, bool invertMask, QVector<quint16>* columnLayers,
-                         QString* error) {
+                         QImage* thumbnail, QString* error) {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) {
         *error = QStringLiteral("无法打开 BMP：%1").arg(file.errorString());
@@ -264,13 +251,38 @@ bool accumulateBinaryBmp(const QString& path, const QSize& expected, const QSize
             if (active) (*columnLayers)[y * grid.width() + x] = static_cast<quint16>(layer);
         }
     }
+
+    if (thumbnail) {
+        constexpr double kMaximumThumbnailSide = 128.0;
+        const double scale = std::min({1.0, kMaximumThumbnailSide / view.width,
+                                      kMaximumThumbnailSide / view.height});
+        const QSize thumbnailSize(std::max(1, qRound(view.width * scale)),
+                                  std::max(1, qRound(view.height * scale)));
+        *thumbnail = QImage(thumbnailSize, QImage::Format_Grayscale8);
+        for (int y = 0; y < thumbnail->height(); ++y) {
+            const int sourceY = std::min(view.height - 1,
+                static_cast<int>(((qint64(y) * 2 + 1) * view.height) /
+                                 (2LL * thumbnail->height())));
+            const int storedY = view.topDown ? sourceY : view.height - 1 - sourceY;
+            const uchar* row = bytes + view.pixelOffset + qint64(storedY) * view.rowStride;
+            uchar* destination = thumbnail->scanLine(y);
+            for (int x = 0; x < thumbnail->width(); ++x) {
+                const int sourceX = std::min(view.width - 1,
+                    static_cast<int>(((qint64(x) * 2 + 1) * view.width) /
+                                     (2LL * thumbnail->width())));
+                const int paletteIndex = (row[sourceX / 8] >> (7 - sourceX % 8)) & 1;
+                destination[x] = view.white[paletteIndex] ? 255 : 0;
+            }
+        }
+    }
     file.unmap(bytes);
     return true;
 }
 
-QSize previewSize(const QSize& source, qint64 instanceCount, qint64 perModelCellBudget) {
-    const qint64 cellBudget = std::max<qint64>(1024,
-        perModelCellBudget / std::max<qint64>(1, instanceCount));
+QSize previewSize(const QSize& source, qint64 perModelCellBudget) {
+    // Placements share one immutable height pyramid. Repeating a model must not
+    // reduce the finest level because that detail cannot be recovered by runtime LOD.
+    const qint64 cellBudget = std::max<qint64>(1024, perModelCellBudget);
     const double scale = std::min({1.0,
         double(kMaximumStackPreviewSide) / source.width(),
         double(kMaximumStackPreviewSide) / source.height(),
@@ -280,11 +292,13 @@ QSize previewSize(const QSize& source, qint64 instanceCount, qint64 perModelCell
             std::max(1, qRound(source.height() * scale))};
 }
 
-JobModelStackPtr loadStack(const QString& directoryPath, const PackageSettings& settings,
-                           qint64 instanceCount, qint64 perModelCellBudget,
-                           const CancellationTokenPtr& token,
-                           const JobPackageLoader::Progress& progress, qint64 modelIndex,
-                           qint64 modelCount, QString* error) {
+JobModelStackPtr loadModelStackData(const QString& directoryPath,
+                                    const PackageSettings& settings,
+                                    qint64 perModelCellBudget,
+                                    const CancellationTokenPtr& token,
+                                    const JobPackageLoader::Progress& progress,
+                                    qint64 modelIndex, qint64 modelCount,
+                                    QVector<QImage>* thumbnails, QString* error) {
     const QFileInfo directoryInfo(directoryPath);
     if (!directoryInfo.isDir() || directoryInfo.isSymLink() || directoryInfo.isJunction()) {
         *error = QStringLiteral("切片目录不存在或不是安全的普通目录");
@@ -324,8 +338,12 @@ JobModelStackPtr loadStack(const QString& directoryPath, const PackageSettings& 
         }
     }
 
-    const QSize grid = previewSize(settings.outputSize, instanceCount, perModelCellBudget);
+    const QSize grid = previewSize(settings.outputSize, perModelCellBudget);
     QVector<quint16> columnLayers(qsizetype(grid.width()) * grid.height(), 0);
+    if (thumbnails) {
+        thumbnails->clear();
+        thumbnails->reserve(settings.layerCount);
+    }
     for (int layer = 1; layer <= settings.layerCount; ++layer) {
         if (token && token->isCancelled()) return {};
         const QString imagePath = directory.filePath(QString::number(layer) + QStringLiteral(".bmp"));
@@ -335,11 +353,14 @@ JobModelStackPtr loadStack(const QString& directoryPath, const PackageSettings& 
             return {};
         }
         QString imageError;
+        QImage thumbnail;
         if (!accumulateBinaryBmp(imagePath, settings.outputSize, grid, layer,
-                                 settings.invertMask, &columnLayers, &imageError)) {
+                                 settings.invertMask, &columnLayers,
+                                 thumbnails ? &thumbnail : nullptr, &imageError)) {
             *error = QStringLiteral("无法读取 %1.bmp：%2").arg(layer).arg(imageError);
             return {};
         }
+        if (thumbnails) thumbnails->push_back(std::move(thumbnail));
         if (progress) {
             const qint64 total = std::max<qint64>(1, modelCount * settings.layerCount);
             progress({QStringLiteral("加载分层模型 %1/%2").arg(modelIndex + 1).arg(modelCount),
@@ -357,13 +378,14 @@ JobModelStackPtr loadStack(const QString& directoryPath, const PackageSettings& 
     preview.layerCount = settings.layerCount;
     preview.downsampled = grid != settings.outputSize;
     preview.actualMaximumHeight = settings.layerCount * settings.layerHeight;
-    preview.solidGeometry = MaskStackMeshBuilder::buildSolid(preview, token, {});
-    if (!preview.solidGeometry || (token && token->isCancelled())) return {};
-    const std::size_t explodedBudget = std::max<std::size_t>(256,
-        kTargetExplodedQuadInstances / static_cast<std::size_t>(std::max<qint64>(1, instanceCount)));
-    preview.explodedGeometry = MaskStackMeshBuilder::buildExploded(
-        preview, token, {}, explodedBudget);
-    if (!preview.explodedGeometry || (token && token->isCancelled())) return {};
+    const auto lodLevels = JobStackLod::buildPyramid(grid, preview.columnLayers, token);
+    if (lodLevels.empty() || (token && token->isCancelled())) return {};
+    MaskStackPreviewData coarse = preview;
+    coarse.gridSize = lodLevels.front().gridSize;
+    coarse.columnLayers = QVector<quint16>(lodLevels.front().columnLayers.cbegin(),
+                                           lodLevels.front().columnLayers.cend());
+    coarse.solidGeometry = MaskStackMeshBuilder::buildSolid(coarse, token, {});
+    if (!coarse.solidGeometry || (token && token->isCancelled())) return {};
 
     auto result = std::make_shared<JobModelStack>();
     result->sourceSize = settings.outputSize;
@@ -372,24 +394,31 @@ JobModelStackPtr loadStack(const QString& directoryPath, const PackageSettings& 
     result->layerHeight = settings.layerHeight;
     result->layerCount = settings.layerCount;
     result->downsampled = preview.downsampled;
-    result->solidGeometry = preview.solidGeometry;
-    result->explodedGeometry = preview.explodedGeometry;
+    result->lodLevels = lodLevels;
+    result->solidGeometry = coarse.solidGeometry;
     return result;
 }
 
-void rebuildSceneBounds(JobDocument* document) {
+QString normalizedModelPath(QString path) {
+    path = QDir::cleanPath(path.trimmed());
+    return path.replace(QLatin1Char('\\'), QLatin1Char('/')).toCaseFolded();
+}
+
+void assignPathColors(JobDocument* document) {
     if (!document) return;
-    document->sceneBounds = {};
-    for (const JobPoint& point : document->points) {
-        document->sceneBounds.include(point.position);
+    std::set<QString> paths;
+    for (const JobModel& model : document->models) paths.insert(normalizedModelPath(model.path));
+    std::map<QString, QColor> colors;
+    int index = 0;
+    for (const QString& path : paths) {
+        colors.emplace(path, QColor::fromHsv((203 + index * 137) % 360, 190, 235));
+        ++index;
+    }
+    for (JobPoint& point : document->points) {
         if (point.placeId < 0 || point.placeId >= static_cast<qint64>(document->models.size()))
             continue;
-        const JobModel& model = document->models[static_cast<size_t>(point.placeId)];
-        if (!model.stack) continue;
-        document->sceneBounds.include({point.position.x + model.stack->physicalSize.width(),
-                                       point.position.y + model.stack->physicalSize.height(),
-                                       point.position.z + model.stack->layerCount *
-                                                              model.stack->layerHeight});
+        point.groupColor = colors.at(normalizedModelPath(
+            document->models[static_cast<std::size_t>(point.placeId)].path));
     }
 }
 }
@@ -398,92 +427,110 @@ JobDocumentPtr JobPackageLoader::load(const QString& path, const CancellationTok
                                       const Progress& progress, QString* error) {
     JobDocumentPtr document = JobFileLoader::load(path, token, progress, error);
     if (!document || (token && token->isCancelled())) return {};
-    const QDir root(QFileInfo(path).absolutePath());
+    assignPathColors(document.get());
+    document->sceneBounds = document->bounds;
+    return document;
+}
+
+JobPackageLoader::StackLoadResult JobPackageLoader::loadStack(
+    const JobDocumentPtr& document, qint64 placementId, quint64 requestGeneration,
+    const CancellationTokenPtr& token, const Progress& progress, QString* error) {
+    StackLoadResult result;
+    result.requestGeneration = requestGeneration;
+    result.placementId = placementId;
+    if (error) error->clear();
+    if (!document || document->source == JobDocumentSource::GeneratedPreview ||
+        document->sourcePath.trimmed().isEmpty()) {
+        if (error) *error = QStringLiteral("当前 Job 是临时预览，没有可读取的磁盘切片目录。");
+        return result;
+    }
+    const auto point = std::find_if(document->points.cbegin(), document->points.cend(),
+        [placementId](const JobPoint& value) { return value.placementId == placementId; });
+    if (point == document->points.cend()) {
+        if (error) *error = QStringLiteral("找不到编号为 %1 的坐标点。").arg(placementId + 1);
+        return result;
+    }
+    if (point->placeId < 0 || point->placeId >= static_cast<qint64>(document->models.size())) {
+        if (error) *error = QStringLiteral("坐标点引用了无效的模型编号。");
+        return result;
+    }
+    const JobModel& model = document->models[static_cast<std::size_t>(point->placeId)];
+    result.modelPath = model.path;
+    const QDir root(QFileInfo(document->sourcePath).absolutePath());
     const QString reportPath = root.filePath(QStringLiteral("export-report.json"));
     const QFileInfo reportInfo(reportPath);
-    if (!reportInfo.exists()) {
-        if (anyModelDirectoryExists(*document, root)) {
-            document->layeredPackageDetected = true;
-            document->packageWarnings << QStringLiteral(
-                "检测到模型切片目录，但缺少 export-report.json；已仅显示 Job 坐标。");
-            for (JobModel& model : document->models) {
-                model.stackState = JobModelStackState::Invalid;
-                model.stackError = QStringLiteral("缺少分层包报告");
-            }
-        }
-        return document;
-    }
-
-    document->layeredPackageDetected = true;
     PackageSettings settings;
     QString reportError;
+    if (!reportInfo.exists()) {
+        if (error) *error = QStringLiteral("job.json 同级目录缺少 export-report.json。");
+        return result;
+    }
     if (!reportInfo.isFile() || reportInfo.isSymLink() || reportInfo.isJunction() ||
         !readPackageSettings(reportPath, &settings, &reportError)) {
-        if (reportError.isEmpty()) reportError = QStringLiteral("分层包报告不是安全的普通文件");
-        document->packageWarnings << reportError + QStringLiteral("；已仅显示 Job 坐标。");
-        for (JobModel& model : document->models) {
-            model.stackState = JobModelStackState::Invalid;
-            model.stackError = reportError;
-        }
-        return document;
+        if (error) *error = reportError.isEmpty()
+            ? QStringLiteral("export-report.json 不是安全的普通文件") : reportError;
+        return result;
     }
-
+    QString directoryPath;
+    if (!isInsideRoot(root, model.path, &directoryPath)) {
+        if (error) *error = QStringLiteral("模型 path 不是 job.json 目录内的安全相对路径。");
+        return result;
+    }
+    const QFileInfo directoryInfo(directoryPath);
+    if (!directoryInfo.exists() || !directoryInfo.isDir() || directoryInfo.isSymLink() ||
+        directoryInfo.isJunction()) {
+        if (error) *error = QStringLiteral("模型切片目录不存在或不是安全目录：%1").arg(model.path);
+        return result;
+    }
     try {
-        std::map<QString, CachedStack> cache;
-        std::vector<qint64> modelInstances(document->models.size(), 0);
-        for (const JobPoint& point : document->points)
-            if (point.placeId >= 0 && point.placeId < static_cast<qint64>(modelInstances.size()))
-                ++modelInstances[static_cast<std::size_t>(point.placeId)];
-        std::map<QString, qint64> pathInstances;
-        for (std::size_t index = 0; index < document->models.size(); ++index) {
-            QString directoryPath;
-            if (isInsideRoot(root, document->models[index].path, &directoryPath))
-                pathInstances[QDir::cleanPath(directoryPath).toCaseFolded()] +=
-                    modelInstances[index];
+        QString stackError;
+        const JobModelStackPtr stack = loadModelStackData(
+            directoryPath, settings, kTargetRenderedCellInstances, token, progress, 0, 1,
+            &result.thumbnails, &stackError);
+        if (!stack || (token && token->isCancelled())) {
+            if (error && !(token && token->isCancelled()))
+                *error = stackError.isEmpty() ? QStringLiteral("无法生成模型堆叠预览。")
+                                              : stackError;
+            return result;
         }
-        const qint64 perModelCellBudget = std::max<qint64>(4096,
-            kTargetRenderedCellInstances /
-            std::max<qint64>(1, static_cast<qint64>(pathInstances.size())));
-        for (qsizetype index = 0; index < static_cast<qsizetype>(document->models.size()); ++index) {
-            if (token && token->isCancelled()) return {};
-            JobModel& model = document->models[static_cast<size_t>(index)];
-            QString directoryPath;
-            if (!isInsideRoot(root, model.path, &directoryPath)) {
-                model.stackState = JobModelStackState::Invalid;
-                model.stackError = QStringLiteral("模型路径不是 Job 目录内的安全相对路径");
-            } else {
-                const QString cacheKey = QDir::cleanPath(directoryPath).toCaseFolded();
-                auto cached = cache.find(cacheKey);
-                if (cached == cache.end()) {
-                    CachedStack loaded;
-                    loaded.stack = loadStack(directoryPath, settings,
-                                             std::max<qint64>(1, pathInstances[cacheKey]),
-                                             perModelCellBudget, token, progress,
-                                             index, document->models.size(), &loaded.error);
-                    if (token && token->isCancelled()) return {};
-                    cached = cache.emplace(cacheKey, std::move(loaded)).first;
-                }
-                model.stack = cached->second.stack;
-                model.stackError = cached->second.error;
-                model.stackState = model.stack ? JobModelStackState::Loaded
-                                               : JobModelStackState::Invalid;
-            }
-            if (model.stackState == JobModelStackState::Invalid) {
-                document->packageWarnings << QStringLiteral("模型 %1（%2）：%3")
-                    .arg(model.id).arg(model.path, model.stackError);
-            }
-            if (progress) {
-                const qint64 total = std::max<qint64>(
-                    1, static_cast<qint64>(document->models.size()) * settings.layerCount);
-                progress({QStringLiteral("加载分层模型 %1/%2")
-                              .arg(index + 1).arg(document->models.size()),
-                          (index + 1) * settings.layerCount, total});
-            }
+        auto preview = std::make_shared<MaskStackPreviewData>();
+        preview->requestedOutputSize = stack->sourceSize;
+        preview->physicalSize = stack->physicalSize;
+        preview->layerHeight = stack->layerHeight;
+        preview->layerCount = stack->layerCount;
+        preview->downsampled = stack->downsampled;
+        if (!stack->lodLevels.empty()) {
+            const JobStackHeightLevel& level = stack->lodLevels.back();
+            preview->gridSize = level.gridSize;
+            preview->columnLayers = QVector<quint16>(level.columnLayers.cbegin(),
+                                                      level.columnLayers.cend());
         }
-        rebuildSceneBounds(document.get());
-        return document;
+        if (preview->gridSize.isEmpty() || preview->columnLayers.isEmpty()) {
+            if (error) *error = QStringLiteral("模型切片没有可渲染的数据。");
+            return result;
+        }
+        const auto maximum = std::max_element(preview->columnLayers.cbegin(),
+                                              preview->columnLayers.cend());
+        preview->actualMaximumHeight = maximum == preview->columnLayers.cend()
+            ? 0.0 : *maximum * preview->layerHeight;
+        preview->blocks.push_back({QRectF(QPointF(0, 0), preview->physicalSize), placementId});
+        preview->solidGeometry = MaskStackMeshBuilder::buildSolid(*preview, token, progress);
+        if (!preview->solidGeometry || (token && token->isCancelled())) {
+            if (error && !(token && token->isCancelled()))
+                *error = QStringLiteral("无法生成连续实体堆叠。");
+            return result;
+        }
+        preview->explodedGeometry = MaskStackMeshBuilder::buildExploded(
+            *preview, token, progress, kTargetExplodedQuadInstances);
+        if (!preview->explodedGeometry || (token && token->isCancelled())) {
+            if (error && !(token && token->isCancelled()))
+                *error = QStringLiteral("无法生成分层爆炸堆叠。");
+            return result;
+        }
+        result.preview = std::move(preview);
+        return result;
     } catch (const std::bad_alloc&) {
-        if (error) *error = QStringLiteral("分层包过大，加载模型时内存不足。");
-        return {};
+        if (error) *error = QStringLiteral("模型切片过大，生成堆叠预览时内存不足。");
+        return result;
     }
 }

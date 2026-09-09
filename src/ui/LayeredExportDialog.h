@@ -14,7 +14,6 @@ class QLabel;
 class QProgressBar;
 class QPushButton;
 class QSpinBox;
-class QTabWidget;
 class QListWidget;
 class QTimer;
 class TaskManager;
@@ -62,7 +61,6 @@ private:
     TaskManager* tasks_ = nullptr;
     TaskManager* previewTasks_ = nullptr;
     QTimer* previewTimer_ = nullptr;
-    QTabWidget* tabs_ = nullptr;
     QPushButton* directoryButton_ = nullptr;
     QLabel* directoryLabel_ = nullptr;
     QDoubleSpinBox* layerHeight_ = nullptr;

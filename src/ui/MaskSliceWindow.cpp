@@ -1,6 +1,7 @@
 #include "ui/MaskSliceWindow.h"
 
 #include "imaging/MaskSliceGenerator.h"
+#include "io/JobPackageLoader.h"
 #include "io/MaskSliceExporter.h"
 #include "tasks/TaskManager.h"
 #include "ui/MaskStackWidget.h"
@@ -110,7 +111,9 @@ MaskSliceWindow::MaskSliceWindow(QWidget* parent)
     elementListLayout->addWidget(elementList_);
     elementListContainer_->hide();
     rightLayout->addWidget(elementListContainer_);
-    auto* form = new QFormLayout;
+    settingsContainer_ = new QWidget;
+    settingsContainer_->setObjectName(QStringLiteral("maskSliceSettingsContainer"));
+    auto* form = new QFormLayout(settingsContainer_);
     layerHeight_ = new QDoubleSpinBox;
     layerHeight_->setObjectName(QStringLiteral("maskSliceLayerHeight"));
     layerHeight_->setDecimals(6);
@@ -141,7 +144,7 @@ MaskSliceWindow::MaskSliceWindow(QWidget* parent)
     form->addRow(lockAspect_);
     form->addRow(invertMask_);
     form->addRow(QStringLiteral("尺寸映射"), mappingLabel_);
-    rightLayout->addLayout(form);
+    rightLayout->addWidget(settingsContainer_);
 
     auto* listHeader = new QHBoxLayout;
     listHeader->addWidget(new QLabel(QStringLiteral("掩模预览")));
@@ -314,7 +317,9 @@ MaskSliceWindow::MaskSliceWindow(QWidget* parent)
     });
     connect(stackTasks_, &TaskManager::taskStarted, this,
             [this](quint64, const QString&) {
-        stackSamplingLabel_->setText(QStringLiteral("三维预览：正在生成全部已选块…"));
+        stackSamplingLabel_->setText(jobMode_
+            ? QStringLiteral("三维预览：正在读取模型切片…")
+            : QStringLiteral("三维预览：正在生成全部已选块…"));
         updateControls();
     });
     connect(stackTasks_, &TaskManager::taskProgress, this,
@@ -324,16 +329,30 @@ MaskSliceWindow::MaskSliceWindow(QWidget* parent)
     connect(stackTasks_, &TaskManager::taskFinished, this,
             [this](quint64, const QVariant& value) {
         if (clearing_) { updateControls(); return; }
-        const MaskStackGroupAnalysis result = value.value<MaskStackGroupAnalysis>();
-        if (!pendingStackAnalysis_ && result.requestGeneration == stackRevision_ &&
-            result.preview) {
-            stackAnalysis_ = result;
+        MaskStackGroupAnalysis result;
+        QVector<QImage> jobThumbnails;
+        if (jobMode_) {
+            const auto loaded = value.value<JobPackageLoader::StackLoadResult>();
+            result.requestGeneration = loaded.requestGeneration;
+            result.preview = loaded.preview;
+            result.commonLayerCount = loaded.preview ? loaded.preview->layerCount : 0;
+            jobThumbnails = loaded.thumbnails;
+        } else {
+            result = value.value<MaskStackGroupAnalysis>();
+        }
+        if (!pendingStackAnalysis_ && result.requestGeneration == stackRevision_ && result.preview) {
+            stackAnalysis_ = std::move(result);
             stackView_->setColors(mapping_.startColor, mapping_.endColor);
-            stackView_->setPreview(result.preview);
+            stackView_->setPreview(stackAnalysis_->preview);
             stackView_->setActiveBlock(traversalIndex_);
             updateStackZScale();
             updateStackInformation();
-            if (analysis_) populateLayers(*analysis_);
+            if (jobMode_) {
+                populateJobLayers(stackAnalysis_->preview, jobThumbnails);
+                statusLabel_->setText(QStringLiteral("切片加载完成"));
+            } else if (analysis_) {
+                populateLayers(*analysis_);
+            }
         }
         updateControls();
         if (pendingStackAnalysis_) stackTimer_->start(0);
@@ -344,8 +363,10 @@ MaskSliceWindow::MaskSliceWindow(QWidget* parent)
     });
     connect(stackTasks_, &TaskManager::taskFailed, this,
             [this](quint64, const QString& error) {
-        if (!clearing_ && !pendingStackAnalysis_)
+        if (!clearing_ && !pendingStackAnalysis_) {
             stackSamplingLabel_->setText(QStringLiteral("三维预览失败：%1").arg(error));
+            if (jobMode_) statusLabel_->setText(QStringLiteral("加载失败"));
+        }
         updateControls();
         if (pendingStackAnalysis_ && !clearing_) stackTimer_->start(0);
     });
@@ -361,11 +382,71 @@ void MaskSliceWindow::showElement(
 void MaskSliceWindow::showElements(
     const ImageDocumentPtr& source, const QVector<MaskSliceElement>& elements,
     const QPoint& activeCell, const PointCloudSettings& mapping) {
+    setJobMode(false);
     setElements(source, elements, activeCell, mapping);
     if (!source_ || elements_.isEmpty()) return;
     show();
     raise();
     activateWindow();
+}
+
+void MaskSliceWindow::showJobPlacement(const JobDocumentPtr& document, qint64 placementId) {
+    clearing_ = false;
+    setJobMode(true);
+    analysisTimer_->stop();
+    stackTimer_->stop();
+    pendingAnalysis_ = false;
+    pendingStackAnalysis_ = true;
+    tasks_->cancel();
+    stackTasks_->cancel();
+    source_.reset();
+    analysis_.reset();
+    stackAnalysis_.reset();
+    elements_.clear();
+    elementList_->clear();
+    layerList_->clear();
+    stackView_->clear();
+    jobDocument_ = document;
+    jobPlacementId_ = placementId;
+    traversalIndex_ = placementId;
+    ++stackRevision_;
+
+    QString modelPath;
+    qint64 modelId = -1;
+    if (document) {
+        const auto point = std::find_if(document->points.cbegin(), document->points.cend(),
+            [placementId](const JobPoint& value) { return value.placementId == placementId; });
+        if (point != document->points.cend() && point->placeId >= 0 &&
+            point->placeId < static_cast<qint64>(document->models.size())) {
+            modelId = point->placeId;
+            modelPath = document->models[static_cast<std::size_t>(modelId)].path;
+        }
+    }
+    elementLabel_->setText(QStringLiteral("坐标点 %1 | 模型 %2 | path: %3")
+        .arg(placementId + 1).arg(modelId).arg(modelPath.isEmpty() ? QStringLiteral("--")
+                                                                  : modelPath));
+    setWindowTitle(QStringLiteral("Job 堆叠预览 - 坐标点 %1").arg(placementId + 1));
+    totalLabel_->setText(QStringLiteral("切片总数：0"));
+    stackLayerLabel_->setText(QStringLiteral("当前层：--"));
+    stackSamplingLabel_->setText(QStringLiteral("三维预览：正在读取 %1")
+        .arg(modelPath.isEmpty() ? QStringLiteral("模型切片") : modelPath));
+    statusLabel_->setText(QStringLiteral("正在加载磁盘切片…"));
+    show();
+    raise();
+    activateWindow();
+    if (!stackTasks_->isBusy()) stackTimer_->start(0);
+    updateControls();
+}
+
+void MaskSliceWindow::setJobMode(bool enabled) {
+    if (jobMode_ && !enabled) {
+        jobDocument_.reset();
+        jobPlacementId_ = -1;
+    }
+    jobMode_ = enabled;
+    settingsContainer_->setVisible(!enabled);
+    elementListContainer_->setVisible(!enabled && elements_.size() > 1);
+    exportButton_->setVisible(!enabled);
 }
 
 void MaskSliceWindow::setElements(
@@ -471,6 +552,8 @@ MaskStackGroupRequest MaskSliceWindow::currentStackRequest() const {
 }
 
 int MaskSliceWindow::unifiedLayerCount() const {
+    if (jobMode_)
+        return stackAnalysis_ && stackAnalysis_->preview ? stackAnalysis_->preview->layerCount : 0;
     if (!analysis_ || analysis_->layerCount <= 0) return 0;
     if (elements_.size() <= 1) return analysis_->layerCount;
     if (!stackAnalysis_ || stackAnalysis_->commonLayerCount <= 0) return 0;
@@ -531,8 +614,24 @@ void MaskSliceWindow::startAnalysis() {
 }
 
 void MaskSliceWindow::startStackAnalysis() {
-    if (!pendingStackAnalysis_ || stackTasks_->isBusy() || !source_ ||
-        elements_.isEmpty()) return;
+    if (!pendingStackAnalysis_ || stackTasks_->isBusy()) return;
+    if (jobMode_) {
+        if (!jobDocument_) return;
+        pendingStackAnalysis_ = false;
+        const auto document = jobDocument_;
+        const qint64 placementId = jobPlacementId_;
+        const quint64 revision = stackRevision_;
+        if (!stackTasks_->start(QStringLiteral("加载 Job 模型切片"),
+            [document, placementId, revision](const auto& token, const auto& progress,
+                                               QString* error) {
+                return QVariant::fromValue(JobPackageLoader::loadStack(
+                    document, placementId, revision, token, progress, error));
+            })) {
+            pendingStackAnalysis_ = true;
+        }
+        return;
+    }
+    if (!source_ || elements_.isEmpty()) return;
     pendingStackAnalysis_ = false;
     const MaskStackGroupRequest request = currentStackRequest();
     if (!stackTasks_->start(QStringLiteral("生成多块三维预览"),
@@ -542,6 +641,22 @@ void MaskSliceWindow::startStackAnalysis() {
         })) {
         pendingStackAnalysis_ = true;
     }
+}
+
+void MaskSliceWindow::populateJobLayers(const MaskStackPreviewDataPtr& preview,
+                                        const QVector<QImage>& thumbnails) {
+    layerList_->clear();
+    if (!preview) return;
+    for (int layer = 1; layer <= preview->layerCount; ++layer) {
+        const int index = layer - 1;
+        const QIcon icon = index < thumbnails.size()
+            ? QIcon(QPixmap::fromImage(thumbnails[index])) : QIcon{};
+        auto* item = new QListWidgetItem(icon,
+            QString::number(layer) + QStringLiteral(".bmp"), layerList_);
+        item->setTextAlignment(Qt::AlignHCenter);
+    }
+    totalLabel_->setText(QStringLiteral("切片总数：%1").arg(preview->layerCount));
+    if (layerList_->count() > 0) layerList_->setCurrentRow(0);
 }
 
 void MaskSliceWindow::populateElementList() {
@@ -629,13 +744,15 @@ void MaskSliceWindow::populateLayers(const MaskSliceAnalysis& analysis) {
 
 void MaskSliceWindow::updateStackLayerSelection(int row) {
     const int totalLayers = unifiedLayerCount();
-    if (!analysis_ || row < 0 || row >= totalLayers) {
+    if ((!jobMode_ && !analysis_) || row < 0 || row >= totalLayers) {
         stackLayerLabel_->setText(QStringLiteral("当前层：--"));
         return;
     }
     const int layer = row + 1;
-    const double lower = row * layerHeight_->value();
-    const double upper = layer * layerHeight_->value();
+    const double layerHeight = jobMode_ && stackAnalysis_ && stackAnalysis_->preview
+        ? stackAnalysis_->preview->layerHeight : layerHeight_->value();
+    const double lower = row * layerHeight;
+    const double upper = layer * layerHeight;
     stackView_->setSelectedLayer(layer);
     stackLayerLabel_->setText(row == 0
         ? QStringLiteral("当前第 1 层 | 判断高度 >= 0.000000 μm | 重建区间 [0.000000, %1] μm")
@@ -679,7 +796,7 @@ void MaskSliceWindow::updateStackInformation() {
     stackSamplingLabel_->setText(
         QStringLiteral("三维预览 %1 × %2 %3 | 已选 %4 块 | X %5 μm，Y %6 μm | 重建高度 %7 μm，实际最高 %8 μm | Z %9×%10")
             .arg(preview.gridSize.width()).arg(preview.gridSize.height()).arg(sampling)
-            .arg(preview.blocks.size())
+            .arg(jobMode_ ? 1 : preview.blocks.size())
             .arg(preview.physicalSize.width(),0,'f',6)
             .arg(preview.physicalSize.height(),0,'f',6)
             .arg(preview.layerCount*preview.layerHeight,0,'f',6)
@@ -726,7 +843,7 @@ void MaskSliceWindow::updateControls() {
     lockAspect_->setEnabled(!exporting);
     invertMask_->setEnabled(!exporting);
     cancelButton_->setEnabled(busy);
-    exportButton_->setEnabled(!busy && unifiedLayerCount() > 0 &&
+    exportButton_->setEnabled(!jobMode_ && !busy && unifiedLayerCount() > 0 &&
                               !pendingAnalysis_ && !pendingStackAnalysis_);
 }
 
@@ -789,6 +906,8 @@ void MaskSliceWindow::cancelAndClear() {
     tasks_->cancel();
     stackTasks_->cancel();
     source_.reset();
+    jobDocument_.reset();
+    jobPlacementId_ = -1;
     region_ = {};
     analysis_.reset();
     stackAnalysis_.reset();
@@ -803,6 +922,7 @@ void MaskSliceWindow::cancelAndClear() {
     totalLabel_->setText(QStringLiteral("掩模总数：0"));
     elementLabel_->setText(QStringLiteral("未选择单元"));
     statusLabel_->setText(QStringLiteral("已清空"));
+    setJobMode(false);
     hide();
 }
 
