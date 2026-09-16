@@ -29,6 +29,7 @@
 
 namespace {
 constexpr auto kReportName = "export-report.json";
+constexpr auto kParameterName = "param.txt";
 constexpr qint64 kReportEstimate = 8 * 1024;
 constexpr qint64 kMinimumSafetyMargin = 16 * 1024 * 1024;
 constexpr quint64 kExportWorkerMemoryBudget = 256ULL * 1024ULL * 1024ULL;
@@ -161,6 +162,22 @@ bool writeJobJson(const QString& path, const LayeredPackageRequest& request,
     return true;
 }
 
+bool writeParameters(const QString& path, qint64 blocks, int layers, double layerHeight,
+                     QString* error) {
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) {
+        if (error) *error = QStringLiteral("无法创建 param.txt：%1").arg(file.errorString());
+        return false;
+    }
+    const QByteArray bytes = QStringLiteral("%1;%2;%3\n")
+        .arg(blocks).arg(layers).arg(jsonNumber(layerHeight)).toUtf8();
+    if (file.write(bytes) != bytes.size() || !file.commit()) {
+        if (error) *error = QStringLiteral("无法保存 param.txt：%1").arg(file.errorString());
+        return false;
+    }
+    return true;
+}
+
 bool writeReport(const QString& path, const LayeredPackageRequest& request, int layers,
                  qint64 estimatedBytes, qint64 overwritten, QString* error) {
     const auto strategy = request.options.layerCountStrategy == LayerCountStrategy::RoundUp
@@ -260,6 +277,7 @@ QString targetFingerprint(const LayeredPackageRequest& request, qint64* count,
         const QString name = info.fileName();
         const bool isDirectory = numeric.match(name).hasMatch();
         const bool isFile = name.compare(QStringLiteral("job.json"), Qt::CaseInsensitive) == 0 ||
+            name.compare(QString::fromLatin1(kParameterName), Qt::CaseInsensitive) == 0 ||
             (request.writeReport && name.compare(QString::fromLatin1(kReportName),
                                                  Qt::CaseInsensitive) == 0);
         if (isDirectory || isFile) {
@@ -544,6 +562,11 @@ bool LayeredPackageExporter::exportPackage(
     }
     if (!writeJobJson(staged.filePath(QStringLiteral("job.json")), request, order, token,
                       error)) { cleanup(); return false; }
+    if (!writeParameters(staged.filePath(QString::fromLatin1(kParameterName)),
+                         exports.size(), layers, request.options.layerHeight, error)) {
+        cleanup();
+        return false;
+    }
     if (progress) progress({QStringLiteral("生成 job.json"), qint64(exports.size()) + 1, total});
     if (request.writeReport &&
         !writeReport(staged.filePath(QString::fromLatin1(kReportName)), request, layers,
@@ -567,6 +590,8 @@ bool LayeredPackageExporter::exportPackage(
              QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot)) {
         if (numeric.match(info.fileName()).hasMatch() ||
             info.fileName().compare(QStringLiteral("job.json"), Qt::CaseInsensitive) == 0 ||
+            info.fileName().compare(QString::fromLatin1(kParameterName),
+                                    Qt::CaseInsensitive) == 0 ||
             (request.writeReport && info.fileName().compare(QString::fromLatin1(kReportName),
                                                              Qt::CaseInsensitive) == 0))
             existingTargets << info.fileName();
@@ -589,6 +614,7 @@ bool LayeredPackageExporter::exportPackage(
         committed << name;
     }
     for (const QString& name : QStringList{QStringLiteral("job.json"),
+             QString::fromLatin1(kParameterName),
              request.writeReport ? QString::fromLatin1(kReportName) : QString{}}) {
         if (name.isEmpty()) continue;
         if (!QDir().rename(staged.filePath(name), output.filePath(name))) {

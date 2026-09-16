@@ -32,8 +32,11 @@ private:
     class Backend;
     Backend* backend_ = nullptr;
     QLabel* statusLabel_ = nullptr;
+    QLabel* coordinateLabel_ = nullptr;
     QCheckBox* guidesCheck_ = nullptr;
     QPushButton* fitButton_ = nullptr;
     JobDocumentPtr document_;
     qint64 selectedPlaceId_ = -1;
+
+    void updateCoordinateLabel();
 };

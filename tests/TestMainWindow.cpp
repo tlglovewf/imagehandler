@@ -155,12 +155,14 @@ void TestMainWindow::jobPreviewWorkspaceAndLinking() {
     auto* tabs=window.findChild<QTabBar*>(QStringLiteral("previewTabs"));
     auto* jobView=window.findChild<JobPreviewWidget*>(QStringLiteral("jobPreviewWidget"));
     auto* status=window.findChild<QLabel*>(QStringLiteral("jobPreviewStatus"));
+    auto* coordinate=window.findChild<QLabel*>(QStringLiteral("jobSelectedCoordinate"));
     auto* previewButton=window.findChild<QPushButton*>(QStringLiteral("manualSegmentationPreviewButton"));
     auto* cellWidth=window.findChild<QSpinBox*>(QStringLiteral("segmentationCellWidth"));
     auto* cellHeight=window.findChild<QSpinBox*>(QStringLiteral("segmentationCellHeight"));
     auto* imageView=window.findChild<LargeImageView*>();
     QVERIFY(importButton);QVERIFY(layoutMode);QVERIFY(autoJump);QVERIFY(tabs);QVERIFY(jobView);
-    QVERIFY(status);QVERIFY(previewButton);QVERIFY(cellWidth);QVERIFY(cellHeight);QVERIFY(imageView);
+    QVERIFY(status);QVERIFY(coordinate);QVERIFY(previewButton);QVERIFY(cellWidth);QVERIFY(cellHeight);QVERIFY(imageView);
+    QVERIFY(!coordinate->isVisible());
     QCOMPARE(layoutMode->currentIndex(),0);QVERIFY(!autoJump->isChecked());QCOMPARE(tabs->count(),3);
     QVERIFY(QMetaObject::invokeMethod(&window,"acceptDocument",Qt::DirectConnection,Q_ARG(ImageDocumentPtr,document)));
     cellWidth->setValue(2);cellHeight->setValue(2);
@@ -186,6 +188,14 @@ void TestMainWindow::jobPreviewWorkspaceAndLinking() {
         QVERIFY(QMetaObject::invokeMethod(imageView,"segmentationCellSelected",Qt::DirectConnection,
                                           Q_ARG(int,0),Q_ARG(int,1)));
         QTRY_COMPARE(jobView->selectedPlaceId(),qint64(1));
+        QTRY_VERIFY(!coordinate->isHidden());
+        QVERIFY(coordinate->text().contains(QStringLiteral("color:#ff5252")));
+        QVERIFY(coordinate->text().contains(QStringLiteral("color:#4caf50")));
+        const auto selectedPoint=std::find_if(jobView->document()->points.cbegin(),jobView->document()->points.cend(),
+            [](const JobPoint& point){return point.placementId==1;});
+        QVERIFY(selectedPoint!=jobView->document()->points.cend());
+        QVERIFY(coordinate->text().contains(QString::number(selectedPoint->position.x,'g',15)));
+        QVERIFY(coordinate->text().contains(QString::number(selectedPoint->position.y,'g',15)));
         QCOMPARE(tabs->currentIndex(),0);
         QVERIFY(QMetaObject::invokeMethod(jobView,"placeSelected",Qt::DirectConnection,Q_ARG(qint64,2)));
         QCOMPARE(imageView->selectedCell(),QPoint(1,1));

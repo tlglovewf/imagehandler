@@ -1237,6 +1237,8 @@ void TestCore::layeredPackageUsesPhysicalCoordinatesAndUniformLayers() {
     QVERIFY(jobBytes.contains("\"path\": \"0\""));
     QVERIFY(jobBytes.contains("\"by\": [1.0, 0.0, 0.0]"));
     QVERIFY(jobBytes.contains("\"by\": [1.0, -0.5, 0.0]"));
+    QFile parameters(QDir(output).filePath("param.txt"));QVERIFY(parameters.open(QIODevice::ReadOnly));
+    QCOMPARE(parameters.readAll().trimmed(),QByteArray("4;5;0.2"));
     QFile report(QDir(output).filePath("export-report.json"));QVERIFY(report.open(QIODevice::ReadOnly));
     const QJsonObject reportObject=QJsonDocument::fromJson(report.readAll()).object();
     QCOMPARE(reportObject.value("mode").toString(),QStringLiteral("layered_package"));
@@ -1246,7 +1248,7 @@ void TestCore::layeredPackageUsesPhysicalCoordinatesAndUniformLayers() {
     QCOMPARE(reportOutput.value("transformSampling").toString(),QStringLiteral("nearest"));
 
     const auto replacementPreflight=LayeredPackageExporter::inspect(request);
-    QVERIFY(replacementPreflight.valid);QCOMPARE(replacementPreflight.conflictCount,qint64(6));
+    QVERIFY(replacementPreflight.valid);QCOMPARE(replacementPreflight.conflictCount,qint64(7));
     error.clear();
     QVERIFY(!LayeredPackageExporter::exportPackage(request,{false,true,{}},
         std::make_shared<CancellationToken>(),{},&error));
@@ -1340,6 +1342,9 @@ void TestCore::elementGroupingAndLayeredPackageReuse() {
     QCOMPARE(commands[3].toObject().value(QStringLiteral("id")).toInt(), 1);
     QCOMPARE(commands[5].toObject().value(QStringLiteral("id")).toInt(), 1);
     QCOMPARE(commands[7].toObject().value(QStringLiteral("id")).toInt(), 0);
+    QFile parameters(QDir(output).filePath(QStringLiteral("param.txt")));
+    QVERIFY(parameters.open(QIODevice::ReadOnly));
+    QCOMPARE(parameters.readAll().trimmed(), QByteArray("2;1;1.0"));
 
     const auto loaded = JobPackageLoader::load(
         jobFile.fileName(), std::make_shared<CancellationToken>(), {}, &error);

@@ -1602,6 +1602,7 @@ public:
         }
         window_->selectedCallback = [this](qint64 id) {
             owner_->selectedPlaceId_=id;
+            owner_->updateCoordinateLabel();
             Q_EMIT owner_->placeSelected(id);
         };
         window_->activatedCallback = [this](qint64 id) {
@@ -1689,7 +1690,11 @@ JobPreviewWidget::JobPreviewWidget(QWidget* parent) : QWidget(parent) {
     fitButton_ = new QPushButton(QStringLiteral("适配全部")); fitButton_->setObjectName(QStringLiteral("jobFitAllButton"));
     guidesCheck_ = new QCheckBox(QStringLiteral("坐标轴与网格")); guidesCheck_->setObjectName(QStringLiteral("jobGuidesCheck")); guidesCheck_->setChecked(true);
     statusLabel_ = new QLabel(QStringLiteral("未加载 Job")); statusLabel_->setObjectName(QStringLiteral("jobPreviewStatus"));
-    tools->addWidget(fitButton_); tools->addWidget(guidesCheck_); tools->addStretch(); tools->addWidget(statusLabel_);
+    coordinateLabel_ = new QLabel; coordinateLabel_->setObjectName(QStringLiteral("jobSelectedCoordinate"));
+    coordinateLabel_->setTextFormat(Qt::RichText); coordinateLabel_->setVisible(false);
+    coordinateLabel_->setStyleSheet(QStringLiteral("QLabel { background: #25282b; border-radius: 3px; padding: 3px 7px; }"));
+    tools->addWidget(fitButton_); tools->addWidget(guidesCheck_); tools->addStretch();
+    tools->addWidget(coordinateLabel_); tools->addWidget(statusLabel_);
     root->addLayout(tools);
     backend_ = new Backend(this, this);
     if (backend_->available()) root->addWidget(backend_->widget(), 1);
@@ -1709,6 +1714,7 @@ JobPreviewWidget::~JobPreviewWidget() { delete backend_; }
 void JobPreviewWidget::setDocument(const JobDocumentPtr& document) {
     document_ = document; selectedPlaceId_ = -1;
     backend_->setDocument(document_);
+    updateCoordinateLabel();
     statusLabel_->setToolTip(QString{});
     statusLabel_->setStyleSheet(QString{});
     if (!document_) statusLabel_->setText(QStringLiteral("未加载 Job"));
@@ -1723,8 +1729,36 @@ bool JobPreviewWidget::isVulkanAvailable() const noexcept { return backend_ && b
 void JobPreviewWidget::setSelectedPlaceId(qint64 placeId, bool focus, bool preserveZoom) {
     selectedPlaceId_ = placeId;
     backend_->setSelected(placeId, focus, preserveZoom);
+    updateCoordinateLabel();
 }
 
 void JobPreviewWidget::clearSelection() { setSelectedPlaceId(-1, false); }
 void JobPreviewWidget::fitAll() { if (backend_) backend_->fitAll(); }
 QImage JobPreviewWidget::grabFrame() { return backend_ ? backend_->grabFrame() : QImage(); }
+
+void JobPreviewWidget::updateCoordinateLabel() {
+    if (!coordinateLabel_) return;
+    const JobPoint* selected = nullptr;
+    if (document_ && selectedPlaceId_ >= 0) {
+        const auto found = std::find_if(document_->points.cbegin(), document_->points.cend(),
+            [this](const JobPoint& point) { return point.placementId == selectedPlaceId_; });
+        if (found != document_->points.cend()) selected = &*found;
+    }
+    if (!selected) {
+        coordinateLabel_->clear();
+        coordinateLabel_->hide();
+        return;
+    }
+    const auto number = [](double value) {
+        if (value == 0.0) value = 0.0;
+        return QString::number(value, 'g', 15).toHtmlEscaped();
+    };
+    coordinateLabel_->setText(QStringLiteral(
+        "<span style=\"color:#d7e8ff\">[</span>"
+        "<span style=\"color:#ff5252\">%1</span>"
+        "<span style=\"color:#d7e8ff\">,</span>"
+        "<span style=\"color:#4caf50\">%2</span>"
+        "<span style=\"color:#d7e8ff\">]</span>")
+        .arg(number(selected->position.x), number(selected->position.y)));
+    coordinateLabel_->show();
+}
