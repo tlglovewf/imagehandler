@@ -5,10 +5,13 @@
 #include "imaging/ElementGrouping.h"
 
 #include <QMetaType>
+#include <QPoint>
 #include <QString>
+#include <QVector>
 
 enum class LayerCountStrategy { RoundUp, RequireExact };
 enum class BinaryTransformSampling { Nearest, SmoothThreshold };
+enum class JobMoveCommand { RelMove, AbsMove };
 
 struct JobPlacementOptions {
     double pixelScale = 0.25;
@@ -32,6 +35,13 @@ struct LayeredPackageOptions {
     double scaleX = 1.0;
     double scaleY = 1.0;
     BinaryTransformSampling transformSampling = BinaryTransformSampling::Nearest;
+    int baseLayerCount = 0;
+    bool canvasBackgroundWhite = true;
+    bool invertCanvas = false;
+    double zOffset = 0.001;
+    JobMoveCommand jobMoveCommand = JobMoveCommand::AbsMove;
+    double exportMultiplier = 13.55;
+    bool mirrorX = false;
 };
 
 struct LayeredPackageRequest {
@@ -42,8 +52,12 @@ struct LayeredPackageRequest {
     LayeredPackageOptions options;
     bool writeReport = true;
     ElementGroupingResult grouping;
+    // Zero or one selected cell keeps the historical "export all" behavior.
+    // Two or more cells restrict both placements and generated models.
+    QVector<QPoint> selectedCells;
 };
 
 Q_DECLARE_METATYPE(LayerCountStrategy)
 Q_DECLARE_METATYPE(BinaryTransformSampling)
+Q_DECLARE_METATYPE(JobMoveCommand)
 Q_DECLARE_METATYPE(LayeredPackageRequest)

@@ -21,6 +21,14 @@ bool maskLayerActive(double height, int zeroBasedLayer, double layerHeight) {
     return zeroBasedLayer == 0 || height > zeroBasedLayer * layerHeight;
 }
 
+bool maskLayerActive(double height, int zeroBasedLayer, double layerHeight,
+                     double zOffset) {
+    if (!std::isfinite(height) || !std::isfinite(zOffset) || zOffset < 0.0 ||
+        zeroBasedLayer < 0 || !std::isfinite(layerHeight) || layerHeight <= 0.0)
+        return false;
+    return height > zOffset + zeroBasedLayer * layerHeight;
+}
+
 QColor interpolateColor(double normalizedGray, const QColor& start, const QColor& end) {
     const double t = std::clamp(normalizedGray, 0.0, 1.0);
     const auto channel = [t](int first, int last) {

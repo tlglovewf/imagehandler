@@ -87,6 +87,7 @@ private:
     QWidget* settingsContainer_ = nullptr;
     QListWidget* elementList_ = nullptr;
     QDoubleSpinBox* layerHeight_ = nullptr;
+    QDoubleSpinBox* zOffset_ = nullptr;
     QSpinBox* outputWidth_ = nullptr;
     QSpinBox* outputHeight_ = nullptr;
     QCheckBox* lockAspect_ = nullptr;

@@ -10,6 +10,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLocale>
@@ -71,28 +72,71 @@ bool hasGrouping(const LayeredPackageRequest& request) {
            !request.grouping.groups.isEmpty();
 }
 
-qint64 modelCount(const LayeredPackageRequest& request,
-                  const std::vector<QPoint>& order) {
-    return hasGrouping(request) ? request.grouping.groups.size()
-                                : static_cast<qint64>(order.size());
-}
+struct PackageLayout {
+    std::vector<QPoint> placements;
+    QVector<QPoint> models;
+    QVector<int> modelIds;
+};
 
-int modelIdFor(const LayeredPackageRequest& request, const QPoint& cell,
-               qsizetype traversalIndex) {
-    return hasGrouping(request) ? request.grouping.groupIdAt(cell.y(), cell.x())
-                                : static_cast<int>(traversalIndex);
-}
-
-QVector<QPoint> representativeCells(const LayeredPackageRequest& request,
-                                    const std::vector<QPoint>& order) {
-    QVector<QPoint> result;
-    if (hasGrouping(request)) {
-        result.reserve(request.grouping.groups.size());
-        for (const ElementGroup& group : request.grouping.groups)
-            result.push_back(group.representativeCell);
+PackageLayout packageLayout(const LayeredPackageRequest& request) {
+    PackageLayout result;
+    const auto fullOrder = SplitExporter::traversal(
+        request.segmentation.rows, request.segmentation.columns, request.traversalMode);
+    const bool selectedOnly = request.selectedCells.size() > 1;
+    if (!selectedOnly) {
+        result.placements = fullOrder;
     } else {
-        result.reserve(static_cast<qsizetype>(order.size()));
-        for (const QPoint& cell : order) result.push_back(cell);
+        const qsizetype cellCount = qsizetype(request.segmentation.rows) *
+                                    request.segmentation.columns;
+        QVector<bool> selected(cellCount, false);
+        for (const QPoint& cell : request.selectedCells) {
+            if (cell.x() < 0 || cell.y() < 0 ||
+                cell.x() >= request.segmentation.columns ||
+                cell.y() >= request.segmentation.rows)
+                continue;
+            selected[qsizetype(cell.y()) * request.segmentation.columns + cell.x()] = true;
+        }
+        result.placements.reserve(static_cast<size_t>(request.selectedCells.size()));
+        for (const QPoint& cell : fullOrder) {
+            if (selected[qsizetype(cell.y()) * request.segmentation.columns + cell.x()])
+                result.placements.push_back(cell);
+        }
+    }
+
+    if (!hasGrouping(request)) {
+        result.models.reserve(static_cast<qsizetype>(result.placements.size()));
+        result.modelIds.reserve(static_cast<qsizetype>(result.placements.size()));
+        for (qsizetype index = 0;
+             index < static_cast<qsizetype>(result.placements.size()); ++index) {
+            result.models.push_back(result.placements[static_cast<size_t>(index)]);
+            result.modelIds.push_back(static_cast<int>(index));
+        }
+        return result;
+    }
+
+    if (!selectedOnly) {
+        result.models.reserve(request.grouping.groups.size());
+        for (const ElementGroup& group : request.grouping.groups)
+            result.models.push_back(group.representativeCell);
+        result.modelIds.reserve(static_cast<qsizetype>(result.placements.size()));
+        for (const QPoint& cell : result.placements)
+            result.modelIds.push_back(request.grouping.groupIdAt(cell.y(), cell.x()));
+        return result;
+    }
+
+    QHash<int, int> selectedGroupIds;
+    result.modelIds.reserve(static_cast<qsizetype>(result.placements.size()));
+    for (const QPoint& cell : result.placements) {
+        const int sourceGroupId = request.grouping.groupIdAt(cell.y(), cell.x());
+        auto it = selectedGroupIds.constFind(sourceGroupId);
+        if (it == selectedGroupIds.cend()) {
+            const int compactId = result.models.size();
+            selectedGroupIds.insert(sourceGroupId, compactId);
+            result.models.push_back(cell);
+            result.modelIds.push_back(compactId);
+        } else {
+            result.modelIds.push_back(*it);
+        }
     }
     return result;
 }
@@ -123,7 +167,7 @@ bool writeAll(QFile& file, const QByteArray& data, QString* error) {
 }
 
 bool writeJobJson(const QString& path, const LayeredPackageRequest& request,
-                  const std::vector<QPoint>& order, const CancellationTokenPtr& token,
+                  const PackageLayout& layout, const CancellationTokenPtr& token,
                   QString* error) {
     QFile file(path);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
@@ -131,7 +175,7 @@ bool writeJobJson(const QString& path, const LayeredPackageRequest& request,
         return false;
     }
     if (!writeAll(file, QByteArrayLiteral("{\n  \"models\": [\n"), error)) return false;
-    const qint64 models = modelCount(request, order);
+    const qint64 models = layout.models.size();
     for (qint64 i = 0; i < models; ++i) {
         if (token && token->isCancelled()) return false;
         const QByteArray item = QStringLiteral(
@@ -141,16 +185,23 @@ bool writeJobJson(const QString& path, const LayeredPackageRequest& request,
     }
     if (!writeAll(file, QByteArrayLiteral("  ],\n  \"commands\": [\n"), error)) return false;
     const JobPlacementOptions placement{request.options.pixelScale, request.options.reverseY};
-    for (qsizetype i = 0; i < static_cast<qsizetype>(order.size()); ++i) {
+    const QString moveCommand = request.options.jobMoveCommand == JobMoveCommand::RelMove
+        ? QStringLiteral("relmove") : QStringLiteral("absmove");
+    const QPointF origin = request.selectedCells.size() > 1 && !layout.placements.empty()
+        ? SplitExporter::physicalPosition(request.segmentation, layout.placements.front(),
+                                          placement)
+        : QPointF{};
+    for (qsizetype i = 0; i < static_cast<qsizetype>(layout.placements.size()); ++i) {
         if (token && token->isCancelled()) return false;
         const QPointF position = SplitExporter::physicalPosition(
-            request.segmentation, order[static_cast<size_t>(i)], placement);
-        const int modelId = modelIdFor(request, order[static_cast<size_t>(i)], i);
+            request.segmentation, layout.placements[static_cast<size_t>(i)], placement) - origin;
+        const int modelId = layout.modelIds[i];
         const QByteArray item = QStringLiteral(
-            "    {\n      \"command\": \"relmove\",\n      \"by\": [%1, %2, 0.0]\n    },\n"
-            "    {\n      \"command\": \"place\",\n      \"id\": %3\n    }%4\n")
-            .arg(jsonNumber(position.x()), jsonNumber(position.y())).arg(modelId)
-            .arg(i + 1 < static_cast<qsizetype>(order.size()) ? QStringLiteral(",")
+            "    {\n      \"command\": \"%1\",\n      \"by\": [%2, %3, 0.0]\n    },\n"
+            "    {\n      \"command\": \"place\",\n      \"id\": %4\n    }%5\n")
+            .arg(moveCommand, jsonNumber(position.x()), jsonNumber(position.y()))
+            .arg(modelId)
+            .arg(i + 1 < static_cast<qsizetype>(layout.placements.size()) ? QStringLiteral(",")
                                                                : QString()).toUtf8();
         if (!writeAll(file, item, error)) return false;
     }
@@ -179,13 +230,15 @@ bool writeParameters(const QString& path, qint64 blocks, int layers, double laye
 }
 
 bool writeReport(const QString& path, const LayeredPackageRequest& request, int layers,
-                 qint64 estimatedBytes, qint64 overwritten, QString* error) {
+                 const PackageLayout& layout, qint64 estimatedBytes, qint64 overwritten,
+                 QString* error) {
     const auto strategy = request.options.layerCountStrategy == LayerCountStrategy::RoundUp
         ? QStringLiteral("round_up") : QStringLiteral("require_exact");
     const auto sampling = request.options.transformSampling == BinaryTransformSampling::Nearest
         ? QStringLiteral("nearest") : QStringLiteral("smooth_threshold");
-    const qint64 cells = qint64(request.segmentation.rows) * request.segmentation.columns;
-    const qint64 groups = hasGrouping(request) ? request.grouping.groups.size() : cells;
+    const qint64 cells = static_cast<qint64>(layout.placements.size());
+    const qint64 groups = layout.models.size();
+    const int totalLayers = layers + request.options.baseLayerCount;
     QJsonObject root{
         {QStringLiteral("schemaVersion"), 3},
         {QStringLiteral("application"), QJsonObject{
@@ -203,26 +256,36 @@ bool writeReport(const QString& path, const LayeredPackageRequest& request, int 
             {QStringLiteral("reverseY"), request.options.reverseY}}},
         {QStringLiteral("layers"), QJsonObject{
             {QStringLiteral("layerHeight"), request.options.layerHeight},
-            {QStringLiteral("count"), layers},
+            {QStringLiteral("zOffset"), request.options.zOffset},
+            {QStringLiteral("count"), totalLayers},
+            {QStringLiteral("baseCount"), request.options.baseLayerCount},
+            {QStringLiteral("sliceCount"), layers},
             {QStringLiteral("strategy"), strategy},
             {QStringLiteral("invertMask"), request.options.invertMask}}},
         {QStringLiteral("output"), QJsonObject{
             {QStringLiteral("directoryCount"), groups},
-            {QStringLiteral("bmpCount"), groups * layers},
+            {QStringLiteral("bmpCount"), groups * totalLayers},
             {QStringLiteral("placementCount"), cells},
+            {QStringLiteral("jobMoveCommand"), request.options.jobMoveCommand == JobMoveCommand::AbsMove
+                ? QStringLiteral("absmove") : QStringLiteral("relmove")},
             {QStringLiteral("uniquePatternCount"), groups},
             {QStringLiteral("reusedPlacementCount"), cells - groups},
             {QStringLiteral("groupingStrategy"), hasGrouping(request)
                 ? request.grouping.strategyId : QStringLiteral("none")},
             {QStringLiteral("standardWidth"), request.options.outputWidth},
             {QStringLiteral("standardHeight"), request.options.outputHeight},
+            {QStringLiteral("exportMultiplier"), request.options.exportMultiplier},
             {QStringLiteral("residualAlignment"), QStringLiteral("top_left")},
             {QStringLiteral("attachToCanvas"), request.options.attachToCanvas},
             {QStringLiteral("canvasWidth"), request.options.canvasWidth},
             {QStringLiteral("canvasHeight"), request.options.canvasHeight},
+            {QStringLiteral("canvasBackground"), request.options.canvasBackgroundWhite
+                ? QStringLiteral("white") : QStringLiteral("black")},
+            {QStringLiteral("invertCanvas"), request.options.invertCanvas},
             {QStringLiteral("rotationDegrees"), request.options.rotationDegrees},
             {QStringLiteral("scaleX"), request.options.scaleX},
             {QStringLiteral("scaleY"), request.options.scaleY},
+            {QStringLiteral("mirrorX"), request.options.mirrorX},
             {QStringLiteral("transformSampling"), sampling},
             {QStringLiteral("bitsPerPixel"), 1},
             {QStringLiteral("namingRule"), QStringLiteral("{placeId}/{layer}.bmp")},
@@ -313,8 +376,9 @@ bool removeEntry(const QString& path) {
 int LayeredPackageExporter::layerCount(const LayeredPackageOptions& options, QString* error) {
     if (error) error->clear();
     if (!std::isfinite(options.maximumHeight) || options.maximumHeight <= 0.0 ||
-        !std::isfinite(options.layerHeight) || options.layerHeight <= 0.0) {
-        if (error) *error = QStringLiteral("最大高度和层切高必须是有效的正数。");
+        !std::isfinite(options.layerHeight) || options.layerHeight <= 0.0 ||
+        !std::isfinite(options.zOffset) || options.zOffset < 0.0) {
+        if (error) *error = QStringLiteral("最大高度和层切高必须是有效的正数，Z 偏移不能为负数。");
         return 0;
     }
     const double quotient = options.maximumHeight / options.layerHeight;
@@ -336,12 +400,24 @@ int LayeredPackageExporter::layerCount(const LayeredPackageOptions& options, QSt
             : QStringLiteral("无法计算切片数量。");
         return 0;
     }
-    return static_cast<int>(layers);
+    const int sliceLayers = static_cast<int>(layers);
+    if (options.baseLayerCount < 0 ||
+        options.baseLayerCount > kMaximumMaskSliceLayers - sliceLayers) {
+        if (error) {
+            *error = options.baseLayerCount < 0
+                ? QStringLiteral("底座数量不能小于 0。")
+                : QStringLiteral("原切片与底座的总层数不能超过 %1 层。")
+                      .arg(kMaximumMaskSliceLayers);
+        }
+        return 0;
+    }
+    return sliceLayers;
 }
 
 ExportSizeEstimate LayeredPackageExporter::estimateOutput(const LayeredPackageRequest& request) {
     ExportSizeEstimate result;
     const int layers = layerCount(request.options, &result.error);
+    const int totalLayers = layers + request.options.baseLayerCount;
     if (!request.document || !request.document->image || layers <= 0 ||
         request.segmentation.rows <= 0 || request.segmentation.columns <= 0 ||
         request.segmentation.settings.cellWidth <= 0 ||
@@ -351,10 +427,13 @@ ExportSizeEstimate LayeredPackageExporter::estimateOutput(const LayeredPackageRe
         if (result.error.isEmpty()) result.error = QStringLiteral("分层导出参数无效。");
         return result;
     }
-    const auto order = SplitExporter::traversal(request.segmentation.rows,
-                                                 request.segmentation.columns,
-                                                 request.traversalMode);
-    const QVector<QPoint> exports = representativeCells(request, order);
+    const PackageLayout layout = packageLayout(request);
+    const QVector<QPoint>& exports = layout.models;
+    if (layout.placements.empty() || exports.isEmpty() ||
+        layout.modelIds.size() != static_cast<qsizetype>(layout.placements.size())) {
+        result.error = QStringLiteral("没有可导出的选中块。");
+        return result;
+    }
     qint64 bytes = 0;
     for (const QPoint& cell : exports) {
         const ImageRegion region = segmentationCellRegion(
@@ -376,21 +455,21 @@ ExportSizeEstimate LayeredPackageExporter::estimateOutput(const LayeredPackageRe
             LayeredMaskProcessor::outputSize(request.options));
         qint64 block = 0;
         if (one == 0 || one > quint64(std::numeric_limits<qint64>::max()) ||
-            !checkedMultiply(static_cast<qint64>(one), layers, &block) ||
+            !checkedMultiply(static_cast<qint64>(one), totalLayers, &block) ||
             !checkedAdd(bytes, block, &bytes)) {
             result.error = QStringLiteral("BMP 输出尺寸超过程序可表示范围。");
             return result;
         }
     }
     const qint64 uniquePatterns = exports.size();
-    if (!checkedMultiply(uniquePatterns, layers, &result.bmpFileCount)) {
+    if (!checkedMultiply(uniquePatterns, totalLayers, &result.bmpFileCount)) {
         result.error = QStringLiteral("BMP 文件数量超过程序可表示范围。");
         return result;
     }
     result.estimatedBmpBytes = bytes;
     qint64 jobEstimate = 0;
     qint64 auxiliary = request.writeReport ? kReportEstimate : 0;
-    if (!checkedMultiply(static_cast<qint64>(order.size()), 220, &jobEstimate) ||
+    if (!checkedMultiply(static_cast<qint64>(layout.placements.size()), 220, &jobEstimate) ||
         !checkedAdd(auxiliary, jobEstimate, &auxiliary) ||
         !checkedAdd(bytes, auxiliary, &result.estimatedTotalBytes)) {
         result.error = QStringLiteral("预计输出尺寸超过程序可表示范围。");
@@ -417,10 +496,11 @@ ExportPreflightResult LayeredPackageExporter::inspect(
     result.blockingError = estimate.error;
     if (!estimate.valid) return result;
     const int layers = layerCount(request.options);
-    const qint64 cells = hasGrouping(request) ? request.grouping.groups.size()
-                                              : qint64(request.segmentation.rows) * request.segmentation.columns;
+    const int totalLayers = layers + request.options.baseLayerCount;
+    const PackageLayout layout = packageLayout(request);
+    const qint64 cells = layout.models.size();
     result.firstOutput = QStringLiteral("0/1.bmp");
-    result.lastOutput = QStringLiteral("%1/%2.bmp").arg(cells - 1).arg(layers);
+    result.lastOutput = QStringLiteral("%1/%2.bmp").arg(cells - 1).arg(totalLayers);
     result.targetFingerprint = targetFingerprint(request, &result.conflictCount,
         &result.conflictSamples, &result.blockingError, token, progress);
     if (!result.blockingError.isEmpty() || (token && token->isCancelled())) return result;
@@ -449,6 +529,7 @@ bool LayeredPackageExporter::exportPackage(
     }
     const ExportSizeEstimate estimate = estimateOutput(request);
     const int layers = layerCount(request.options, error);
+    const int totalLayers = layers + request.options.baseLayerCount;
     if (!estimate.valid || layers <= 0) {
         if (error && error->isEmpty()) *error = estimate.error;
         return false;
@@ -491,10 +572,8 @@ bool LayeredPackageExporter::exportPackage(
     QDir staged(temp.filePath(QStringLiteral("staged")));
     QDir backup(temp.filePath(QStringLiteral("backup")));
     const auto cleanup = [&] { return temp.removeRecursively(); };
-    const auto order = SplitExporter::traversal(request.segmentation.rows,
-                                                 request.segmentation.columns,
-                                                 request.traversalMode);
-    const QVector<QPoint> exports = representativeCells(request, order);
+    const PackageLayout layout = packageLayout(request);
+    const QVector<QPoint>& exports = layout.models;
     const qint64 total = static_cast<qint64>(exports.size()) + 2;
     for (qsizetype index = 0; index < exports.size(); ++index) {
         const QString directoryName = QString::number(index);
@@ -560,17 +639,17 @@ bool LayeredPackageExporter::exportPackage(
         if (error) *error = firstError;
         return false;
     }
-    if (!writeJobJson(staged.filePath(QStringLiteral("job.json")), request, order, token,
+    if (!writeJobJson(staged.filePath(QStringLiteral("job.json")), request, layout, token,
                       error)) { cleanup(); return false; }
     if (!writeParameters(staged.filePath(QString::fromLatin1(kParameterName)),
-                         exports.size(), layers, request.options.layerHeight, error)) {
+                         exports.size(), totalLayers, request.options.layerHeight, error)) {
         cleanup();
         return false;
     }
     if (progress) progress({QStringLiteral("生成 job.json"), qint64(exports.size()) + 1, total});
     if (request.writeReport &&
         !writeReport(staged.filePath(QString::fromLatin1(kReportName)), request, layers,
-                     estimate.estimatedBmpBytes, conflicts, error)) {
+                     layout, estimate.estimatedBmpBytes, conflicts, error)) {
         cleanup();
         return false;
     }

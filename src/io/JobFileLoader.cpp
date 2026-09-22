@@ -304,7 +304,7 @@ bool parseModel(JsonReader& reader, JobModel* model, QString* error) {
     return true;
 }
 
-enum class ParsedCommandType { RelMove, Place };
+enum class ParsedCommandType { Move, Place };
 struct ParsedCommand { ParsedCommandType type; JobCoordinate position; qint64 id = -1; };
 
 bool parseBy(JsonReader& reader, JobCoordinate* position, QString* error) {
@@ -342,9 +342,9 @@ bool parseCommand(JsonReader& reader, ParsedCommand* parsed, QString* error) {
         if (!reader.expect(',', error, QStringLiteral("逗号"))) return false;
     }
     if (!hasCommand) { reader.fail(error, QStringLiteral("命令缺少 command 字段")); return false; }
-    if (command == QStringLiteral("relmove")) {
-        if (!hasBy || hasId) { reader.fail(error, QStringLiteral("relmove 必须仅包含 by 坐标")); return false; }
-        parsed->type = ParsedCommandType::RelMove; parsed->position = by;
+    if (command == QStringLiteral("relmove") || command == QStringLiteral("absmove")) {
+        if (!hasBy || hasId) { reader.fail(error, QStringLiteral("移动命令必须仅包含 by 坐标")); return false; }
+        parsed->type = ParsedCommandType::Move; parsed->position = by;
     } else if (command == QStringLiteral("place")) {
         if (!hasId || hasBy) { reader.fail(error, QStringLiteral("place 必须仅包含整数 id")); return false; }
         parsed->type = ParsedCommandType::Place; parsed->id = id;
@@ -375,13 +375,13 @@ bool parseCommands(JsonReader& reader, JobDocument& document, QString* error) {
     if (reader.consume(']')) return true;
     qint64 commandIndex = 0;
     JobCoordinate pendingPosition;
-    bool expectingRelMove = true;
+    bool expectingMove = true;
     while (true) {
         ParsedCommand command;
         if (!parseCommand(reader, &command, error)) return false;
-        if (expectingRelMove) {
-            if (command.type != ParsedCommandType::RelMove) {
-                reader.fail(error, QStringLiteral("命令 %1：期望 relmove").arg(commandIndex)); return false;
+        if (expectingMove) {
+            if (command.type != ParsedCommandType::Move) {
+                reader.fail(error, QStringLiteral("命令 %1：期望 relmove 或 absmove").arg(commandIndex)); return false;
             }
             pendingPosition = command.position;
         } else {
@@ -395,10 +395,10 @@ bool parseCommands(JsonReader& reader, JobDocument& document, QString* error) {
                                        static_cast<qint64>(document.points.size())});
             document.bounds.include(pendingPosition);
         }
-        expectingRelMove = !expectingRelMove;
+        expectingMove = !expectingMove;
         ++commandIndex;
         if (reader.consume(']')) {
-            if (!expectingRelMove) { reader.fail(error, QStringLiteral("最后一个 relmove 缺少对应 place")); return false; }
+            if (!expectingMove) { reader.fail(error, QStringLiteral("最后一个移动命令缺少对应 place")); return false; }
             return true;
         }
         if (!reader.expect(',', error, QStringLiteral("命令逗号"))) return false;

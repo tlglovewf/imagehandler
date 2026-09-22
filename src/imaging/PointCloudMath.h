@@ -11,6 +11,8 @@ namespace PointCloudMath {
 // inclusive at zero. Higher cumulative slices retain their strict threshold.
 [[nodiscard]] bool maskLayerActive(double height, int zeroBasedLayer,
                                    double layerHeight);
+[[nodiscard]] bool maskLayerActive(double height, int zeroBasedLayer,
+                                   double layerHeight, double zOffset);
 [[nodiscard]] QColor interpolateColor(double normalizedGray, const QColor& start,
                                       const QColor& end);
 // Returns the physical extent/boundary shown on the axis (pixelCount * pixelScale).

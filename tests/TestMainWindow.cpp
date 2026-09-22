@@ -23,6 +23,9 @@
 #include <QDropEvent>
 #include <QDoubleSpinBox>
 #include <QDir>
+#include <QFile>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QListWidget>
 #include <QLabel>
 #include <QMessageBox>
@@ -58,6 +61,8 @@ private Q_SLOTS:
     void multipleImageDropIsSortedAndSelected();
     void preflightDialogRequiresExplicitOverwrite();
     void segmentationStatisticsUpdates();
+    void layeredExportMultiplierRoundsDecimalProducts();
+    void layeredExportDialogWritesJobCommands();
     void pointCloudControlsAndTab();
     void fixedPointClearAndPhysicalSize();
     void mergeProgressStartsImmediately();
@@ -533,8 +538,12 @@ void TestMainWindow::segmentationStatisticsUpdates() {
     LayeredExportDialog dialog;
     dialog.configure(document,grid,TraversalMode::SnakeZ,0.25,1.0,true,true,directory.path());
     auto* layer=dialog.findChild<QDoubleSpinBox*>(QStringLiteral("layeredExportLayerHeight"));
+    auto* zOffset=dialog.findChild<QDoubleSpinBox*>(QStringLiteral("layeredExportZOffset"));
     auto* maximum=dialog.findChild<QDoubleSpinBox*>(QStringLiteral("layeredExportMaximumHeight"));
     auto* strategy=dialog.findChild<QComboBox*>(QStringLiteral("layeredExportLayerStrategy"));
+    auto* moveCommand=dialog.findChild<QComboBox*>(QStringLiteral("layeredExportJobMoveCommand"));
+    auto* baseLayers=dialog.findChild<QSpinBox*>(QStringLiteral("layeredExportBaseLayerCount"));
+    auto* multiplier=dialog.findChild<QDoubleSpinBox*>(QStringLiteral("layeredExportMultiplier"));
     auto* width=dialog.findChild<QSpinBox*>(QStringLiteral("layeredExportOutputWidth"));
     auto* height=dialog.findChild<QSpinBox*>(QStringLiteral("layeredExportOutputHeight"));
     auto* invert=dialog.findChild<QCheckBox*>(QStringLiteral("layeredExportInvertMask"));
@@ -547,36 +556,73 @@ void TestMainWindow::segmentationStatisticsUpdates() {
     auto* attach=dialog.findChild<QCheckBox*>(QStringLiteral("ck_attach"));
     auto* canvasWidth=dialog.findChild<QSpinBox*>(QStringLiteral("o_w"));
     auto* canvasHeight=dialog.findChild<QSpinBox*>(QStringLiteral("o_h"));
+    auto* canvasBackground=dialog.findChild<QComboBox*>(QStringLiteral("layeredExportCanvasBackground"));
+    auto* invertCanvas=dialog.findChild<QCheckBox*>(QStringLiteral("layeredExportInvertCanvas"));
     auto* rotation=dialog.findChild<QDoubleSpinBox*>(QStringLiteral("rot_ang"));
     auto* scaleX=dialog.findChild<QDoubleSpinBox*>(QStringLiteral("scale_x"));
     auto* scaleY=dialog.findChild<QDoubleSpinBox*>(QStringLiteral("scale_y"));
+    auto* mirrorX=dialog.findChild<QCheckBox*>(QStringLiteral("layeredExportMirrorX"));
     auto* sampling=dialog.findChild<QComboBox*>(QStringLiteral("layeredExportTransformSampling"));
     auto* previewElement=dialog.findChild<QLabel*>(QStringLiteral("layeredExportPreviewElement"));
-    QVERIFY(layer);QVERIFY(maximum);QVERIFY(strategy);QVERIFY(width);QVERIFY(height);
+    QVERIFY(layer);QVERIFY(zOffset);QVERIFY(maximum);QVERIFY(strategy);QVERIFY(moveCommand);QVERIFY(baseLayers);QVERIFY(multiplier);QVERIFY(width);QVERIFY(height);
     QVERIFY(invert);QVERIFY(reverse);QVERIFY(summary);QVERIFY(start);
     QVERIFY(mainSplitter);QVERIFY(settingsPanel);QVERIFY(previewPanel);
-    QVERIFY(attach);QVERIFY(canvasWidth);QVERIFY(canvasHeight);QVERIFY(rotation);
-    QVERIFY(scaleX);QVERIFY(scaleY);QVERIFY(sampling);QVERIFY(previewElement);
+    QVERIFY(attach);QVERIFY(canvasWidth);QVERIFY(canvasHeight);QVERIFY(canvasBackground);QVERIFY(invertCanvas);QVERIFY(rotation);
+    QVERIFY(scaleX);QVERIFY(scaleY);QVERIFY(mirrorX);QVERIFY(sampling);QVERIFY(previewElement);
     QCOMPARE(mainSplitter->count(),2);
     QCOMPARE(mainSplitter->widget(0),settingsPanel);QCOMPARE(mainSplitter->widget(1),previewPanel);
     QVERIFY(settingsPanel->maximumWidth()<=400);
     QVERIFY(attach->isChecked());QCOMPARE(canvasWidth->value(),1920);QCOMPARE(canvasHeight->value(),1080);
-    QCOMPARE(rotation->value(),0.0);QCOMPARE(scaleX->value(),1.0);QCOMPARE(scaleY->value(),1.0);
+    QCOMPARE(canvasBackground->currentText(),QStringLiteral("白色"));QVERIFY(!invertCanvas->isChecked());
+    QCOMPARE(rotation->value(),0.0);QCOMPARE(scaleX->value(),1.0);QCOMPARE(scaleY->value(),1.0);QVERIFY(!mirrorX->isChecked());
     QCOMPARE(sampling->currentIndex(),0);QVERIFY(previewElement->text().contains(QStringLiteral("预览块：0")));
     QCOMPARE(layer->value(),0.1);QCOMPARE(maximum->value(),1.0);
-    QCOMPARE(width->value(),4);QCOMPARE(height->value(),2);QVERIFY(!invert->isChecked());
-    attach->setChecked(false);QVERIFY(!canvasWidth->isEnabled());QVERIFY(!rotation->isEnabled());
-    attach->setChecked(true);QVERIFY(canvasWidth->isEnabled());QVERIFY(rotation->isEnabled());
+    QCOMPARE(zOffset->value(),0.001);
+    QCOMPARE(moveCommand->count(),2);
+    QCOMPARE(moveCommand->itemText(0),QStringLiteral("relmove"));
+    QCOMPARE(moveCommand->currentText(),QStringLiteral("absmove"));
+    QCOMPARE(baseLayers->value(),0);QCOMPARE(baseLayers->singleStep(),1);
+    QCOMPARE(baseLayers->minimum(),0);QCOMPARE(baseLayers->maximum(),kMaximumMaskSliceLayers);
+    QCOMPARE(multiplier->value(),13.55);
+    QCOMPARE(width->value(),14);QCOMPARE(height->value(),7);QVERIFY(!invert->isChecked());
+    multiplier->setValue(2.125);
+    QCOMPARE(width->value(),3);QCOMPARE(height->value(),2);
+    width->setValue(11);QCOMPARE(width->value(),11);
+    multiplier->setValue(13.55);
+    QCOMPARE(width->value(),14);QCOMPARE(height->value(),7);
+    multiplier->setValue(2000.0);
+    QCOMPARE(width->value(),2000);QCOMPARE(height->value(),1000);
+    QVERIFY(!start->isEnabled());
+    QVERIFY(summary->text().contains(QStringLiteral("超过导出底图")));
+    QCOMPARE(canvasWidth->value(),1920);QCOMPARE(canvasHeight->value(),1080);
+    multiplier->setValue(13.55);
+    attach->setChecked(false);QVERIFY(!canvasWidth->isEnabled());QVERIFY(!canvasBackground->isEnabled());QVERIFY(!invertCanvas->isEnabled());QVERIFY(!rotation->isEnabled());QVERIFY(!mirrorX->isEnabled());
+    attach->setChecked(true);QVERIFY(canvasWidth->isEnabled());QVERIFY(canvasBackground->isEnabled());QVERIFY(invertCanvas->isEnabled());QVERIFY(rotation->isEnabled());QVERIFY(mirrorX->isEnabled());
+    mirrorX->setChecked(true);
     canvasWidth->setValue(3);QVERIFY(!start->isEnabled());
     QVERIFY(summary->text().contains(QStringLiteral("超过导出底图")));
     canvasWidth->setValue(1920);QVERIFY(start->isEnabled());
     QVERIFY(reverse->isChecked());QVERIFY(summary->text().contains(QStringLiteral("10 层")));
+    baseLayers->setValue(3);
+    QVERIFY(summary->text().contains(QStringLiteral("底座 3 层")));
+    QVERIFY(summary->text().contains(QStringLiteral("每组 13 层")));
+    baseLayers->setValue(kMaximumMaskSliceLayers);
+    QVERIFY(!start->isEnabled());
+    QVERIFY(summary->text().contains(QStringLiteral("总层数")));
+    baseLayers->setValue(3);QVERIFY(start->isEnabled());
     maximum->setValue(1.05);QVERIFY(summary->text().contains(QStringLiteral("11 层")));
     strategy->setCurrentIndex(1);QVERIFY(!start->isEnabled());
     QVERIFY(summary->text().contains(QStringLiteral("整除")));
     dialog.configure(document,grid,TraversalMode::SnakeZ,0.25,1.0,true,true,
-                     directory.path(),QPoint(1,1));
+                     directory.path(),QPoint(1,1),{QPoint(0,0),QPoint(1,1)});
+    QCOMPARE(baseLayers->value(),0);
+    QCOMPARE(multiplier->value(),13.55);
+    QCOMPARE(width->value(),14);QCOMPARE(height->value(),7);
+    QVERIFY(!mirrorX->isChecked());
+    QCOMPARE(zOffset->value(),0.001);
+    QCOMPARE(moveCommand->currentText(),QStringLiteral("absmove"));
     QVERIFY(previewElement->text().contains(QStringLiteral("预览块：2")));
+    QVERIFY(summary->text().contains(QStringLiteral("仅导出已选 2 个分块")));
 
     auto* stack=dialog.findChild<MaskStackWidget*>(QStringLiteral("layeredExportStackView"));
     QVERIFY(stack);
@@ -612,6 +658,109 @@ void TestMainWindow::segmentationStatisticsUpdates() {
 #endif
 }
 
+void TestMainWindow::layeredExportMultiplierRoundsDecimalProducts() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    QImage source(80, 160, QImage::Format_Grayscale8); source.fill(42);
+    const QString path = directory.filePath("multiplier-source.bmp");
+    QVERIFY(source.save(path, "BMP"));
+    QString error;
+    const auto document = ImageLoader::load(path, 402, &error);
+    QVERIFY2(document, qPrintable(error));
+    const auto grid = PatternDetector::makeManualGrid(document, {80, 160, 128, ForegroundPolarity::Dark});
+    LayeredExportDialog dialog;
+    dialog.configure(document, grid, TraversalMode::SnakeZ, 0.25, 1.0, false, false,
+                     directory.path());
+    auto* multiplier = dialog.findChild<QDoubleSpinBox*>(QStringLiteral("layeredExportMultiplier"));
+    auto* width = dialog.findChild<QSpinBox*>(QStringLiteral("layeredExportOutputWidth"));
+    auto* height = dialog.findChild<QSpinBox*>(QStringLiteral("layeredExportOutputHeight"));
+    QVERIFY(multiplier); QVERIFY(width); QVERIFY(height);
+    QCOMPARE(width->value(), 271);
+    QCOMPARE(height->value(), 542);
+    multiplier->setValue(0.05);
+    QCOMPARE(width->value(), 1);
+    QCOMPARE(height->value(), 2);
+    multiplier->setValue(13.550001);
+    QCOMPARE(width->value(), 272);
+    QCOMPARE(height->value(), 543);
+    dialog.configure(document, grid, TraversalMode::SnakeZ, 0.5, 1.0, false, false,
+                     directory.path());
+    QCOMPARE(width->value(), 542);
+    QCOMPARE(height->value(), 1084);
+}
+
+void TestMainWindow::layeredExportDialogWritesJobCommands() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    QImage source(4, 1, QImage::Format_Grayscale8); source.fill(255);
+    const QString path = directory.filePath("job-command-source.bmp");
+    QVERIFY(source.save(path, "BMP"));
+    QString error;
+    const auto document = ImageLoader::load(path, 405, &error);
+    QVERIFY2(document, qPrintable(error));
+    const auto grid = PatternDetector::makeManualGrid(
+        document, {1, 1, 128, ForegroundPolarity::Light});
+    for (int scenario = 0; scenario < 3; ++scenario) {
+        const QString output = directory.filePath(QStringLiteral("scenario-%1").arg(scenario));
+        QVERIFY(QDir().mkpath(output));
+        LayeredExportDialog dialog;
+        const QVector<QPoint> selected = scenario < 2
+            ? QVector<QPoint>{QPoint(3, 0), QPoint(1, 0)} : QVector<QPoint>{};
+        dialog.configure(document, grid, TraversalMode::SnakeZ, 0.25, 1.0,
+                         false, false, output, QPoint(1, 0), selected);
+        auto* command = dialog.findChild<QComboBox*>(
+            QStringLiteral("layeredExportJobMoveCommand"));
+        auto* attach = dialog.findChild<QCheckBox*>(QStringLiteral("ck_attach"));
+        auto* start = dialog.findChild<QPushButton*>(QStringLiteral("layeredExportStart"));
+        QVERIFY(command); QVERIFY(attach); QVERIFY(start);
+        attach->setChecked(false);
+        command->setCurrentText(scenario == 1 ? QStringLiteral("relmove")
+                                              : QStringLiteral("absmove"));
+        QCOMPARE(command->currentText(), scenario == 1 ? QStringLiteral("relmove")
+                                                       : QStringLiteral("absmove"));
+        QVERIFY(start->isEnabled());
+        QTimer responder;
+        responder.setInterval(10);
+        connect(&responder, &QTimer::timeout, &dialog, [&dialog] {
+            for (QMessageBox* box : dialog.findChildren<QMessageBox*>()) {
+                if (!box->isVisible()) continue;
+                if (box->windowTitle() == QStringLiteral("确认分层导出")) {
+                    for (QAbstractButton* button : box->buttons()) {
+                        if (button->text() == QStringLiteral("开始导出")) {
+                            button->click(); return;
+                        }
+                    }
+                } else if (box->windowTitle() == QStringLiteral("分层导出")) {
+                    box->accept(); return;
+                }
+            }
+        });
+        responder.start();
+        bool timedOut = false;
+        QTimer::singleShot(15000, &dialog, [&] { timedOut = true; dialog.reject(); });
+        QTimer::singleShot(0, start, &QPushButton::click);
+        const int result = dialog.exec();
+        responder.stop();
+        QVERIFY(!timedOut);
+        QCOMPARE(result, int(QDialog::Accepted));
+        QFile job(QDir(output).filePath(QStringLiteral("job.json")));
+        QVERIFY(job.open(QIODevice::ReadOnly));
+        const QJsonArray commands = QJsonDocument::fromJson(job.readAll())
+            .object().value(QStringLiteral("commands")).toArray();
+        QCOMPARE(commands[0].toObject().value(QStringLiteral("command")).toString(),
+                 command->currentText());
+        QCOMPARE(commands[0].toObject().value(QStringLiteral("by")).toArray(),
+                 QJsonArray({0.0, 0.0, 0.0}));
+        QCOMPARE(commands[2].toObject().value(QStringLiteral("by")).toArray(),
+                 scenario < 2 ? QJsonArray({0.5, 0.0, 0.0})
+                              : QJsonArray({0.25, 0.0, 0.0}));
+        QFile report(QDir(output).filePath(QStringLiteral("export-report.json")));
+        QVERIFY(report.open(QIODevice::ReadOnly));
+        QCOMPARE(QJsonDocument::fromJson(report.readAll()).object()
+                     .value(QStringLiteral("output")).toObject()
+                     .value(QStringLiteral("jobMoveCommand")).toString(),
+                 command->currentText());
+    }
+}
+
 void TestMainWindow::maskSliceWindowDefaultsAndReuse() {
     QTemporaryDir directory;QVERIFY(directory.isValid());
     QImage source(4,4,QImage::Format_Grayscale8);
@@ -636,6 +785,7 @@ void TestMainWindow::maskSliceWindowDefaultsAndReuse() {
     QVERIFY(QMetaObject::invokeMethod(imageView,"segmentationCellSliceActivated",Qt::DirectConnection,Q_ARG(int,0),Q_ARG(int,1)));
     auto* sliceWindow=window.findChild<MaskSliceWindow*>(QStringLiteral("maskSliceWindow"));QVERIFY(sliceWindow);QVERIFY(sliceWindow->isVisible());
     auto* layerHeight=sliceWindow->findChild<QDoubleSpinBox*>(QStringLiteral("maskSliceLayerHeight"));
+    auto* zOffset=sliceWindow->findChild<QDoubleSpinBox*>(QStringLiteral("maskSliceZOffset"));
     auto* outputWidth=sliceWindow->findChild<QSpinBox*>(QStringLiteral("maskSliceOutputWidth"));
     auto* outputHeight=sliceWindow->findChild<QSpinBox*>(QStringLiteral("maskSliceOutputHeight"));
     auto* lock=sliceWindow->findChild<QCheckBox*>(QStringLiteral("maskSliceLockAspect"));
@@ -649,10 +799,11 @@ void TestMainWindow::maskSliceWindowDefaultsAndReuse() {
     auto* zScale=sliceWindow->findChild<QDoubleSpinBox*>(QStringLiteral("maskStackZScale"));
     auto* layerInfo=sliceWindow->findChild<QLabel*>(QStringLiteral("maskStackLayerInfo"));
     auto* samplingInfo=sliceWindow->findChild<QLabel*>(QStringLiteral("maskStackSamplingInfo"));
-    QVERIFY(layerHeight);QVERIFY(outputWidth);QVERIFY(outputHeight);QVERIFY(lock);QVERIFY(invert);QVERIFY(list);QVERIFY(total);
+    QVERIFY(layerHeight);QVERIFY(zOffset);QVERIFY(outputWidth);QVERIFY(outputHeight);QVERIFY(lock);QVERIFY(invert);QVERIFY(list);QVERIFY(total);
     QVERIFY(splitter);QCOMPARE(splitter->count(),2);QVERIFY(stack);QVERIFY(stackMode);QVERIFY(autoZ);QVERIFY(zScale);QVERIFY(layerInfo);QVERIFY(samplingInfo);
     QCOMPARE(stackMode->currentIndex(),0);QVERIFY(autoZ->isChecked());QVERIFY(!zScale->isEnabled());
     QCOMPARE(layerHeight->value(),0.1);QCOMPARE(layerHeight->singleStep(),0.1);
+    QCOMPARE(zOffset->value(),0.001);
     QCOMPARE(outputWidth->value(),2);QCOMPARE(outputHeight->value(),2);QVERIFY(lock->isChecked());QVERIFY(!invert->isChecked());
     QTRY_VERIFY_WITH_TIMEOUT(sliceWindow->analysis().has_value(),5000);
     QTRY_VERIFY_WITH_TIMEOUT(sliceWindow->stackAnalysis().has_value(),5000);
@@ -661,6 +812,7 @@ void TestMainWindow::maskSliceWindowDefaultsAndReuse() {
     QCOMPARE(total->text(),QStringLiteral("掩模总数：%1").arg(list->count()));
     QCOMPARE(list->currentRow(),0);QCOMPARE(stack->selectedLayer(),1);
     QVERIFY(layerInfo->text().contains(QStringLiteral("第 1 层")));
+    QVERIFY(layerInfo->text().contains(QStringLiteral("> 0.001000")));
     QVERIFY(samplingInfo->text().contains(QStringLiteral("重建高度")));
     if(stack->isVulkanAvailable()){
         QTest::qWait(80);const QImage frame=stack->grabFrame();QVERIFY(!frame.isNull());
@@ -668,6 +820,11 @@ void TestMainWindow::maskSliceWindowDefaultsAndReuse() {
     if(list->count()>1){list->setCurrentRow(1);QCOMPARE(stack->selectedLayer(),2);QVERIFY(layerInfo->text().contains(QStringLiteral("第 2 层")));}
     stackMode->setCurrentIndex(1);QCOMPARE(stack->displayMode(),MaskStackDisplayMode::Exploded);
     autoZ->setChecked(false);QVERIFY(zScale->isEnabled());zScale->setValue(3.0);QCOMPARE(stack->zScale(),3.0);
+    zOffset->setValue(20.0);
+    QTRY_VERIFY_WITH_TIMEOUT(sliceWindow->analysis().has_value() &&
+        sliceWindow->analysis()->thumbnails.front().pixelColor(0,0)==QColor(Qt::black),5000);
+    QTRY_VERIFY_WITH_TIMEOUT(sliceWindow->stackAnalysis().has_value(),5000);
+    QVERIFY(layerInfo->text().contains(QStringLiteral("> 20.000000")));
     outputWidth->setValue(4);QCOMPARE(outputHeight->value(),4);
     QVERIFY(QMetaObject::invokeMethod(imageView,"segmentationCellSliceActivated",Qt::DirectConnection,Q_ARG(int,1),Q_ARG(int,0)));
     QCOMPARE(window.findChildren<MaskSliceWindow*>().size(),1);QVERIFY(sliceWindow->isVisible());

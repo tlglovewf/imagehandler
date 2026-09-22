@@ -121,6 +121,13 @@ MaskSliceWindow::MaskSliceWindow(QWidget* parent)
     layerHeight_->setSingleStep(0.1);
     layerHeight_->setValue(0.1);
     layerHeight_->setSuffix(QStringLiteral(" μm"));
+    zOffset_ = new QDoubleSpinBox;
+    zOffset_->setObjectName(QStringLiteral("maskSliceZOffset"));
+    zOffset_->setDecimals(6);
+    zOffset_->setRange(0.0, 1000000.0);
+    zOffset_->setSingleStep(0.001);
+    zOffset_->setValue(0.001);
+    zOffset_->setSuffix(QStringLiteral(" μm"));
     outputWidth_ = new QSpinBox;
     outputWidth_->setObjectName(QStringLiteral("maskSliceOutputWidth"));
     outputWidth_->setRange(1, INT_MAX);
@@ -139,6 +146,7 @@ MaskSliceWindow::MaskSliceWindow(QWidget* parent)
     mappingLabel_->setWordWrap(true);
     mappingLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     form->addRow(QStringLiteral("层切高"), layerHeight_);
+    form->addRow(QStringLiteral("Z 偏移"), zOffset_);
     form->addRow(QStringLiteral("输出宽度"), outputWidth_);
     form->addRow(QStringLiteral("输出高度"), outputHeight_);
     form->addRow(lockAspect_);
@@ -197,6 +205,8 @@ MaskSliceWindow::MaskSliceWindow(QWidget* parent)
     connect(analysisTimer_, &QTimer::timeout, this, &MaskSliceWindow::startAnalysis);
     connect(stackTimer_, &QTimer::timeout, this, &MaskSliceWindow::startStackAnalysis);
     connect(layerHeight_, qOverload<double>(&QDoubleSpinBox::valueChanged),
+            this, [this] { scheduleAnalysis(); });
+    connect(zOffset_, qOverload<double>(&QDoubleSpinBox::valueChanged),
             this, [this] { scheduleAnalysis(); });
     connect(invertMask_, &QCheckBox::toggled, this, [this] { scheduleActiveAnalysis(); });
     connect(outputWidth_, qOverload<int>(&QSpinBox::valueChanged), this, [this](int width) {
@@ -539,7 +549,7 @@ void MaskSliceWindow::setPointCloudSettings(const PointCloudSettings& mapping) {
 MaskSliceRequest MaskSliceWindow::currentRequest() const {
     return {source_, region_, mapping_,
             {layerHeight_->value(), outputWidth_->value(), outputHeight_->value(),
-             invertMask_->isChecked()}, analysisRevision_, false};
+             invertMask_->isChecked(), zOffset_->value()}, analysisRevision_, false};
 }
 
 MaskStackGroupRequest MaskSliceWindow::currentStackRequest() const {
@@ -548,7 +558,7 @@ MaskStackGroupRequest MaskSliceWindow::currentStackRequest() const {
     const double scaleY = region_.isValid()
         ? double(outputHeight_->value()) / region_.height : 1.0;
     return {source_, elements_, mapping_, layerHeight_->value(), scaleX, scaleY,
-            stackRevision_};
+            stackRevision_, zOffset_->value()};
 }
 
 int MaskSliceWindow::unifiedLayerCount() const {
@@ -751,14 +761,20 @@ void MaskSliceWindow::updateStackLayerSelection(int row) {
     const int layer = row + 1;
     const double layerHeight = jobMode_ && stackAnalysis_ && stackAnalysis_->preview
         ? stackAnalysis_->preview->layerHeight : layerHeight_->value();
+    const double zOffset = jobMode_ ? 0.0 : zOffset_->value();
     const double lower = row * layerHeight;
+    const double threshold = zOffset + lower;
     const double upper = layer * layerHeight;
     stackView_->setSelectedLayer(layer);
-    stackLayerLabel_->setText(row == 0
-        ? QStringLiteral("当前第 1 层 | 判断高度 >= 0.000000 μm | 重建区间 [0.000000, %1] μm")
+    stackLayerLabel_->setText(row == 0 && !jobMode_
+        ? QStringLiteral("当前第 1 层 | 判断高度 > %1 μm | 重建区间 [0.000000, %2] μm")
+              .arg(zOffset, 0, 'f', 6).arg(upper, 0, 'f', 6)
+        : row == 0
+        ? QStringLiteral("当前第 1 层 | 重建区间 [0.000000, %1] μm")
               .arg(upper, 0, 'f', 6)
-        : QStringLiteral("当前第 %1 层 | 判断高度 > %2 μm | 重建区间 (%2, %3] μm")
-              .arg(layer).arg(lower, 0, 'f', 6).arg(upper, 0, 'f', 6));
+        : QStringLiteral("当前第 %1 层 | 判断高度 > %2 μm | 重建区间 (%3, %4] μm")
+              .arg(layer).arg(threshold, 0, 'f', 6)
+              .arg(lower, 0, 'f', 6).arg(upper, 0, 'f', 6));
 }
 
 void MaskSliceWindow::updateStackZScale() {
@@ -838,6 +854,7 @@ void MaskSliceWindow::updateControls() {
     const bool busy = activeBusy || stackTasks_->isBusy();
     const bool exporting = activeBusy && action_ == Action::Export;
     layerHeight_->setEnabled(!exporting);
+    zOffset_->setEnabled(!exporting);
     outputWidth_->setEnabled(!exporting);
     outputHeight_->setEnabled(!exporting);
     lockAspect_->setEnabled(!exporting);

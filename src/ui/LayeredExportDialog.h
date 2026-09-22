@@ -29,7 +29,8 @@ public:
                    TraversalMode traversalMode, double pixelScale,
                    double maximumHeight, bool invertHeight,
                    bool reverseY, const QString& initialDirectory,
-                   const QPoint& activeCell = QPoint(-1, -1));
+                   const QPoint& activeCell = QPoint(-1, -1),
+                   const QVector<QPoint>& selectedCells = {});
     void setElementGrouping(const ElementGroupingResult& grouping);
     [[nodiscard]] bool reverseY() const;
     [[nodiscard]] QString outputDirectory() const;
@@ -44,6 +45,7 @@ private:
     void chooseDirectory();
     void updateAspectFromWidth();
     void updateAspectFromHeight();
+    void updateDimensionsFromMultiplier();
     void updateValidation();
     void startPreflight();
     void showPreflight(const ExportPreflightResult& result);
@@ -64,8 +66,12 @@ private:
     QPushButton* directoryButton_ = nullptr;
     QLabel* directoryLabel_ = nullptr;
     QDoubleSpinBox* layerHeight_ = nullptr;
+    QDoubleSpinBox* zOffset_ = nullptr;
     QDoubleSpinBox* maximumHeight_ = nullptr;
     QComboBox* layerStrategy_ = nullptr;
+    QComboBox* jobMoveCommand_ = nullptr;
+    QSpinBox* baseLayerCount_ = nullptr;
+    QDoubleSpinBox* exportMultiplier_ = nullptr;
     QSpinBox* outputWidth_ = nullptr;
     QSpinBox* outputHeight_ = nullptr;
     QCheckBox* lockAspect_ = nullptr;
@@ -74,9 +80,12 @@ private:
     QCheckBox* attachToCanvas_ = nullptr;
     QSpinBox* canvasWidth_ = nullptr;
     QSpinBox* canvasHeight_ = nullptr;
+    QComboBox* canvasBackground_ = nullptr;
+    QCheckBox* invertCanvas_ = nullptr;
     QDoubleSpinBox* rotationDegrees_ = nullptr;
     QDoubleSpinBox* scaleX_ = nullptr;
     QDoubleSpinBox* scaleY_ = nullptr;
+    QCheckBox* mirrorX_ = nullptr;
     QComboBox* transformSampling_ = nullptr;
     QLabel* summaryLabel_ = nullptr;
     QLabel* statusLabel_ = nullptr;
@@ -102,6 +111,7 @@ private:
     Action action_ = Action::None;
     bool updatingDimensions_ = false;
     QPoint previewCell_{-1, -1};
+    QVector<QPoint> selectedCells_;
     quint64 previewRevision_ = 0;
     bool previewPending_ = false;
 };

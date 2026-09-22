@@ -72,10 +72,10 @@ QSize stackSizeFor(const MaskSliceRequest& request) {
             std::max(1, static_cast<int>(std::lround(height * scale)))};
 }
 
-quint16 quantizedLayer(double height, double layerHeight, int layerCount) {
-    if (!std::isfinite(height) || height < 0.0 || !(layerHeight > 0.0) ||
+quint16 quantizedLayer(double height, double layerHeight, double zOffset, int layerCount) {
+    if (!std::isfinite(height) || height <= zOffset || !(layerHeight > 0.0) ||
         layerCount <= 0) return 0;
-    const double count = std::ceil(height / layerHeight - 1e-12);
+    const double count = std::ceil((height - zOffset) / layerHeight - 1e-12);
     return static_cast<quint16>(std::clamp<int>(
         static_cast<int>(std::max(1.0, count)), 1, layerCount));
 }
@@ -112,6 +112,7 @@ MaskSliceAnalysis MaskSliceGenerator::analyze(
     result.requestGeneration = request.requestGeneration;
     if (!request.source || !ImageLoader::isProcessable(request.source->metadata) ||
         request.settings.outputWidth <= 0 || request.settings.outputHeight <= 0 ||
+        !std::isfinite(request.settings.zOffset) || request.settings.zOffset < 0.0 ||
         !std::isfinite(request.mapping.pixelScale) || request.mapping.pixelScale <= 0.0 ||
         !std::isfinite(request.mapping.maximumHeight) || request.mapping.maximumHeight <= 0.0) {
         if (error) *error = QStringLiteral("切片请求或像素物理映射参数无效。");
@@ -200,7 +201,8 @@ MaskSliceAnalysis MaskSliceGenerator::analyze(
         const double height = PointCloudMath::heightForRaw(
             stackValues[index], divisor, request.mapping);
         stackPreview->columnLayers[index] = quantizedLayer(
-            height, request.settings.layerHeight, result.layerCount);
+            height, request.settings.layerHeight, request.settings.zOffset,
+            result.layerCount);
     }
     g_free(stackMemory);
     if (progress) progress({QStringLiteral("生成三维层高数据"), stackPixels, stackPixels});
@@ -246,7 +248,7 @@ MaskSliceAnalysis MaskSliceGenerator::analyze(
                 const qsizetype index = qsizetype(y) * thumbnail.width() + x;
                 const bool active = PointCloudMath::maskLayerActive(
                     PointCloudMath::heightForRaw(values[index], divisor, request.mapping),
-                    layer, request.settings.layerHeight);
+                    layer, request.settings.layerHeight, request.settings.zOffset);
                 const bool white = request.settings.invertMask ? !active : active;
                 destination[x] = white ? 255 : 0;
             }
@@ -266,7 +268,8 @@ MaskStackGroupAnalysis MaskSliceGenerator::analyzeStackGroup(
     result.requestGeneration = request.requestGeneration;
     if (!request.source || !ImageLoader::isProcessable(request.source->metadata) ||
         request.elements.isEmpty() || !std::isfinite(request.layerHeight) ||
-        request.layerHeight <= 0.0 || !std::isfinite(request.outputScaleX) ||
+        request.layerHeight <= 0.0 || !std::isfinite(request.zOffset) ||
+        request.zOffset < 0.0 || !std::isfinite(request.outputScaleX) ||
         request.outputScaleX <= 0.0 || !std::isfinite(request.outputScaleY) ||
         request.outputScaleY <= 0.0 || !std::isfinite(request.mapping.pixelScale) ||
         request.mapping.pixelScale <= 0.0 || !std::isfinite(request.mapping.maximumHeight) ||
@@ -426,7 +429,7 @@ MaskStackGroupAnalysis MaskSliceGenerator::analyzeStackGroup(
         if (!selected[index]) continue;
         preview->columnLayers[index] = quantizedLayer(
             PointCloudMath::heightForRaw(values[index], divisor, request.mapping),
-            request.layerHeight, preview->layerCount);
+            request.layerHeight, request.zOffset, preview->layerCount);
     }
     g_free(memory);
     if (progress) progress({QStringLiteral("生成多块三维层高数据"), pixelCount, pixelCount});

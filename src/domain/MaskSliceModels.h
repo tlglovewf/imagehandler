@@ -19,6 +19,7 @@ struct MaskSliceSettings {
     int outputWidth = 0;
     int outputHeight = 0;
     bool invertMask = false;
+    double zOffset = 0.001;
 };
 
 struct MaskSliceRequest {
@@ -45,6 +46,7 @@ struct MaskStackGroupRequest {
     double outputScaleX = 1.0;
     double outputScaleY = 1.0;
     quint64 requestGeneration = 0;
+    double zOffset = 0.001;
 };
 
 struct MaskStackBlockPlacement {

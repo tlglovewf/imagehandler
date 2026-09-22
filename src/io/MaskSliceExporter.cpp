@@ -11,6 +11,7 @@
 #include <QStorageInfo>
 #include <QUuid>
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <vips/vips.h>
 
@@ -94,7 +95,8 @@ bool MaskSliceExporter::exportAll(
     if (!request.source || !ImageLoader::isProcessable(request.source->metadata) ||
         layerCount <= 0 || layerCount > kMaximumMaskSliceLayers ||
         request.settings.outputWidth <= 0 || request.settings.outputHeight <= 0 ||
-        request.settings.layerHeight <= 0.0) {
+        request.settings.layerHeight <= 0.0 ||
+        !std::isfinite(request.settings.zOffset) || request.settings.zOffset < 0.0) {
         if (error) *error = QStringLiteral("掩模导出参数无效。");
         return false;
     }
@@ -201,7 +203,7 @@ bool MaskSliceExporter::exportAll(
                 const bool active = PointCloudMath::maskLayerActive(
                     PointCloudMath::heightForRaw(values[sourceColumns[outputX]], divisor,
                                                  request.mapping),
-                    layer, request.settings.layerHeight);
+                    layer, request.settings.layerHeight, request.settings.zOffset);
                 const bool white = request.settings.invertMask ? !active : active;
                 if (white) {
                     packedRow[outputX / 8] = char(uchar(packedRow[outputX / 8]) |

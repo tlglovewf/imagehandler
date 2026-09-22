@@ -25,8 +25,9 @@ double storedMaximum(PixelKind kind) {
     return kind == PixelKind::Gray16 ? 65535.0 : 255.0;
 }
 
-quint16 quantizedLayer(double height, double layerHeight, int layerCount) {
-    const double count = std::ceil(height / layerHeight - 1e-12);
+quint16 quantizedLayer(double height, double zOffset, double layerHeight, int layerCount) {
+    if (height <= zOffset) return 0;
+    const double count = std::ceil((height - zOffset) / layerHeight - 1e-12);
     return static_cast<quint16>(std::clamp<int>(
         static_cast<int>(std::max(1.0, count)), 1, layerCount));
 }
@@ -111,7 +112,8 @@ bool buildRaster(const LayeredMaskRequest& request, HeightRaster* result,
                                                                 mapping);
             result->actualMaximumHeight = std::max(result->actualMaximumHeight, height);
             result->levels[y * result->size.width() + x] =
-                quantizedLayer(height, request.options.layerHeight, request.layerCount);
+                quantizedLayer(height, request.options.zOffset,
+                               request.options.layerHeight, request.layerCount);
         }
         if (progress && (y + 1 == result->contentSize.height() || y % 32 == 0))
             progress({QStringLiteral("准备标准块高度数据"), y + 1,
@@ -125,6 +127,7 @@ struct SourcePoint { double x = 0.0; double y = 0.0; };
 
 struct SourceTransform {
     bool attached = false;
+    bool mirrorX = false;
     double cosine = 1.0;
     double sine = 0.0;
     double inverseScaleX = 1.0;
@@ -139,6 +142,7 @@ SourceTransform sourceTransform(const LayeredPackageOptions& options) {
     SourceTransform result;
     result.attached = options.attachToCanvas;
     if (!result.attached) return result;
+    result.mirrorX = options.mirrorX;
     const double radians = options.rotationDegrees * std::numbers::pi / 180.0;
     result.cosine = std::cos(radians);
     result.sine = std::sin(radians);
@@ -153,12 +157,26 @@ SourceTransform sourceTransform(const LayeredPackageOptions& options) {
 
 SourcePoint sourcePoint(const SourceTransform& transform, double outputX, double outputY) {
     if (!transform.attached) return {outputX, outputY};
-    const double dx = outputX - transform.canvasCenterX;
+    const double dx = (transform.mirrorX ? -1.0 : 1.0) *
+                      (outputX - transform.canvasCenterX);
     const double dy = outputY - transform.canvasCenterY;
     const double unrotatedX = transform.cosine * dx + transform.sine * dy;
     const double unrotatedY = -transform.sine * dx + transform.cosine * dy;
     return {unrotatedX * transform.inverseScaleX + transform.sourceCenterX,
             unrotatedY * transform.inverseScaleY + transform.sourceCenterY};
+}
+
+bool insideSource(const HeightRaster& raster, const SourcePoint& point) {
+    return point.x >= 0.0 && point.y >= 0.0 && point.x < raster.size.width() &&
+           point.y < raster.size.height();
+}
+
+bool outputIsWhite(const LayeredPackageOptions& options, bool inside, bool active) {
+    bool white = options.attachToCanvas && !inside
+        ? options.canvasBackgroundWhite
+        : (options.invertMask ? !active : active);
+    if (options.attachToCanvas && options.invertCanvas) white = !white;
+    return white;
 }
 
 quint16 levelAt(const HeightRaster& raster, int x, int y) {
@@ -207,6 +225,7 @@ quint16 transformedLevel(const HeightRaster& raster, const LayeredPackageOptions
 struct OutputLevelRaster {
     QSize size;
     QVector<quint16> levels;
+    QVector<quint8> inside;
     quint16 maximumLevel = 0;
 };
 
@@ -229,7 +248,8 @@ bool buildOutputLevelRaster(const HeightRaster& source, const LayeredMaskRequest
     }
     const qsizetype pixelCount = qsizetype(result->size.width()) * result->size.height();
     result->levels.resize(pixelCount);
-    if (result->levels.size() != pixelCount) {
+    result->inside.resize(pixelCount);
+    if (result->levels.size() != pixelCount || result->inside.size() != pixelCount) {
         if (error) *error = QStringLiteral("无法分配导出底图层级数据。");
         return false;
     }
@@ -237,10 +257,15 @@ bool buildOutputLevelRaster(const HeightRaster& source, const LayeredMaskRequest
     for (int y = 0; y < result->size.height(); ++y) {
         if (token && token->isCancelled()) return false;
         for (int x = 0; x < result->size.width(); ++x) {
-            const quint16 level = transformedLevel(source, request.options, transform,
-                                                    x + 0.5, y + 0.5,
-                                                    request.layerCount);
-            result->levels[qsizetype(y) * result->size.width() + x] = level;
+            const SourcePoint point = sourcePoint(transform, x + 0.5, y + 0.5);
+            const quint16 level = request.options.transformSampling == BinaryTransformSampling::Nearest
+                ? levelAt(source, static_cast<int>(std::floor(point.x)),
+                          static_cast<int>(std::floor(point.y)))
+                : transformedLevel(source, request.options, transform, x + 0.5, y + 0.5,
+                                   request.layerCount);
+            const qsizetype index = qsizetype(y) * result->size.width() + x;
+            result->levels[index] = level;
+            result->inside[index] = insideSource(source, point) ? 1 : 0;
             result->maximumLevel = std::max(result->maximumLevel, level);
         }
         if (progress && (y + 1 == result->size.height() || y % 32 == 0))
@@ -294,10 +319,19 @@ bool LayeredMaskProcessor::validate(const LayeredMaskRequest& request, QString* 
         request.nominalSourceSize.width() <= 0 || request.nominalSourceSize.height() <= 0 ||
         request.options.outputWidth <= 0 || request.options.outputHeight <= 0 ||
         request.layerCount <= 0 || request.layerCount > kMaximumMaskSliceLayers ||
+        request.options.baseLayerCount < 0 ||
+        request.options.baseLayerCount > kMaximumMaskSliceLayers - request.layerCount ||
+        !std::isfinite(request.options.zOffset) || request.options.zOffset < 0.0 ||
         !std::isfinite(request.options.scaleX) || request.options.scaleX <= 0.0 ||
         !std::isfinite(request.options.scaleY) || request.options.scaleY <= 0.0 ||
         !std::isfinite(request.options.rotationDegrees)) {
-        if (error) *error = QStringLiteral("分层切片参数无效。");
+        if (error) {
+            *error = request.options.baseLayerCount >= 0 &&
+                     request.options.baseLayerCount > kMaximumMaskSliceLayers - request.layerCount
+                ? QStringLiteral("原切片与底座的总层数不能超过 %1 层。")
+                      .arg(kMaximumMaskSliceLayers)
+                : QStringLiteral("分层切片参数无效。");
+        }
         return false;
     }
     if (!request.options.attachToCanvas) return true;
@@ -346,7 +380,8 @@ LayeredMaskPreview LayeredMaskProcessor::preview(
     if (!buildRaster(request, &raster, token, progress, error)) return {};
     result.outputSize = outputSize(request.options);
     result.contentSize = raster.contentSize;
-    result.actualMaximumHeight = raster.actualMaximumHeight;
+    result.actualMaximumHeight = raster.actualMaximumHeight +
+        request.options.baseLayerCount * request.options.layerHeight;
     constexpr double kThumbnailSide = 128.0;
     constexpr double kStackSide = 512.0;
     const double thumbScale = std::min({1.0, kThumbnailSide / result.outputSize.width(),
@@ -354,23 +389,31 @@ LayeredMaskPreview LayeredMaskProcessor::preview(
     const QSize thumbnailSize(std::max(1, qRound(result.outputSize.width() * thumbScale)),
                               std::max(1, qRound(result.outputSize.height() * thumbScale)));
     const SourceTransform transform = sourceTransform(request.options);
-    result.thumbnails.reserve(request.layerCount);
-    for (int layer = 1; layer <= request.layerCount; ++layer) {
+    const int totalLayers = request.options.baseLayerCount + request.layerCount;
+    result.thumbnails.reserve(totalLayers);
+    for (int outputLayer = 1; outputLayer <= totalLayers; ++outputLayer) {
         if (token && token->isCancelled()) return {};
         QImage image(thumbnailSize, QImage::Format_Grayscale8);
-        for (int y = 0; y < image.height(); ++y) {
-            uchar* row = image.scanLine(y);
-            const double outputY = (y + 0.5) * result.outputSize.height() / image.height();
-            for (int x = 0; x < image.width(); ++x) {
-                const double outputX = (x + 0.5) * result.outputSize.width() / image.width();
-                const bool active = activeCoverage(raster, sourcePoint(transform,
-                    outputX, outputY), layer, request.options.transformSampling) >= 0.5;
-                const bool white = request.options.invertMask ? !active : active;
-                row[x] = white ? 255 : 0;
+        if (outputLayer <= request.options.baseLayerCount) {
+            image.fill(outputIsWhite(request.options, true, true) ? 255 : 0);
+        } else {
+            const int sliceLayer = outputLayer - request.options.baseLayerCount;
+            for (int y = 0; y < image.height(); ++y) {
+                uchar* row = image.scanLine(y);
+                const double outputY = (y + 0.5) * result.outputSize.height() / image.height();
+                for (int x = 0; x < image.width(); ++x) {
+                    const double outputX = (x + 0.5) * result.outputSize.width() / image.width();
+                    const SourcePoint point = sourcePoint(transform, outputX, outputY);
+                    const bool active = activeCoverage(raster, point, sliceLayer,
+                        request.options.transformSampling) >= 0.5;
+                    const bool white = outputIsWhite(
+                        request.options, insideSource(raster, point), active);
+                    row[x] = white ? 255 : 0;
+                }
             }
         }
         result.thumbnails.push_back(std::move(image));
-        if (progress) progress({QStringLiteral("生成切片预览"), layer, request.layerCount});
+        if (progress) progress({QStringLiteral("生成切片预览"), outputLayer, totalLayers});
     }
     const double stackScale = std::min({1.0, kStackSide / result.outputSize.width(),
                                         kStackSide / result.outputSize.height()});
@@ -381,7 +424,7 @@ LayeredMaskPreview LayeredMaskProcessor::preview(
     stack->physicalSize = {result.outputSize.width() * request.options.pixelScale,
                            result.outputSize.height() * request.options.pixelScale};
     stack->layerHeight = request.options.layerHeight;
-    stack->layerCount = request.layerCount;
+    stack->layerCount = totalLayers;
     stack->downsampled = stack->gridSize != result.outputSize;
     stack->actualMaximumHeight = result.actualMaximumHeight;
     stack->columnLayers.resize(qsizetype(stack->gridSize.width()) * stack->gridSize.height());
@@ -391,6 +434,7 @@ LayeredMaskPreview LayeredMaskProcessor::preview(
         for (int x = 0; x < stack->gridSize.width(); ++x) {
             const double outputX = (x + 0.5) * result.outputSize.width() / stack->gridSize.width();
             stack->columnLayers[y * stack->gridSize.width() + x] =
+                request.options.baseLayerCount +
                 transformedLevel(raster, request.options, transform, outputX, outputY,
                                  request.layerCount);
         }
@@ -422,37 +466,46 @@ bool LayeredMaskProcessor::exportAll(
     }
     const quint64 stride = ((quint64(finalSize.width()) + 31) / 32) * 4;
     QByteArray packed(static_cast<qsizetype>(stride), '\0');
-    QByteArray inactiveRow(static_cast<qsizetype>(stride), '\0');
+    QByteArray foregroundRow(static_cast<qsizetype>(stride), '\0');
     const int dataBytes = (finalSize.width() + 7) / 8;
-    if (request.options.invertMask) {
+    const auto fillWhite = [dataBytes, width = finalSize.width()](QByteArray* row) {
         for (int byteIndex = 0; byteIndex < dataBytes; ++byteIndex) {
-            const int validBits = std::min(8, finalSize.width() - byteIndex * 8);
-            inactiveRow[byteIndex] = validBits == 8
+            const int validBits = std::min(8, width - byteIndex * 8);
+            (*row)[byteIndex] = validBits == 8
                 ? char(0xff) : char(uchar(0xffu << (8 - validBits)));
         }
-    }
-    const qint64 totalRows = qint64(request.layerCount) * finalSize.height();
+    };
+    if (outputIsWhite(request.options, true, true)) fillWhite(&foregroundRow);
+    const int totalLayers = request.options.baseLayerCount + request.layerCount;
+    const qint64 totalRows = qint64(totalLayers) * finalSize.height();
     if (metrics) metrics->packedPixelCount =
-        qint64(finalSize.width()) * finalSize.height() * request.layerCount;
+        qint64(finalSize.width()) * finalSize.height() * totalLayers;
     qint64 completedRows = 0;
-    for (int layer = 1; layer <= request.layerCount; ++layer) {
+    for (int outputLayer = 1; outputLayer <= totalLayers; ++outputLayer) {
         if (token && token->isCancelled()) return false;
-        QFile file(QDir(outputDirectory).filePath(QString::number(layer) + QStringLiteral(".bmp")));
+        QFile file(QDir(outputDirectory).filePath(
+            QString::number(outputLayer) + QStringLiteral(".bmp")));
         if (!writeHeader(&file, finalSize, fileSize, error)) return false;
+        const bool baseLayer = outputLayer <= request.options.baseLayerCount;
+        const int sliceLayer = outputLayer - request.options.baseLayerCount;
         for (int y = 0; y < finalSize.height(); ++y) {
             if (token && token->isCancelled()) return false;
-            if (layer > outputRaster.maximumLevel) {
-                packed = inactiveRow;
+            if (baseLayer) {
+                packed = foregroundRow;
             } else {
                 const auto* levels = outputRaster.levels.constData() +
                     qsizetype(y) * finalSize.width();
+                const auto* inside = outputRaster.inside.isEmpty() ? nullptr
+                    : outputRaster.inside.constData() + qsizetype(y) * finalSize.width();
+                packed.fill('\0');
                 for (int byteIndex = 0; byteIndex < dataBytes; ++byteIndex) {
                     uchar value = 0;
                     const int firstX = byteIndex * 8;
                     const int validBits = std::min(8, finalSize.width() - firstX);
                     for (int bit = 0; bit < validBits; ++bit) {
-                        const bool active = levels[firstX + bit] >= layer;
-                        const bool white = request.options.invertMask ? !active : active;
+                        const bool active = levels[firstX + bit] >= sliceLayer;
+                        const bool white = outputIsWhite(
+                            request.options, !inside || inside[firstX + bit] != 0, active);
                         if (white) value |= uchar(0x80u >> bit);
                     }
                     packed[byteIndex] = char(value);
@@ -464,7 +517,7 @@ bool LayeredMaskProcessor::exportAll(
             }
             ++completedRows;
             if (progress && (completedRows == totalRows || completedRows % 32 == 0))
-                progress({QStringLiteral("导出第 %1/%2 层").arg(layer).arg(request.layerCount),
+                progress({QStringLiteral("导出第 %1/%2 层").arg(outputLayer).arg(totalLayers),
                           completedRows, totalRows});
         }
         if (!file.flush()) { if (error) *error = file.errorString(); return false; }

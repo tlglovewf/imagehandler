@@ -22,6 +22,7 @@
 #include <QPushButton>
 #include <QPixmap>
 #include <QScrollArea>
+#include <QSet>
 #include <QSizePolicy>
 #include <QSpinBox>
 #include <QSplitter>
@@ -82,6 +83,11 @@ LayeredExportDialog::LayeredExportDialog(QWidget* parent)
     layerHeight_->setDecimals(6); layerHeight_->setRange(0.000001, 1000000.0);
     layerHeight_->setSingleStep(0.1); layerHeight_->setValue(0.1);
     layerHeight_->setSuffix(QStringLiteral(" μm"));
+    zOffset_ = new QDoubleSpinBox;
+    zOffset_->setObjectName(QStringLiteral("layeredExportZOffset"));
+    zOffset_->setDecimals(6); zOffset_->setRange(0.0, 1000000.0);
+    zOffset_->setSingleStep(0.001); zOffset_->setValue(0.001);
+    zOffset_->setSuffix(QStringLiteral(" μm"));
     maximumHeight_ = new QDoubleSpinBox;
     maximumHeight_->setObjectName(QStringLiteral("layeredExportMaximumHeight"));
     maximumHeight_->setDecimals(6); maximumHeight_->setRange(0.000001, 1000000.0);
@@ -90,6 +96,22 @@ LayeredExportDialog::LayeredExportDialog(QWidget* parent)
     layerStrategy_->setObjectName(QStringLiteral("layeredExportLayerStrategy"));
     layerStrategy_->addItem(QStringLiteral("向上取整"), QVariant::fromValue(LayerCountStrategy::RoundUp));
     layerStrategy_->addItem(QStringLiteral("必须整除"), QVariant::fromValue(LayerCountStrategy::RequireExact));
+    jobMoveCommand_ = new QComboBox;
+    jobMoveCommand_->setObjectName(QStringLiteral("layeredExportJobMoveCommand"));
+    jobMoveCommand_->addItem(QStringLiteral("relmove"), QVariant::fromValue(JobMoveCommand::RelMove));
+    jobMoveCommand_->addItem(QStringLiteral("absmove"), QVariant::fromValue(JobMoveCommand::AbsMove));
+    jobMoveCommand_->setCurrentIndex(1);
+    baseLayerCount_ = new QSpinBox;
+    baseLayerCount_->setObjectName(QStringLiteral("layeredExportBaseLayerCount"));
+    baseLayerCount_->setRange(0, kMaximumMaskSliceLayers);
+    baseLayerCount_->setSingleStep(1);
+    baseLayerCount_->setValue(0);
+    exportMultiplier_ = new QDoubleSpinBox;
+    exportMultiplier_->setObjectName(QStringLiteral("layeredExportMultiplier"));
+    exportMultiplier_->setDecimals(6);
+    exportMultiplier_->setRange(0.000001, 1000000.0);
+    exportMultiplier_->setSingleStep(0.01);
+    exportMultiplier_->setValue(13.55);
     outputWidth_ = new QSpinBox;
     outputWidth_->setObjectName(QStringLiteral("layeredExportOutputWidth"));
     outputWidth_->setRange(1, INT_MAX); outputWidth_->setSuffix(QStringLiteral(" px"));
@@ -98,7 +120,7 @@ LayeredExportDialog::LayeredExportDialog(QWidget* parent)
     outputHeight_->setRange(1, INT_MAX); outputHeight_->setSuffix(QStringLiteral(" px"));
     lockAspect_ = new QCheckBox(QStringLiteral("锁定原始宽高比"));
     lockAspect_->setObjectName(QStringLiteral("layeredExportLockAspect")); lockAspect_->setChecked(true);
-    invertMask_ = new QCheckBox(QStringLiteral("黑白反转"));
+    invertMask_ = new QCheckBox(QStringLiteral("切片黑白反转"));
     invertMask_->setObjectName(QStringLiteral("layeredExportInvertMask"));
     reverseY_ = new QCheckBox(QStringLiteral("Y方向相反"));
     reverseY_->setObjectName(QStringLiteral("layeredExportReverseY"));
@@ -110,6 +132,12 @@ LayeredExportDialog::LayeredExportDialog(QWidget* parent)
     canvasHeight_ = new QSpinBox;
     canvasHeight_->setObjectName(QStringLiteral("o_h")); canvasHeight_->setRange(1, INT_MAX);
     canvasHeight_->setValue(1080); canvasHeight_->setSuffix(QStringLiteral(" px"));
+    canvasBackground_ = new QComboBox;
+    canvasBackground_->setObjectName(QStringLiteral("layeredExportCanvasBackground"));
+    canvasBackground_->addItem(QStringLiteral("白色"), true);
+    canvasBackground_->addItem(QStringLiteral("黑色"), false);
+    invertCanvas_ = new QCheckBox(QStringLiteral("大图黑白颠倒"));
+    invertCanvas_->setObjectName(QStringLiteral("layeredExportInvertCanvas"));
     rotationDegrees_ = new QDoubleSpinBox;
     rotationDegrees_->setObjectName(QStringLiteral("rot_ang")); rotationDegrees_->setDecimals(3);
     rotationDegrees_->setRange(-360.0, 360.0); rotationDegrees_->setSuffix(QStringLiteral(" °"));
@@ -119,22 +147,31 @@ LayeredExportDialog::LayeredExportDialog(QWidget* parent)
     scaleY_ = new QDoubleSpinBox;
     scaleY_->setObjectName(QStringLiteral("scale_y")); scaleY_->setDecimals(6);
     scaleY_->setRange(0.000001, 1000.0); scaleY_->setValue(1.0);
+    mirrorX_ = new QCheckBox(QStringLiteral("X 方向镜像"));
+    mirrorX_->setObjectName(QStringLiteral("layeredExportMirrorX"));
     transformSampling_ = new QComboBox;
     transformSampling_->setObjectName(QStringLiteral("layeredExportTransformSampling"));
     transformSampling_->addItem(QStringLiteral("最近邻"), QVariant::fromValue(BinaryTransformSampling::Nearest));
     transformSampling_->addItem(QStringLiteral("平滑后阈值"), QVariant::fromValue(BinaryTransformSampling::SmoothThreshold));
     form->addRow(QStringLiteral("层切高"), layerHeight_);
+    form->addRow(QStringLiteral("Z 偏移"), zOffset_);
     form->addRow(QStringLiteral("最大高度"), maximumHeight_);
     form->addRow(QStringLiteral("层数策略"), layerStrategy_);
+    form->addRow(QStringLiteral("Job 移动命令"), jobMoveCommand_);
+    form->addRow(QStringLiteral("底座数量"), baseLayerCount_);
+    form->addRow(QStringLiteral("导出倍率"), exportMultiplier_);
     form->addRow(QStringLiteral("标准块输出宽度"), outputWidth_);
     form->addRow(QStringLiteral("标准块输出高度"), outputHeight_);
     form->addRow(lockAspect_); form->addRow(invertMask_); form->addRow(reverseY_);
     form->addRow(attachToCanvas_);
     form->addRow(QStringLiteral("导出底图宽度"), canvasWidth_);
     form->addRow(QStringLiteral("导出底图高度"), canvasHeight_);
+    form->addRow(QStringLiteral("大图底色"), canvasBackground_);
+    form->addRow(invertCanvas_);
     form->addRow(QStringLiteral("旋转角度"), rotationDegrees_);
     form->addRow(QStringLiteral("X 缩放"), scaleX_);
     form->addRow(QStringLiteral("Y 缩放"), scaleY_);
+    form->addRow(mirrorX_);
     form->addRow(QStringLiteral("旋转采样"), transformSampling_);
     settingsLayout->addLayout(form);
     summaryLabel_ = new QLabel;
@@ -211,16 +248,23 @@ LayeredExportDialog::LayeredExportDialog(QWidget* parent)
     connect(directoryButton_, &QPushButton::clicked, this, &LayeredExportDialog::chooseDirectory);
     auto changed = [this] { updateValidation(); schedulePreview(); };
     connect(layerHeight_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [changed](double){changed();});
+    connect(zOffset_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [changed](double){changed();});
     connect(maximumHeight_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [changed](double){changed();});
     connect(layerStrategy_, qOverload<int>(&QComboBox::currentIndexChanged), this, [changed](int){changed();});
+    connect(baseLayerCount_, qOverload<int>(&QSpinBox::valueChanged), this, [changed](int){changed();});
+    connect(exportMultiplier_, qOverload<double>(&QDoubleSpinBox::valueChanged),
+            this, [this](double){ updateDimensionsFromMultiplier(); });
     connect(outputWidth_, qOverload<int>(&QSpinBox::valueChanged), this, [this]{ updateAspectFromWidth(); schedulePreview(); });
     connect(outputHeight_, qOverload<int>(&QSpinBox::valueChanged), this, [this]{ updateAspectFromHeight(); schedulePreview(); });
     connect(lockAspect_, &QCheckBox::toggled, this, [this](bool checked){if(checked)updateAspectFromWidth();else updateValidation();schedulePreview();});
     connect(invertMask_, &QCheckBox::toggled, this, [changed](bool){changed();});
-    connect(attachToCanvas_, &QCheckBox::toggled, this, [this, changed](bool checked){for(auto* widget:std::initializer_list<QWidget*>{canvasWidth_,canvasHeight_,rotationDegrees_,scaleX_,scaleY_,transformSampling_})widget->setEnabled(checked&&!tasks_->isBusy());changed();});
+    connect(attachToCanvas_, &QCheckBox::toggled, this, [this, changed](bool checked){for(auto* widget:std::initializer_list<QWidget*>{canvasWidth_,canvasHeight_,canvasBackground_,invertCanvas_,rotationDegrees_,scaleX_,scaleY_,mirrorX_,transformSampling_})widget->setEnabled(checked&&!tasks_->isBusy());changed();});
     for(auto* spin:{canvasWidth_,canvasHeight_})connect(spin,qOverload<int>(&QSpinBox::valueChanged),this,[changed](int){changed();});
     for(auto* spin:{rotationDegrees_,scaleX_,scaleY_})connect(spin,qOverload<double>(&QDoubleSpinBox::valueChanged),this,[changed](double){changed();});
     connect(transformSampling_,qOverload<int>(&QComboBox::currentIndexChanged),this,[changed](int){changed();});
+    connect(canvasBackground_,qOverload<int>(&QComboBox::currentIndexChanged),this,[changed](int){changed();});
+    connect(invertCanvas_,&QCheckBox::toggled,this,[changed](bool){changed();});
+    connect(mirrorX_,&QCheckBox::toggled,this,[changed](bool){changed();});
     connect(exportButton_, &QPushButton::clicked, this, &LayeredExportDialog::startPreflight);
     connect(cancelTaskButton_, &QPushButton::clicked, tasks_, &TaskManager::cancel);
     connect(closeButton_, &QPushButton::clicked, this, &QDialog::reject);
@@ -244,16 +288,47 @@ LayeredExportDialog::LayeredExportDialog(QWidget* parent)
     setBusy(false); updateValidation();
 }
 
-void LayeredExportDialog::configure(const ImageDocumentPtr& document,const SegmentationResult& segmentation,TraversalMode traversalMode,double pixelScale,double maximumHeight,bool invertHeight,bool reverseY,const QString& initialDirectory,const QPoint& activeCell){document_=document;segmentation_=segmentation;traversalMode_=traversalMode;pixelScale_=pixelScale;invertHeight_=invertHeight;maximumHeight_->setValue(maximumHeight);outputWidth_->setValue(std::max(1,segmentation.settings.cellWidth));outputHeight_->setValue(std::max(1,segmentation.settings.cellHeight));layerHeight_->setValue(0.1);layerStrategy_->setCurrentIndex(0);lockAspect_->setChecked(true);invertMask_->setChecked(false);reverseY_->setChecked(reverseY);attachToCanvas_->setChecked(true);canvasWidth_->setValue(1920);canvasHeight_->setValue(1080);rotationDegrees_->setValue(0.0);scaleX_->setValue(1.0);scaleY_->setValue(1.0);transformSampling_->setCurrentIndex(0);const bool valid=activeCell.x()>=0&&activeCell.y()>=0&&activeCell.x()<segmentation.columns&&activeCell.y()<segmentation.rows;if(valid)previewCell_=activeCell;else{const auto order=SplitExporter::traversal(segmentation.rows,segmentation.columns,traversalMode);previewCell_=order.empty()?QPoint(-1,-1):order.front();}const qint64 index=SplitExporter::traversalIndex(segmentation.rows,segmentation.columns,traversalMode,previewCell_.y(),previewCell_.x());previewElementLabel_->setText(QStringLiteral("预览块：%1（行 %2，列 %3）").arg(index).arg(previewCell_.y()+1).arg(previewCell_.x()+1));setOutputDirectory(initialDirectory);statusLabel_->setText(QStringLiteral("就绪"));updateValidation();schedulePreview();}
+void LayeredExportDialog::configure(const ImageDocumentPtr& document,const SegmentationResult& segmentation,TraversalMode traversalMode,double pixelScale,double maximumHeight,bool invertHeight,bool reverseY,const QString& initialDirectory,const QPoint& activeCell,const QVector<QPoint>& selectedCells){document_=document;segmentation_=segmentation;traversalMode_=traversalMode;pixelScale_=pixelScale;invertHeight_=invertHeight;selectedCells_=selectedCells.size()>1?selectedCells:QVector<QPoint>{};maximumHeight_->setValue(maximumHeight);layerHeight_->setValue(0.1);zOffset_->setValue(0.001);layerStrategy_->setCurrentIndex(0);jobMoveCommand_->setCurrentIndex(1);baseLayerCount_->setValue(0);lockAspect_->setChecked(true);exportMultiplier_->setValue(13.55);updateDimensionsFromMultiplier();invertMask_->setChecked(false);reverseY_->setChecked(reverseY);attachToCanvas_->setChecked(true);canvasWidth_->setValue(1920);canvasHeight_->setValue(1080);canvasBackground_->setCurrentIndex(0);invertCanvas_->setChecked(false);rotationDegrees_->setValue(0.0);scaleX_->setValue(1.0);scaleY_->setValue(1.0);mirrorX_->setChecked(false);transformSampling_->setCurrentIndex(0);const bool valid=activeCell.x()>=0&&activeCell.y()>=0&&activeCell.x()<segmentation.columns&&activeCell.y()<segmentation.rows;if(valid)previewCell_=activeCell;else{const auto order=SplitExporter::traversal(segmentation.rows,segmentation.columns,traversalMode);previewCell_=order.empty()?QPoint(-1,-1):order.front();}const qint64 index=SplitExporter::traversalIndex(segmentation.rows,segmentation.columns,traversalMode,previewCell_.y(),previewCell_.x());previewElementLabel_->setText(QStringLiteral("预览块：%1（行 %2，列 %3）").arg(index).arg(previewCell_.y()+1).arg(previewCell_.x()+1));setOutputDirectory(initialDirectory);statusLabel_->setText(QStringLiteral("就绪"));updateValidation();schedulePreview();}
 void LayeredExportDialog::setElementGrouping(const ElementGroupingResult& grouping){grouping_=grouping.matches(document_,segmentation_)?grouping:ElementGroupingResult{};updateValidation();}
 bool LayeredExportDialog::reverseY()const{return reverseY_->isChecked();} QString LayeredExportDialog::outputDirectory()const{return directory_;}
 void LayeredExportDialog::setOutputDirectory(const QString& directory){directory_=directory.isEmpty()?QString():QFileInfo(directory).absoluteFilePath();directoryLabel_->setText(directory_.isEmpty()?QStringLiteral("未选择"):directory_);directoryLabel_->setToolTip(directory_);updateValidation();}
 void LayeredExportDialog::chooseDirectory(){const QString selected=QFileDialog::getExistingDirectory(this,QStringLiteral("选择导出目录"),directory_);if(!selected.isEmpty())setOutputDirectory(selected);}
 void LayeredExportDialog::updateAspectFromWidth(){if(updatingDimensions_)return;if(lockAspect_->isChecked()&&segmentation_.settings.cellWidth>0){updatingDimensions_=true;outputHeight_->setValue(static_cast<int>(std::clamp<qint64>(qRound64(double(outputWidth_->value())*segmentation_.settings.cellHeight/segmentation_.settings.cellWidth),1,INT_MAX)));updatingDimensions_=false;}updateValidation();}
 void LayeredExportDialog::updateAspectFromHeight(){if(updatingDimensions_)return;if(lockAspect_->isChecked()&&segmentation_.settings.cellHeight>0){updatingDimensions_=true;outputWidth_->setValue(static_cast<int>(std::clamp<qint64>(qRound64(double(outputHeight_->value())*segmentation_.settings.cellWidth/segmentation_.settings.cellHeight),1,INT_MAX)));updatingDimensions_=false;}updateValidation();}
-LayeredPackageRequest LayeredExportDialog::currentRequest()const{LayeredPackageOptions options{pixelScale_,maximumHeight_->value(),layerHeight_->value(),outputWidth_->value(),outputHeight_->value(),invertHeight_,invertMask_->isChecked(),reverseY_->isChecked(),layerStrategy_->currentData().value<LayerCountStrategy>()};options.attachToCanvas=attachToCanvas_->isChecked();options.canvasWidth=canvasWidth_->value();options.canvasHeight=canvasHeight_->value();options.rotationDegrees=options.attachToCanvas?rotationDegrees_->value():0.0;options.scaleX=options.attachToCanvas?scaleX_->value():1.0;options.scaleY=options.attachToCanvas?scaleY_->value():1.0;options.transformSampling=options.attachToCanvas?transformSampling_->currentData().value<BinaryTransformSampling>():BinaryTransformSampling::Nearest;return{directory_,document_,segmentation_,traversalMode_,options,true,grouping_};}
+void LayeredExportDialog::updateDimensionsFromMultiplier(){
+    // Both UI values have six decimal places. Keep their product in integer decimal
+    // arithmetic so exact pixel boundaries do not gain an extra pixel from FP error.
+    constexpr qint64 decimalScale = 1000000;
+    const qint64 multiplierUnits = qRound64(exportMultiplier_->value() * decimalScale);
+    const qint64 pixelScaleUnits = qRound64(pixelScale_ * decimalScale);
+    const auto scaled = [multiplierUnits, pixelScaleUnits](int pixels) {
+        const qint64 sourcePixels = std::max(1, pixels);
+        const qint64 firstProductRemainder = sourcePixels * (multiplierUnits % decimalScale);
+        const qint64 firstWhole = sourcePixels * (multiplierUnits / decimalScale)
+                                  + firstProductRemainder / decimalScale;
+        const qint64 firstRemainder = firstProductRemainder % decimalScale;
+        constexpr qint64 maximumProduct = qint64(INT_MAX) * decimalScale;
+        if (pixelScaleUnits <= 0) return 1;
+        if (firstWhole > maximumProduct / pixelScaleUnits) return INT_MAX;
+        const qint64 secondProduct = firstWhole * pixelScaleUnits;
+        const qint64 remainder = (secondProduct % decimalScale) * decimalScale
+                                 + firstRemainder * pixelScaleUnits;
+        const qint64 denominator = decimalScale * decimalScale;
+        const qint64 result = secondProduct / decimalScale + remainder / denominator
+                              + (remainder % denominator != 0);
+        return static_cast<int>(std::clamp<qint64>(
+            result, 1, INT_MAX));
+    };
+    const QSignalBlocker widthBlocker(outputWidth_);
+    const QSignalBlocker heightBlocker(outputHeight_);
+    outputWidth_->setValue(scaled(segmentation_.settings.cellWidth));
+    outputHeight_->setValue(scaled(segmentation_.settings.cellHeight));
+    updateValidation();
+    schedulePreview();
+}
+LayeredPackageRequest LayeredExportDialog::currentRequest()const{LayeredPackageOptions options{pixelScale_,maximumHeight_->value(),layerHeight_->value(),outputWidth_->value(),outputHeight_->value(),invertHeight_,invertMask_->isChecked(),reverseY_->isChecked(),layerStrategy_->currentData().value<LayerCountStrategy>()};options.attachToCanvas=attachToCanvas_->isChecked();options.canvasWidth=canvasWidth_->value();options.canvasHeight=canvasHeight_->value();options.rotationDegrees=options.attachToCanvas?rotationDegrees_->value():0.0;options.scaleX=options.attachToCanvas?scaleX_->value():1.0;options.scaleY=options.attachToCanvas?scaleY_->value():1.0;options.mirrorX=options.attachToCanvas&&mirrorX_->isChecked();options.exportMultiplier=exportMultiplier_->value();options.transformSampling=options.attachToCanvas?transformSampling_->currentData().value<BinaryTransformSampling>():BinaryTransformSampling::Nearest;options.baseLayerCount=baseLayerCount_->value();options.canvasBackgroundWhite=canvasBackground_->currentData().toBool();options.invertCanvas=options.attachToCanvas&&invertCanvas_->isChecked();options.zOffset=zOffset_->value();options.jobMoveCommand=jobMoveCommand_->currentText()==QStringLiteral("absmove")?JobMoveCommand::AbsMove:JobMoveCommand::RelMove;return{directory_,document_,segmentation_,traversalMode_,options,true,grouping_,selectedCells_};}
 LayeredMaskRequest LayeredExportDialog::currentPreviewRequest()const{const auto package=currentRequest();const int layers=LayeredPackageExporter::layerCount(package.options);const ImageRegion region=document_?segmentationCellRegion(segmentation_,document_->metadata.width,document_->metadata.height,previewCell_.y(),previewCell_.x()):ImageRegion{};return{document_,region,{segmentation_.settings.cellWidth,segmentation_.settings.cellHeight},package.options,layers,previewRevision_};}
-void LayeredExportDialog::updateValidation(){QString error;const auto request=currentRequest();const int layers=LayeredPackageExporter::layerCount(request.options,&error);const qint64 cells=qint64(segmentation_.rows)*segmentation_.columns;const qint64 groups=request.grouping.matches(document_,segmentation_)?request.grouping.groups.size():cells;if(error.isEmpty()){const bool valid=LayeredMaskProcessor::validate(currentPreviewRequest(),&error);Q_UNUSED(valid);}if(!document_||cells<=0)error=QStringLiteral("没有可导出的分割结果。");else if(directory_.isEmpty())error=QStringLiteral("请选择导出目录。");else if(!QFileInfo(directory_).isDir())error=QStringLiteral("导出目录不存在或不可用。");if(error.isEmpty()){const QSize size=LayeredMaskProcessor::outputSize(request.options);summaryLabel_->setText(QStringLiteral("%1 个分块归为 %2 组 × %3 层 = %4 个 1-bit BMP；输出 %5×%6；pixel2phy %7 μm/px").arg(cells).arg(groups).arg(layers).arg(groups*layers).arg(size.width()).arg(size.height()).arg(pixelScale_,0,'g',12));}else summaryLabel_->setText(error);exportButton_->setEnabled(!tasks_->isBusy()&&error.isEmpty());}
+void LayeredExportDialog::updateValidation(){QString error;const auto request=currentRequest();const int layers=LayeredPackageExporter::layerCount(request.options,&error);const int totalLayers=layers+request.options.baseLayerCount;const qint64 allCells=qint64(segmentation_.rows)*segmentation_.columns;const bool selectedOnly=selectedCells_.size()>1;qint64 cells=selectedOnly?0:allCells;QSet<qint64> selectedCellIds;QSet<int> selectedGroupIds;if(selectedOnly){for(const QPoint& cell:selectedCells_){if(cell.x()<0||cell.y()<0||cell.x()>=segmentation_.columns||cell.y()>=segmentation_.rows)continue;const qint64 cellId=qint64(cell.y())*segmentation_.columns+cell.x();if(selectedCellIds.contains(cellId))continue;selectedCellIds.insert(cellId);++cells;if(request.grouping.matches(document_,segmentation_))selectedGroupIds.insert(request.grouping.groupIdAt(cell.y(),cell.x()));}}const qint64 groups=request.grouping.matches(document_,segmentation_)?(selectedOnly?selectedGroupIds.size():request.grouping.groups.size()):cells;if(error.isEmpty()){const bool valid=LayeredMaskProcessor::validate(currentPreviewRequest(),&error);Q_UNUSED(valid);}if(!document_||cells<=0)error=QStringLiteral("没有可导出的分割结果。");else if(directory_.isEmpty())error=QStringLiteral("请选择导出目录。");else if(!QFileInfo(directory_).isDir())error=QStringLiteral("导出目录不存在或不可用。");if(error.isEmpty()){const QSize size=LayeredMaskProcessor::outputSize(request.options);const QString scope=selectedOnly?QStringLiteral("仅导出已选 %1 个分块").arg(cells):QStringLiteral("导出全部 %1 个分块").arg(cells);summaryLabel_->setText(QStringLiteral("%1，归为 %2 组；原切片 %3 层 + 底座 %4 层 = 每组 %5 层，共 %6 个 1-bit BMP；输出 %7×%8；pixel2phy %9 μm/px").arg(scope).arg(groups).arg(layers).arg(request.options.baseLayerCount).arg(totalLayers).arg(groups*totalLayers).arg(size.width()).arg(size.height()).arg(pixelScale_,0,'g',12));}else summaryLabel_->setText(error);exportButton_->setEnabled(!tasks_->isBusy()&&error.isEmpty());}
 void LayeredExportDialog::schedulePreview(){if(!document_||tasks_->isBusy())return;++previewRevision_;if(previewTasks_->isBusy()){previewPending_=true;previewTasks_->cancel();return;}previewTimer_->start();}
 void LayeredExportDialog::startPreview(){if(tasks_->isBusy())return;if(previewTasks_->isBusy()){previewPending_=true;previewTasks_->cancel();return;}const LayeredMaskRequest request=currentPreviewRequest();QString validation;if(!LayeredMaskProcessor::validate(request,&validation)){previewStatusLabel_->setText(validation);previewLayers_->clear();stackView_->clear();return;}previewStatusLabel_->setText(QStringLiteral("生成预览…"));previewTasks_->start(QStringLiteral("生成分层导出预览"),[request](const auto& token,const auto& progress,QString* error){return QVariant::fromValue(LayeredMaskProcessor::preview(request,token,progress,error));});}
 void LayeredExportDialog::applyPreview(const LayeredMaskPreview& preview){if(!preview.stackPreview)return;previewLayers_->clear();for(int i=0;i<preview.thumbnails.size();++i)previewLayers_->addItem(new QListWidgetItem(QIcon(QPixmap::fromImage(preview.thumbnails[i])),QStringLiteral("%1.bmp").arg(i+1)));stackView_->setPreview(preview.stackPreview);updatePreviewZScale();if(previewLayers_->count()>0)previewLayers_->setCurrentRow(0);previewStatusLabel_->setText(QStringLiteral("预览就绪：内容 %1×%2，最终输出 %3×%4，共 %5 层").arg(preview.contentSize.width()).arg(preview.contentSize.height()).arg(preview.outputSize.width()).arg(preview.outputSize.height()).arg(preview.thumbnails.size()));}
@@ -263,5 +338,5 @@ void LayeredExportDialog::startPreflight(){if(tasks_->isBusy())return;const auto
 void LayeredExportDialog::showPreflight(const ExportPreflightResult& result){QMessageBox box(this);box.setObjectName(QStringLiteral("layeredExportPreflightDialog"));box.setWindowTitle(result.valid?QStringLiteral("确认分层导出"):QStringLiteral("导出预检未通过"));box.setIcon(result.valid?(result.conflictCount>0?QMessageBox::Warning:QMessageBox::Question):QMessageBox::Critical);box.setText(QStringLiteral("BMP 文件：%1 个\n命名：%2 — %3\n预计输出：%4").arg(result.bmpFileCount).arg(result.firstOutput,result.lastOutput).arg(formatStorageSize(result.estimatedTotalBytes)));QStringList details=result.warnings;details.prepend(QStringLiteral("所需空间（含安全余量）：%1").arg(formatStorageSize(result.requiredBytes)));details<<QStringLiteral("已有受管目标：%1 个").arg(result.conflictCount);if(!result.blockingError.isEmpty())details<<result.blockingError;box.setInformativeText(details.join('\n'));if(!result.conflictSamples.isEmpty())box.setDetailedText(result.conflictSamples.join('\n'));if(!result.valid){box.addButton(QMessageBox::Close);box.exec();return;}auto* start=box.addButton(QStringLiteral("开始导出"),QMessageBox::AcceptRole);box.addButton(QStringLiteral("取消"),QMessageBox::RejectRole);if(result.conflictCount>0){auto* overwrite=new QCheckBox(QStringLiteral("确认覆盖上述 %1 个受管目标").arg(result.conflictCount),&box);overwrite->setObjectName(QStringLiteral("layeredExportOverwriteCheck"));box.setCheckBox(overwrite);start->setEnabled(false);connect(overwrite,&QCheckBox::toggled,start,&QWidget::setEnabled);}box.exec();if(box.clickedButton()==start)startExport({result.conflictCount>0,true,result.targetFingerprint});}
 void LayeredExportDialog::startExport(const ExportExecutionOptions& execution){const auto request=currentRequest();action_=Action::Export;statusLabel_->setText(QStringLiteral("准备导出"));if(!tasks_->start(QStringLiteral("导出分层包"),[request,execution](const auto& token,const auto& progress,QString* error){return LayeredPackageExporter::exportPackage(request,execution,token,progress,error)?QVariant(true):QVariant{};}))action_=Action::None;}
 void LayeredExportDialog::setProgress(const TaskProgress& progress){statusLabel_->setText(progress.phase);if(progress.total<=0){progressBar_->setRange(0,0);percentLabel_->setText(QStringLiteral("--"));return;}const double ratio=std::clamp(double(progress.completed)/progress.total,0.0,1.0);progressBar_->setRange(0,1000);progressBar_->setValue(static_cast<int>(std::lround(ratio*1000.0)));percentLabel_->setText(QStringLiteral("%1%").arg(qRound(ratio*100.0)));}
-void LayeredExportDialog::setBusy(bool busy){directoryButton_->setEnabled(!busy);for(auto* widget:std::initializer_list<QWidget*>{layerHeight_,maximumHeight_,layerStrategy_,outputWidth_,outputHeight_,lockAspect_,invertMask_,reverseY_,attachToCanvas_})widget->setEnabled(!busy);const bool transformEnabled=!busy&&attachToCanvas_->isChecked();for(auto* widget:std::initializer_list<QWidget*>{canvasWidth_,canvasHeight_,rotationDegrees_,scaleX_,scaleY_,transformSampling_})widget->setEnabled(transformEnabled);closeButton_->setEnabled(!busy);cancelTaskButton_->setEnabled(busy);progressBar_->setVisible(busy);percentLabel_->setVisible(busy);updateValidation();}
+void LayeredExportDialog::setBusy(bool busy){directoryButton_->setEnabled(!busy);for(auto* widget:std::initializer_list<QWidget*>{layerHeight_,zOffset_,maximumHeight_,layerStrategy_,jobMoveCommand_,baseLayerCount_,exportMultiplier_,outputWidth_,outputHeight_,lockAspect_,invertMask_,reverseY_,attachToCanvas_})widget->setEnabled(!busy);const bool transformEnabled=!busy&&attachToCanvas_->isChecked();for(auto* widget:std::initializer_list<QWidget*>{canvasWidth_,canvasHeight_,canvasBackground_,invertCanvas_,rotationDegrees_,scaleX_,scaleY_,mirrorX_,transformSampling_})widget->setEnabled(transformEnabled);closeButton_->setEnabled(!busy);cancelTaskButton_->setEnabled(busy);progressBar_->setVisible(busy);percentLabel_->setVisible(busy);updateValidation();}
 void LayeredExportDialog::closeEvent(QCloseEvent* event){if(tasks_->isBusy()){tasks_->cancel();event->ignore();return;}previewTasks_->cancel();event->accept();}
