@@ -292,13 +292,14 @@ void LargeImageView::paintEvent(QPaintEvent*) {
             QHash<int,QSizeF> badgeSizes;
             for(int r=firstVisibleRow;r<=lastVisibleRow;++r)for(int c=firstVisibleColumn;c<=lastVisibleColumn;++c) {
                 const int groupId=grouping_.groupIdAt(r,c);
-                if(groupId<0)continue;
+                const bool background=grouping_.isBackgroundAt(r,c);
+                if(groupId<0&&!background)continue;
                 const ImageRegion cell=segmentationCellRegion(
                     segmentation_,document_->metadata.width,document_->metadata.height,r,c);
                 if(!cell.isValid())continue;
                 const QRectF cellRect(baseX+cell.x*zoom_,baseY+cell.y*zoom_,
                                       cell.width*zoom_,cell.height*zoom_);
-                const QString label=QString::number(groupId+1);
+                const QString label=background?QStringLiteral("x"):QString::number(groupId+1);
                 auto badgeIt=badgeSizes.constFind(groupId);
                 QSizeF badgeSize;
                 if(badgeIt==badgeSizes.cend()) {

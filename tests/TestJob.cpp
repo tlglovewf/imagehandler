@@ -23,6 +23,7 @@ private Q_SLOTS:
     void initTestCase();
     void cleanupTestCase();
     void jsonAndAldlUseSameParser();
+    void absoluteMoveUsesWhere();
     void validatesStructureAndIds();
     void supportsEscapesAndUnknownFields();
     void cancellationDoesNotReturnDocument();
@@ -31,7 +32,7 @@ private Q_SLOTS:
     void projectedSpacingEnablesRangeLabels();
     void rayQueryPrioritizesNearestPoints();
     void vulkanScreenCoordinatesKeepYDirection();
-    void guidesUsePointZeroAndFullBounds();
+    void guidesUseCoordinateOriginAndFullBounds();
     void terrainCameraIsGroundOrientedAndClamped();
     void terrainCameraContinuousOrbitCrossesPoles();
     void terrainCameraPanNearHorizonStaysBounded();
@@ -114,6 +115,16 @@ void TestJob::jsonAndAldlUseSameParser() {
     QCOMPARE(json->points[0].position, (JobCoordinate{1.5, -2.0, 3.0}));
     QCOMPARE(json->points[1].placeId, qint64(1));
     QVERIFY(!json->isLinked());
+}
+
+void TestJob::absoluteMoveUsesWhere() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    const QString path = writeJob(directory, QStringLiteral("absolute.json"),
+        QByteArrayLiteral(R"({"models":[{"label":"0","path":"0"}],"commands":[{"command":"absmove","where":[1.5,-2,3]},{"command":"place","id":0}]})"));
+    QString error;
+    const auto document = JobFileLoader::load(path, std::make_shared<CancellationToken>(), {}, &error);
+    QVERIFY2(document, qPrintable(error));
+    QCOMPARE(document->points[0].position, (JobCoordinate{1.5, -2.0, 3.0}));
 }
 
 void TestJob::validatesStructureAndIds() {
@@ -493,7 +504,7 @@ void TestJob::vulkanScreenCoordinatesKeepYDirection() {
     QVERIFY((intersection - QVector3D(-0.5F, -0.5F, 0.5F)).length() < 0.0001F);
 }
 
-void TestJob::guidesUsePointZeroAndFullBounds() {
+void TestJob::guidesUseCoordinateOriginAndFullBounds() {
     JobDocument document;
     document.points = {
         {2, {30.0, -40.0, 4.0}, 5},
@@ -504,13 +515,13 @@ void TestJob::guidesUsePointZeroAndFullBounds() {
     const JobCoordinate floatingOrigin = document.bounds.center();
     const JobGuideGeometry guides = JobPreviewMath::guideGeometry(document, floatingOrigin);
     QVERIFY(guides.valid);
-    QCOMPARE(guides.pointZero, document.points[1].position.relativeTo(floatingOrigin));
-    QCOMPARE(guides.xStart.x(), document.bounds.minimum.relativeTo(floatingOrigin).x());
+    QCOMPARE(guides.coordinateOrigin, JobCoordinate{}.relativeTo(floatingOrigin));
+    QCOMPARE(guides.xStart.x(), JobCoordinate{}.relativeTo(floatingOrigin).x());
     QCOMPARE(guides.xEnd.x(), document.bounds.maximum.relativeTo(floatingOrigin).x());
-    QCOMPARE(guides.xStart.y(), guides.pointZero.y());
+    QCOMPARE(guides.xStart.y(), guides.coordinateOrigin.y());
     QCOMPARE(guides.yStart.y(), document.bounds.minimum.relativeTo(floatingOrigin).y());
-    QCOMPARE(guides.yEnd.y(), document.bounds.maximum.relativeTo(floatingOrigin).y());
-    QCOMPARE(guides.yStart.x(), guides.pointZero.x());
+    QCOMPARE(guides.yEnd.y(), JobCoordinate{}.relativeTo(floatingOrigin).y());
+    QCOMPARE(guides.yStart.x(), guides.coordinateOrigin.x());
     QCOMPARE(guides.xDimension, 20.0);
     QCOMPARE(guides.yDimension, 30.0);
 }

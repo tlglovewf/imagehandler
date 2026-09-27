@@ -96,19 +96,15 @@ JobGuideGeometry JobPreviewMath::guideGeometry(const JobDocument& document,
                                                const JobCoordinate& floatingOrigin) {
     JobGuideGeometry geometry;
     if (!document.bounds.valid || document.points.empty()) return geometry;
-    auto zero = std::find_if(document.points.begin(), document.points.end(),
-                             [](const JobPoint& point) { return point.placementId == 0; });
-    if (zero == document.points.end())
-        zero = std::find_if(document.points.begin(), document.points.end(),
-                            [](const JobPoint& point) { return point.placeId == 0; });
-    if (zero == document.points.end()) return geometry;
-    geometry.pointZero = zero->position.relativeTo(floatingOrigin);
-    geometry.minimum = document.bounds.minimum.relativeTo(floatingOrigin);
-    geometry.maximum = document.bounds.maximum.relativeTo(floatingOrigin);
-    geometry.xStart = {geometry.minimum.x(), geometry.pointZero.y(), geometry.pointZero.z()};
-    geometry.xEnd = {geometry.maximum.x(), geometry.pointZero.y(), geometry.pointZero.z()};
-    geometry.yStart = {geometry.pointZero.x(), geometry.minimum.y(), geometry.pointZero.z()};
-    geometry.yEnd = {geometry.pointZero.x(), geometry.maximum.y(), geometry.pointZero.z()};
+    JobBounds displayBounds = document.bounds;
+    displayBounds.include({0.0, 0.0, 0.0});
+    geometry.coordinateOrigin = JobCoordinate{}.relativeTo(floatingOrigin);
+    geometry.minimum = displayBounds.minimum.relativeTo(floatingOrigin);
+    geometry.maximum = displayBounds.maximum.relativeTo(floatingOrigin);
+    geometry.xStart = {geometry.minimum.x(), geometry.coordinateOrigin.y(), geometry.coordinateOrigin.z()};
+    geometry.xEnd = {geometry.maximum.x(), geometry.coordinateOrigin.y(), geometry.coordinateOrigin.z()};
+    geometry.yStart = {geometry.coordinateOrigin.x(), geometry.minimum.y(), geometry.coordinateOrigin.z()};
+    geometry.yEnd = {geometry.coordinateOrigin.x(), geometry.maximum.y(), geometry.coordinateOrigin.z()};
     const JobCoordinate size = document.bounds.size();
     geometry.xDimension = std::abs(size.x);
     geometry.yDimension = std::abs(size.y);

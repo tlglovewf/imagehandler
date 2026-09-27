@@ -9,6 +9,8 @@
 #include <QtTypes>
 #include <functional>
 
+inline constexpr int kBackgroundElementGroupId = -1;
+
 struct ElementGroup {
     int id = -1;
     QPoint representativeCell{-1, -1};
@@ -27,6 +29,8 @@ struct ElementGroupingResult {
     bool valid = false;
 
     [[nodiscard]] int groupIdAt(int row, int column) const noexcept;
+    [[nodiscard]] bool isBackgroundAt(int row, int column) const noexcept;
+    [[nodiscard]] qint64 backgroundCellCount() const noexcept;
     [[nodiscard]] QColor colorAt(int row, int column) const;
     [[nodiscard]] bool matches(const ImageDocumentPtr& document,
                                const SegmentationResult& segmentation) const noexcept;
@@ -80,6 +84,10 @@ public:
         const ImageDocumentPtr& document, const SegmentationResult& segmentation,
         const ElementComparisonStrategy& strategy, const CancellationTokenPtr& token,
         const Progress& progress, QString* error);
+    [[nodiscard]] static bool findPureBackgroundCells(
+        const ImageDocumentPtr& document, const SegmentationResult& segmentation,
+        QVector<bool>* backgroundByCell, const CancellationTokenPtr& token = {},
+        const Progress& progress = {}, QString* error = nullptr);
 };
 
 [[nodiscard]] QColor elementGroupColor(int groupId);

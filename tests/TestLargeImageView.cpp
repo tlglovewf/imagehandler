@@ -253,6 +253,13 @@ void TestLargeImageView::groupedCellsShowStableAdaptiveGroupNumbers() {
     QCOMPARE(view.grab().toImage().copy(firstBadge),differentGroups.copy(firstBadge));
     QCOMPARE(view.grab().toImage().copy(secondBadge),differentGroups.copy(secondBadge));
 
+    grouping.groupByCell={kBackgroundElementGroupId,0};
+    grouping.groups={{0,QPoint(1,0),{QPoint(1,0)},sharedColor}};
+    view.setElementGrouping(grouping);
+    const QImage backgroundLabel=view.grab().toImage();
+    QVERIFY(backgroundLabel.copy(firstBadge)!=differentGroups.copy(firstBadge));
+    QVERIFY(backgroundLabel.copy(firstBadge)!=backgroundLabel.copy(secondBadge));
+
     view.clearElementGrouping();
     const QImage cleared=view.grab().toImage();
     QVERIFY(cleared.copy(firstBadge)!=differentGroups.copy(firstBadge));

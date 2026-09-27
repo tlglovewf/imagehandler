@@ -11,7 +11,7 @@
 #include <span>
 
 struct JobGuideGeometry {
-    QVector3D pointZero;
+    QVector3D coordinateOrigin;
     QVector3D minimum;
     QVector3D maximum;
     QVector3D xStart;

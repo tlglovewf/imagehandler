@@ -134,7 +134,6 @@ private:
     QSpinBox *cellWidth_=nullptr,*cellHeight_=nullptr,*threshold_=nullptr;
     QDoubleSpinBox *cloudPixelScale_=nullptr,*cloudMaximumHeight_=nullptr;
     QCheckBox* autoJumpCheck_=nullptr;
-    QCheckBox* cloudInvertHeight_ = nullptr;
     QComboBox *polarity_=nullptr,*traversal_=nullptr,*previewLayoutMode_=nullptr;
     QLabel *gridCountLabel_=nullptr,*selectedCellLabel_=nullptr,*taskTitle_=nullptr,*taskPhase_=nullptr,*progressPercent_=nullptr,*imageInfo_=nullptr,*zoomInfo_=nullptr;
     QLabel* pixelProbeLabel_ = nullptr;
@@ -148,6 +147,7 @@ private:
     PointCloudDocumentPtr pointCloudDocument_;
     QColor cloudStartColor_{0,0,255};
     QColor cloudEndColor_{0,255,0};
+    bool invertHeight_ = true;
     SegmentationResult segmentation_;
     ElementGroupingResult elementGrouping_;
     QStringList directoryPaths_;

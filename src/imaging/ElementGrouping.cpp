@@ -144,12 +144,35 @@ bool sameSettings(const SegmentationSettings& left, const SegmentationSettings& 
     return left.cellWidth == right.cellWidth && left.cellHeight == right.cellHeight &&
            left.threshold == right.threshold && left.polarity == right.polarity;
 }
+
+bool isPureBackground(const ElementRasterView& raster) {
+    if (!raster.isValid() ||
+        (raster.kind != PixelKind::Gray8 && raster.kind != PixelKind::Gray16))
+        return false;
+    for (int row = 0; row < raster.height; ++row) {
+        const uchar* pixels = raster.scanLine(row);
+        for (qsizetype byte = 0; byte < raster.rowBytes; ++byte)
+            if (pixels[byte] != 0xffU) return false;
+    }
+    return true;
+}
 }
 
 int ElementGroupingResult::groupIdAt(int row, int column) const noexcept {
     if (!valid || row < 0 || column < 0 || row >= rows || column >= columns) return -1;
     const qsizetype index = qsizetype(row) * columns + column;
     return index >= 0 && index < groupByCell.size() ? groupByCell[index] : -1;
+}
+
+bool ElementGroupingResult::isBackgroundAt(int row, int column) const noexcept {
+    return valid && row >= 0 && column >= 0 && row < rows && column < columns &&
+           groupIdAt(row, column) == kBackgroundElementGroupId;
+}
+
+qint64 ElementGroupingResult::backgroundCellCount() const noexcept {
+    if (!valid) return 0;
+    return std::count(groupByCell.cbegin(), groupByCell.cend(),
+                      kBackgroundElementGroupId);
 }
 
 QColor ElementGroupingResult::colorAt(int row, int column) const {
@@ -260,6 +283,16 @@ ElementGroupingResult ElementGrouper::group(
                 return {};
             }
 
+            const QPoint cell(column, row);
+            if (isPureBackground(raster)) {
+                result.groupByCell[qsizetype(row) * segmentation.columns + column] =
+                    kBackgroundElementGroupId;
+                ++completed;
+                if (progress && (completed == total || completed % 32 == 0))
+                    progress({QStringLiteral("比较并分组图元"), completed, total});
+                continue;
+            }
+
             const ElementFingerprint fingerprint = strategy.fingerprint(raster);
             int groupId = -1;
             const auto bucket = candidates.constFind(fingerprint);
@@ -298,7 +331,6 @@ ElementGroupingResult ElementGrouper::group(
                     }
                 }
             }
-            const QPoint cell(column, row);
             if (groupId < 0) {
                 groupId = result.groups.size();
                 result.groups.push_back({groupId, cell, {}, elementGroupColor(groupId)});
@@ -322,4 +354,64 @@ ElementGroupingResult ElementGrouper::group(
     }
     result.valid = true;
     return result;
+}
+
+bool ElementGrouper::findPureBackgroundCells(
+    const ImageDocumentPtr& document, const SegmentationResult& segmentation,
+    QVector<bool>* backgroundByCell, const CancellationTokenPtr& token,
+    const Progress& progress, QString* error) {
+    if (error) error->clear();
+    if (backgroundByCell) backgroundByCell->clear();
+    if (!backgroundByCell || !document || !document->image ||
+        !ImageLoader::isProcessable(document->metadata) || segmentation.rows <= 0 ||
+        segmentation.columns <= 0 || segmentation.settings.cellWidth <= 0 ||
+        segmentation.settings.cellHeight <= 0) {
+        if (error) *error = QStringLiteral("纯底色分块检测参数无效。");
+        return false;
+    }
+    const qint64 total = qint64(segmentation.rows) * segmentation.columns;
+    if (total <= 0 || total > kMaximumSegmentationCells) {
+        if (error) *error = QStringLiteral("图元数量无效或超过程序限制。");
+        return false;
+    }
+    backgroundByCell->fill(false, static_cast<qsizetype>(total));
+    if (document->metadata.kind != PixelKind::Gray8 &&
+        document->metadata.kind != PixelKind::Gray16)
+        return true;
+
+    QString prepareError;
+    const VipsImagePtr prepared = prepareGroupingImage(document, &prepareError);
+    if (!prepared) {
+        if (error) *error = QStringLiteral("准备纯底色检测数据失败：%1").arg(prepareError);
+        backgroundByCell->clear();
+        return false;
+    }
+    EvaluationCancellation cancellation(prepared.get(), token);
+    ElementRasterReader reader(prepared, document->metadata.kind);
+    qint64 completed = 0;
+    for (int row = 0; row < segmentation.rows; ++row) {
+        for (int column = 0; column < segmentation.columns; ++column) {
+            if (token && token->isCancelled()) {
+                backgroundByCell->clear();
+                return false;
+            }
+            const ImageRegion region = segmentationCellRegion(
+                segmentation, document->metadata.width, document->metadata.height,
+                row, column);
+            QString loadError;
+            const ElementRasterView raster = reader.read(region, &loadError);
+            if (!raster.isValid()) {
+                if (error) *error = QStringLiteral("读取图元（行 %1，列 %2）失败：%3")
+                    .arg(row + 1).arg(column + 1).arg(loadError);
+                backgroundByCell->clear();
+                return false;
+            }
+            (*backgroundByCell)[qsizetype(row) * segmentation.columns + column] =
+                isPureBackground(raster);
+            ++completed;
+            if (progress && (completed == total || completed % 32 == 0))
+                progress({QStringLiteral("检测纯底色分块"), completed, total});
+        }
+    }
+    return true;
 }

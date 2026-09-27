@@ -16,6 +16,7 @@ enum class JobMoveCommand { RelMove, AbsMove };
 struct JobPlacementOptions {
     double pixelScale = 0.25;
     bool reverseY = false;
+    bool centerOrigin = false;
 };
 
 struct LayeredPackageOptions {
@@ -39,9 +40,10 @@ struct LayeredPackageOptions {
     bool canvasBackgroundWhite = true;
     bool invertCanvas = false;
     double zOffset = 0.001;
-    JobMoveCommand jobMoveCommand = JobMoveCommand::AbsMove;
+    JobMoveCommand jobMoveCommand = JobMoveCommand::RelMove;
     double exportMultiplier = 13.55;
     bool mirrorX = false;
+    bool centerOrigin = false;
 };
 
 struct LayeredPackageRequest {

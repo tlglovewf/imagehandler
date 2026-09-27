@@ -52,6 +52,8 @@ struct MaskStackGroupRequest {
 struct MaskStackBlockPlacement {
     QRectF physicalRect;
     qint64 traversalIndex = -1;
+    int placementNumber = 0;
+    QPointF jobPosition;
 };
 
 struct MaskStackVertex {

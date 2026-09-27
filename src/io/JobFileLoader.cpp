@@ -327,26 +327,30 @@ bool parseBy(JsonReader& reader, JobCoordinate* position, QString* error) {
 bool parseCommand(JsonReader& reader, ParsedCommand* parsed, QString* error) {
     if (!reader.expect('{', error, QStringLiteral("命令对象"))) return false;
     QString command;
-    JobCoordinate by;
+    JobCoordinate by, where;
     qint64 id = -1;
-    bool hasCommand = false, hasBy = false, hasId = false;
+    bool hasCommand = false, hasBy = false, hasWhere = false, hasId = false;
     if (reader.consume('}')) { reader.fail(error, QStringLiteral("空命令对象")); return false; }
     while (true) {
         QString key;
         if (!reader.parseString(&key, error) || !reader.expect(':', error, QStringLiteral("冒号"))) return false;
         if (key == QStringLiteral("command")) { if (!reader.parseString(&command, error)) return false; hasCommand = true; }
         else if (key == QStringLiteral("by")) { if (!parseBy(reader, &by, error)) return false; hasBy = true; }
+        else if (key == QStringLiteral("where")) { if (!parseBy(reader, &where, error)) return false; hasWhere = true; }
         else if (key == QStringLiteral("id")) { if (!reader.parseInteger(&id, error)) return false; hasId = true; }
         else if (!reader.skipValue(error)) return false;
         if (reader.consume('}')) break;
         if (!reader.expect(',', error, QStringLiteral("逗号"))) return false;
     }
     if (!hasCommand) { reader.fail(error, QStringLiteral("命令缺少 command 字段")); return false; }
-    if (command == QStringLiteral("relmove") || command == QStringLiteral("absmove")) {
-        if (!hasBy || hasId) { reader.fail(error, QStringLiteral("移动命令必须仅包含 by 坐标")); return false; }
+    if (command == QStringLiteral("relmove")) {
+        if (!hasBy || hasWhere || hasId) { reader.fail(error, QStringLiteral("relmove 必须仅包含 by 坐标")); return false; }
         parsed->type = ParsedCommandType::Move; parsed->position = by;
+    } else if (command == QStringLiteral("absmove")) {
+        if (hasBy == hasWhere || hasId) { reader.fail(error, QStringLiteral("absmove 必须仅包含 where 坐标")); return false; }
+        parsed->type = ParsedCommandType::Move; parsed->position = hasWhere ? where : by;
     } else if (command == QStringLiteral("place")) {
-        if (!hasId || hasBy) { reader.fail(error, QStringLiteral("place 必须仅包含整数 id")); return false; }
+        if (!hasId || hasBy || hasWhere) { reader.fail(error, QStringLiteral("place 必须仅包含整数 id")); return false; }
         parsed->type = ParsedCommandType::Place; parsed->id = id;
     } else {
         reader.fail(error, QStringLiteral("不支持的命令类型：%1").arg(command)); return false;

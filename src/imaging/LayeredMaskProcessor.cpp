@@ -7,6 +7,7 @@
 #include <QDataStream>
 #include <QDir>
 #include <QFile>
+#include <QHash>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -140,16 +141,19 @@ struct SourceTransform {
 
 SourceTransform sourceTransform(const LayeredPackageOptions& options) {
     SourceTransform result;
-    result.attached = options.attachToCanvas;
+    result.attached = options.attachToCanvas || options.mirrorX;
     if (!result.attached) return result;
     result.mirrorX = options.mirrorX;
-    const double radians = options.rotationDegrees * std::numbers::pi / 180.0;
+    const double radians = (options.attachToCanvas ? options.rotationDegrees : 0.0) *
+                           std::numbers::pi / 180.0;
     result.cosine = std::cos(radians);
     result.sine = std::sin(radians);
-    result.inverseScaleX = 1.0 / options.scaleX;
-    result.inverseScaleY = 1.0 / options.scaleY;
-    result.canvasCenterX = options.canvasWidth / 2.0;
-    result.canvasCenterY = options.canvasHeight / 2.0;
+    result.inverseScaleX = options.attachToCanvas ? 1.0 / options.scaleX : 1.0;
+    result.inverseScaleY = options.attachToCanvas ? 1.0 / options.scaleY : 1.0;
+    result.canvasCenterX = (options.attachToCanvas ? options.canvasWidth
+                                                   : options.outputWidth) / 2.0;
+    result.canvasCenterY = (options.attachToCanvas ? options.canvasHeight
+                                                   : options.outputHeight) / 2.0;
     result.sourceCenterX = options.outputWidth / 2.0;
     result.sourceCenterY = options.outputHeight / 2.0;
     return result;
@@ -234,7 +238,7 @@ bool buildOutputLevelRaster(const HeightRaster& source, const LayeredMaskRequest
                             const LayeredMaskProcessor::Progress& progress,
                             LayeredMaskExportMetrics* metrics, QString* error) {
     result->size = LayeredMaskProcessor::outputSize(request.options);
-    if (!request.options.attachToCanvas) {
+    if (!request.options.attachToCanvas && !request.options.mirrorX) {
         result->levels = source.levels;
         for (const quint16 level : std::as_const(result->levels))
             result->maximumLevel = std::max(result->maximumLevel, level);
@@ -376,6 +380,115 @@ LayeredMaskPreview LayeredMaskProcessor::preview(
     LayeredMaskPreview result;
     result.requestGeneration = request.requestGeneration;
     if (!validate(request, error)) return result;
+    if (!request.placements.isEmpty()) {
+        const QSize modelSize = outputSize(request.options);
+        // Job positions advance by the source tile pitch. Fit the exported mask
+        // inside that tile for the overview; a large export canvas would otherwise
+        // cover neighbouring placements while their labels stay at Job positions.
+        const double modelWidth = request.nominalSourceSize.width() *
+                                  request.options.pixelScale;
+        const double modelHeight = request.nominalSourceSize.height() *
+                                   request.options.pixelScale;
+        double left = std::numeric_limits<double>::max();
+        double bottom = std::numeric_limits<double>::max();
+        double right = std::numeric_limits<double>::lowest();
+        double top = std::numeric_limits<double>::lowest();
+        for (const auto& placement : request.placements) {
+            left = std::min(left, placement.jobPosition.x());
+            bottom = std::min(bottom, placement.jobPosition.y());
+            right = std::max(right, placement.jobPosition.x() + modelWidth);
+            top = std::max(top, placement.jobPosition.y() + modelHeight);
+        }
+        if (!std::isfinite(right-left) || !std::isfinite(top-bottom) ||
+            right <= left || top <= bottom) {
+            if (error) *error = QStringLiteral("多块预览范围无效。");
+            return result;
+        }
+        auto combined = std::make_shared<MaskStackPreviewData>();
+        combined->physicalSize = {right-left, top-bottom};
+        combined->requestedOutputSize = modelSize;
+        combined->layerHeight = request.options.layerHeight;
+        combined->layerCount = request.options.baseLayerCount + request.layerCount;
+        combined->blocks.reserve(request.placements.size());
+        auto solid = std::make_shared<MaskStackGeometry>();
+        auto exploded = std::make_shared<MaskStackGeometry>();
+        QHash<QPoint, LayeredMaskPreview> modelPreviews;
+        const int activePlacement = std::clamp(request.activePlacement, 0,
+                                               int(request.placements.size()) - 1);
+        const auto appendGeometry = [](MaskStackGeometry* destination,
+                                       const std::shared_ptr<const MaskStackGeometry>& source,
+                                       float dx, float dy, float scale) {
+            if (!source || destination->vertices.size() + source->vertices.size() >
+                std::numeric_limits<std::uint32_t>::max()) return false;
+            const auto offset = static_cast<std::uint32_t>(destination->vertices.size());
+            destination->vertices.reserve(destination->vertices.size() + source->vertices.size());
+            for (auto vertex : source->vertices) {
+                vertex.x = vertex.x * scale + dx;
+                vertex.y = vertex.y * scale + dy;
+                destination->vertices.push_back(vertex);
+            }
+            destination->indices.reserve(destination->indices.size() + source->indices.size());
+            for (const auto index : source->indices)
+                destination->indices.push_back(offset + index);
+            return true;
+        };
+        const auto generateModel = [&](const LayeredMaskPlacement& placement,
+                                       bool thumbnails) {
+            LayeredMaskRequest single = request;
+            single.placements.clear();
+            single.region = placement.modelRegion;
+            single.includeThumbnails = thumbnails;
+            single.stackMaximumSide = std::clamp(request.stackMaximumSide, 32, 512);
+            return preview(single, token, {}, error);
+        };
+        const auto& activeModel = request.placements[activePlacement];
+        const QPoint activeKey(int(activeModel.modelRegion.x),
+                               int(activeModel.modelRegion.y));
+        auto activePreview = generateModel(activeModel, true);
+        if (!activePreview.stackPreview) return {};
+        modelPreviews.insert(activeKey, std::move(activePreview));
+        for (qsizetype index = 0; index < request.placements.size(); ++index) {
+            if (token && token->isCancelled()) return {};
+            const auto& placement = request.placements[index];
+            const QPoint key(int(placement.modelRegion.x), int(placement.modelRegion.y));
+            if (!modelPreviews.contains(key))
+                modelPreviews.insert(key, generateModel(placement, false));
+            const auto& part = modelPreviews[key];
+            if (!part.stackPreview) {
+                return {};
+            }
+            const float tileX = static_cast<float>(placement.jobPosition.x() - left);
+            const float tileY = static_cast<float>(placement.jobPosition.y() - bottom);
+            const QSizeF exportedSize = part.stackPreview->physicalSize;
+            const float scale = static_cast<float>(std::min({1.0,
+                modelWidth / exportedSize.width(), modelHeight / exportedSize.height()}));
+            const float dx = tileX + static_cast<float>((modelWidth - exportedSize.width()*scale)*0.5);
+            const float dy = tileY + static_cast<float>((modelHeight - exportedSize.height()*scale)*0.5);
+            if (!appendGeometry(solid.get(), part.stackPreview->solidGeometry, dx, dy, scale) ||
+                !appendGeometry(exploded.get(), part.stackPreview->explodedGeometry, dx, dy, scale)) {
+                if (error) *error = QStringLiteral("多块预览几何数据过大。");
+                return {};
+            }
+            combined->blocks.push_back({QRectF(tileX, tileY, modelWidth, modelHeight),
+                                        placement.traversalIndex, int(index + 1),
+                                        placement.jobPosition});
+            combined->actualMaximumHeight = std::max(combined->actualMaximumHeight,
+                                                     part.actualMaximumHeight);
+            combined->downsampled |= part.stackPreview->downsampled;
+            if (index == activePlacement) {
+                result.thumbnails = part.thumbnails;
+                result.contentSize = part.contentSize;
+                result.outputSize = part.outputSize;
+            }
+            if (progress) progress({QStringLiteral("生成多块导出预览"), index + 1,
+                                    request.placements.size()});
+        }
+        combined->solidGeometry = solid;
+        combined->explodedGeometry = exploded;
+        result.actualMaximumHeight = combined->actualMaximumHeight;
+        result.stackPreview = combined;
+        return result;
+    }
     HeightRaster raster;
     if (!buildRaster(request, &raster, token, progress, error)) return {};
     result.outputSize = outputSize(request.options);
@@ -383,15 +496,15 @@ LayeredMaskPreview LayeredMaskProcessor::preview(
     result.actualMaximumHeight = raster.actualMaximumHeight +
         request.options.baseLayerCount * request.options.layerHeight;
     constexpr double kThumbnailSide = 128.0;
-    constexpr double kStackSide = 512.0;
+    const double stackSide = std::clamp(request.stackMaximumSide, 32, 512);
     const double thumbScale = std::min({1.0, kThumbnailSide / result.outputSize.width(),
                                         kThumbnailSide / result.outputSize.height()});
     const QSize thumbnailSize(std::max(1, qRound(result.outputSize.width() * thumbScale)),
                               std::max(1, qRound(result.outputSize.height() * thumbScale)));
     const SourceTransform transform = sourceTransform(request.options);
     const int totalLayers = request.options.baseLayerCount + request.layerCount;
-    result.thumbnails.reserve(totalLayers);
-    for (int outputLayer = 1; outputLayer <= totalLayers; ++outputLayer) {
+    if (request.includeThumbnails) result.thumbnails.reserve(totalLayers);
+    for (int outputLayer = 1; request.includeThumbnails && outputLayer <= totalLayers; ++outputLayer) {
         if (token && token->isCancelled()) return {};
         QImage image(thumbnailSize, QImage::Format_Grayscale8);
         if (outputLayer <= request.options.baseLayerCount) {
@@ -415,8 +528,8 @@ LayeredMaskPreview LayeredMaskProcessor::preview(
         result.thumbnails.push_back(std::move(image));
         if (progress) progress({QStringLiteral("生成切片预览"), outputLayer, totalLayers});
     }
-    const double stackScale = std::min({1.0, kStackSide / result.outputSize.width(),
-                                        kStackSide / result.outputSize.height()});
+    const double stackScale = std::min({1.0, stackSide / result.outputSize.width(),
+                                        stackSide / result.outputSize.height()});
     auto stack = std::make_shared<MaskStackPreviewData>();
     stack->requestedOutputSize = result.outputSize;
     stack->gridSize = {std::max(1, qRound(result.outputSize.width() * stackScale)),

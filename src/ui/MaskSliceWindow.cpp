@@ -141,6 +141,9 @@ MaskSliceWindow::MaskSliceWindow(QWidget* parent)
     lockAspect_->setChecked(true);
     invertMask_ = new QCheckBox(QStringLiteral("黑白反转"));
     invertMask_->setObjectName(QStringLiteral("maskSliceInvertMask"));
+    invertHeight_ = new QCheckBox(QStringLiteral("倒置高度"));
+    invertHeight_->setObjectName(QStringLiteral("maskSliceInvertHeight"));
+    invertHeight_->setToolTip(QStringLiteral("勾选时黑色为最高点；取消时白色为最高点。"));
     mappingLabel_ = new QLabel(QStringLiteral("--"));
     mappingLabel_->setObjectName(QStringLiteral("maskSliceMappingInfo"));
     mappingLabel_->setWordWrap(true);
@@ -150,6 +153,7 @@ MaskSliceWindow::MaskSliceWindow(QWidget* parent)
     form->addRow(QStringLiteral("输出宽度"), outputWidth_);
     form->addRow(QStringLiteral("输出高度"), outputHeight_);
     form->addRow(lockAspect_);
+    form->addRow(invertHeight_);
     form->addRow(invertMask_);
     form->addRow(QStringLiteral("尺寸映射"), mappingLabel_);
     rightLayout->addWidget(settingsContainer_);
@@ -209,6 +213,12 @@ MaskSliceWindow::MaskSliceWindow(QWidget* parent)
     connect(zOffset_, qOverload<double>(&QDoubleSpinBox::valueChanged),
             this, [this] { scheduleAnalysis(); });
     connect(invertMask_, &QCheckBox::toggled, this, [this] { scheduleActiveAnalysis(); });
+    connect(invertHeight_, &QCheckBox::toggled, this, [this](bool checked) {
+        mapping_.invertHeight = checked;
+        updateDimensionMapping();
+        scheduleAnalysis();
+        Q_EMIT invertHeightChanged(checked);
+    });
     connect(outputWidth_, qOverload<int>(&QSpinBox::valueChanged), this, [this](int width) {
         if (!updatingDimensions_ && lockAspect_->isChecked() && region_.isValid()) {
             updatingDimensions_ = true;
@@ -506,6 +516,10 @@ void MaskSliceWindow::setElements(
 
     source_ = source;
     mapping_ = mapping;
+    {
+        const QSignalBlocker blocker(invertHeight_);
+        invertHeight_->setChecked(mapping.invertHeight);
+    }
     elements_ = std::move(sorted);
     activeElementIndex_ = nextActive;
     const MaskSliceElement& active = elements_[activeElementIndex_];
@@ -538,6 +552,10 @@ void MaskSliceWindow::setPointCloudSettings(const PointCloudSettings& mapping) {
                                mapping_.endColor != mapping.endColor;
     if (!geometryChanged && !colorsChanged) return;
     mapping_ = mapping;
+    {
+        const QSignalBlocker blocker(invertHeight_);
+        invertHeight_->setChecked(mapping.invertHeight);
+    }
     if (colorsChanged) stackView_->setColors(mapping_.startColor, mapping_.endColor);
     if (source_ && region_.isValid()) {
         updateElementInformation();
@@ -858,6 +876,7 @@ void MaskSliceWindow::updateControls() {
     outputWidth_->setEnabled(!exporting);
     outputHeight_->setEnabled(!exporting);
     lockAspect_->setEnabled(!exporting);
+    invertHeight_->setEnabled(!exporting);
     invertMask_->setEnabled(!exporting);
     cancelButton_->setEnabled(busy);
     exportButton_->setEnabled(!jobMode_ && !busy && unifiedLayerCount() > 0 &&

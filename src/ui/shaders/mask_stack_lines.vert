@@ -15,6 +15,11 @@ layout(std140, binding = 0) uniform Camera {
 layout(location = 0) out vec3 color;
 
 void main() {
+    if (inPosition.z < -100000.0) {
+        gl_Position = vec4(inPosition.xy, 0.0, 1.0);
+        color = inColor;
+        return;
+    }
     vec3 position = inPosition;
     if (camera.selection.y > 0.5) position.z *= camera.parameters.w;
     position.z *= camera.parameters.x;

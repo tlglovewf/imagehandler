@@ -4,6 +4,14 @@
 #include "io/LayeredPackageTypes.h"
 
 #include <functional>
+#include <QPointF>
+
+struct LayeredMaskPlacement {
+    ImageRegion modelRegion;
+    QPoint cell;
+    QPointF jobPosition;
+    qint64 traversalIndex = -1;
+};
 
 struct LayeredMaskRequest {
     ImageDocumentPtr source;
@@ -12,6 +20,10 @@ struct LayeredMaskRequest {
     LayeredPackageOptions options;
     int layerCount = 0;
     quint64 requestGeneration = 0;
+    QVector<LayeredMaskPlacement> placements;
+    int activePlacement = 0;
+    bool includeThumbnails = true;
+    int stackMaximumSide = 512;
 };
 
 struct LayeredMaskPreview {

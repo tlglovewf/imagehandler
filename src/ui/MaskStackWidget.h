@@ -32,6 +32,9 @@ public:
     [[nodiscard]] double zScale() const noexcept { return zScale_; }
     [[nodiscard]] QImage grabFrame();
 
+Q_SIGNALS:
+    void blockActivated(qint64 traversalIndex);
+
 private:
     class Backend;
     Backend* backend_ = nullptr;

@@ -381,14 +381,59 @@ QPointF SplitExporter::physicalPosition(const SegmentationResult& segmentation,
         !std::isfinite(options.pixelScale) || options.pixelScale <= 0.0) {
         return {};
     }
-    const double x = static_cast<double>(qint64(cell.x()) *
-                                         segmentation.settings.cellWidth) *
-                     options.pixelScale;
-    double y = static_cast<double>(qint64(cell.y()) *
-                                   segmentation.settings.cellHeight) *
-               options.pixelScale;
+    double pixelX = static_cast<double>(qint64(cell.x()) *
+                                        segmentation.settings.cellWidth);
+    double pixelY = static_cast<double>(qint64(cell.y()) *
+                                        segmentation.settings.cellHeight);
+    if (options.centerOrigin) {
+        pixelX -= static_cast<double>(qint64(segmentation.columns - 1) *
+                                      segmentation.settings.cellWidth) * 0.5;
+        pixelY -= static_cast<double>(qint64(segmentation.rows - 1) *
+                                      segmentation.settings.cellHeight) * 0.5;
+    }
+    const double x = pixelX * options.pixelScale;
+    double y = pixelY * options.pixelScale;
     if (options.reverseY) y = -y;
     return {x, y == 0.0 ? 0.0 : y};
+}
+
+QPointF SplitExporter::physicalSelectionOrigin(
+        const SegmentationResult& segmentation, const QVector<QPoint>& selectedCells,
+        const JobPlacementOptions& options) {
+    if (segmentation.rows <= 0 || segmentation.columns <= 0 ||
+        segmentation.settings.cellWidth <= 0 || segmentation.settings.cellHeight <= 0 ||
+        !std::isfinite(options.pixelScale) || options.pixelScale <= 0.0) {
+        return {};
+    }
+
+    int minimumColumn = 0;
+    int maximumColumn = segmentation.columns - 1;
+    int minimumRow = 0;
+    int maximumRow = segmentation.rows - 1;
+    if (!selectedCells.isEmpty()) {
+        minimumColumn = segmentation.columns;
+        maximumColumn = -1;
+        minimumRow = segmentation.rows;
+        maximumRow = -1;
+        for (const QPoint& cell : selectedCells) {
+            if (cell.x() < 0 || cell.y() < 0 || cell.x() >= segmentation.columns ||
+                cell.y() >= segmentation.rows) continue;
+            minimumColumn = std::min(minimumColumn, cell.x());
+            maximumColumn = std::max(maximumColumn, cell.x());
+            minimumRow = std::min(minimumRow, cell.y());
+            maximumRow = std::max(maximumRow, cell.y());
+        }
+        if (maximumColumn < minimumColumn || maximumRow < minimumRow) return {};
+    }
+
+    const JobPlacementOptions absoluteOptions{options.pixelScale, options.reverseY, false};
+    const QPointF minimum = physicalPosition(
+        segmentation, {minimumColumn, minimumRow}, absoluteOptions);
+    const QPointF maximum = physicalPosition(
+        segmentation, {maximumColumn, maximumRow}, absoluteOptions);
+    const double x = (minimum.x() + maximum.x()) * 0.5;
+    const double y = (minimum.y() + maximum.y()) * 0.5;
+    return {x == 0.0 ? 0.0 : x, y == 0.0 ? 0.0 : y};
 }
 
 QString SplitExporter::selectedTileFileName(const ImageDocumentPtr& document,

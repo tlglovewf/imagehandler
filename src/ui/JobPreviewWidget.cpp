@@ -237,7 +237,9 @@ public:
         idToIndex_.clear();
         origin_ = {};
         if (document_ && document_->bounds.valid) {
-            const JobBounds& scene = document_->bounds;
+            JobBounds scene = document_->sceneBounds.valid
+                ? document_->sceneBounds : document_->bounds;
+            scene.include({0.0, 0.0, 0.0});
             origin_ = scene.center();
             idToIndex_.resize(document_->points.size(), -1);
             for (size_t index = 0; index < document_->points.size(); ++index) {
@@ -688,11 +690,54 @@ private:
         lines.push_back({b.x(), b.y(), color.x(), color.y(), color.z()});
     }
 
+    void appendScreenLine(std::vector<LineVertex>& lines, const QPointF& a, const QPointF& b,
+                          const QVector3D& color, float width = 1.0F) const {
+        const QPointF delta = b - a;
+        const double length = std::hypot(delta.x(), delta.y());
+        if (length <= 0.0001) return;
+        const QPointF normal(-delta.y() / length, delta.x() / length);
+        const int layers = std::max(1, static_cast<int>(std::ceil(width)));
+        for (int layer = 0; layer < layers; ++layer) {
+            const double offset = layer - (layers - 1) * 0.5;
+            appendLine(lines, pixelToNdc(a + normal * offset),
+                       pixelToNdc(b + normal * offset), color);
+        }
+    }
+
+    void appendScreenArrow(std::vector<LineVertex>& lines, const QPointF& tail,
+                           const QPointF& tip, const QVector3D& color) const {
+        const QPointF delta = tip - tail;
+        const double length = std::hypot(delta.x(), delta.y());
+        if (length <= 0.0001) return;
+        const QPointF direction(delta.x() / length, delta.y() / length);
+        const QPointF normal(-direction.y(), direction.x());
+        const QPointF base = tip - direction * 11.0;
+        appendScreenLine(lines, tip, base + normal * 5.0, color, 2.0F);
+        appendScreenLine(lines, tip, base - normal * 5.0, color, 2.0F);
+    }
+
     void appendWorldLine(std::vector<LineVertex>& lines, const QVector3D& a, const QVector3D& b,
                          const QVector3D& color, const QMatrix4x4& mvp) const {
         QVector2D an, bn;
         if (!project(a, mvp, nullptr, &an) || !project(b, mvp, nullptr, &bn)) return;
         appendLine(lines, an, bn, color);
+    }
+
+    bool appendWorldAxis(std::vector<LineVertex>& lines, const QVector3D& start,
+                         const QVector3D& end, const QVector3D& origin,
+                         const QVector3D& color, const QMatrix4x4& mvp,
+                         QPointF* startScreen, QPointF* endScreen,
+                         QPointF* originScreen) const {
+        QPointF startPoint, endPoint, zeroPoint;
+        if (!project(start, mvp, &startPoint) || !project(end, mvp, &endPoint) ||
+            !project(origin, mvp, &zeroPoint)) return false;
+        appendScreenLine(lines, startPoint, endPoint, color, 3.0F);
+        appendScreenArrow(lines, zeroPoint, startPoint, color);
+        appendScreenArrow(lines, zeroPoint, endPoint, color);
+        if (startScreen) *startScreen = startPoint;
+        if (endScreen) *endScreen = endPoint;
+        if (originScreen) *originScreen = zeroPoint;
+        return true;
     }
 
     void appendGuides(std::vector<LineVertex>& lines, const QMatrix4x4& mvp) const {
@@ -703,37 +748,62 @@ private:
         const float exponent = std::floor(std::log10(extent / 10.0F));
         const float step = std::max(0.000001F, std::pow(10.0F, exponent));
         const QVector3D gridColor(0.20F, 0.23F, 0.27F);
-        const float firstX = guides.pointZero.x() +
-            std::floor((guides.minimum.x() - guides.pointZero.x()) / step) * step;
-        const float firstY = guides.pointZero.y() +
-            std::floor((guides.minimum.y() - guides.pointZero.y()) / step) * step;
+        const float firstX = guides.coordinateOrigin.x() +
+            std::floor((guides.minimum.x() - guides.coordinateOrigin.x()) / step) * step;
+        const float firstY = guides.coordinateOrigin.y() +
+            std::floor((guides.minimum.y() - guides.coordinateOrigin.y()) / step) * step;
         for (float value = firstX; value <= guides.maximum.x() + step * 0.5F; value += step) {
-            appendWorldLine(lines, {value, guides.minimum.y(), guides.pointZero.z()},
-                            {value, guides.maximum.y(), guides.pointZero.z()}, gridColor, mvp);
+            appendWorldLine(lines, {value, guides.minimum.y(), guides.coordinateOrigin.z()},
+                            {value, guides.maximum.y(), guides.coordinateOrigin.z()}, gridColor, mvp);
         }
         for (float value = firstY; value <= guides.maximum.y() + step * 0.5F; value += step) {
-            appendWorldLine(lines, {guides.minimum.x(), value, guides.pointZero.z()},
-                            {guides.maximum.x(), value, guides.pointZero.z()}, gridColor, mvp);
+            appendWorldLine(lines, {guides.minimum.x(), value, guides.coordinateOrigin.z()},
+                            {guides.maximum.x(), value, guides.coordinateOrigin.z()}, gridColor, mvp);
         }
-        const QVector3D xColor(1.0F, 0.25F, 0.25F);
-        const QVector3D yColor(0.25F, 1.0F, 0.35F);
-        appendWorldLine(lines, guides.xStart, guides.xEnd, xColor, mvp);
-        appendWorldLine(lines, guides.yStart, guides.yEnd, yColor, mvp);
+        const QVector3D xColor(1.0F, 0.18F, 0.18F);
+        const QVector3D yColor(0.15F, 1.0F, 0.28F);
+        const float axisPadding = std::max(step * 1.5F, extent * 0.08F);
+        const QVector3D xStart = guides.xStart - QVector3D(axisPadding, 0, 0);
+        const QVector3D xEnd = guides.xEnd + QVector3D(axisPadding, 0, 0);
+        const QVector3D yStart = guides.yStart - QVector3D(0, axisPadding, 0);
+        const QVector3D yEnd = guides.yEnd + QVector3D(0, axisPadding, 0);
+        QPointF xStartScreen, xEndScreen, yStartScreen, yEndScreen, originScreen;
+        const bool xVisible = appendWorldAxis(lines, xStart, xEnd, guides.coordinateOrigin,
+                                              xColor, mvp, &xStartScreen, &xEndScreen,
+                                              &originScreen);
+        const bool yVisible = appendWorldAxis(lines, yStart, yEnd, guides.coordinateOrigin,
+                                              yColor, mvp, &yStartScreen, &yEndScreen,
+                                              nullptr);
         const float zLength = std::max(step * 2.0F, extent * 0.12F);
-        appendWorldLine(lines, guides.pointZero,
-                        guides.pointZero + QVector3D(0, 0, zLength),
+        appendWorldLine(lines, guides.coordinateOrigin,
+                        guides.coordinateOrigin + QVector3D(0, 0, zLength),
                         {0.25F, 0.55F, 1.0F}, mvp);
 
-        QPointF xStartScreen, xEndScreen, yStartScreen, yEndScreen;
-        if (project(guides.xStart, mvp, &xStartScreen) && project(guides.xEnd, mvp, &xEndScreen)) {
+        if (xVisible) {
             const QPointF midpoint = (xStartScreen + xEndScreen) * 0.5 + QPointF(5.0, 8.0);
             appendOutlinedText(lines, midpoint,
                                QStringLiteral("X %1").arg(formatDimension(guides.xDimension)), xColor);
+            appendOutlinedText(lines, xStartScreen + QPointF(-26.0, 3.0),
+                               QStringLiteral("-X"), xColor);
+            appendOutlinedText(lines, xEndScreen + QPointF(3.0, 3.0),
+                               QStringLiteral("+X"), xColor);
+            appendOutlinedText(lines, originScreen + QPointF(3.0, -9.0),
+                               QStringLiteral("0"), {1.0F, 0.85F, 0.15F});
+            const QPointF diamond[] = {
+                originScreen + QPointF(0, -6), originScreen + QPointF(6, 0),
+                originScreen + QPointF(0, 6), originScreen + QPointF(-6, 0)};
+            for (int i = 0; i < 4; ++i)
+                appendScreenLine(lines, diamond[i], diamond[(i + 1) % 4],
+                                 {1.0F, 0.85F, 0.15F}, 2.0F);
         }
-        if (project(guides.yStart, mvp, &yStartScreen) && project(guides.yEnd, mvp, &yEndScreen)) {
+        if (yVisible) {
             const QPointF midpoint = (yStartScreen + yEndScreen) * 0.5 + QPointF(8.0, -8.0);
             appendOutlinedText(lines, midpoint,
                                QStringLiteral("Y %1").arg(formatDimension(guides.yDimension)), yColor);
+            appendOutlinedText(lines, yStartScreen + QPointF(-26.0, 3.0),
+                               QStringLiteral("-Y"), yColor);
+            appendOutlinedText(lines, yEndScreen + QPointF(3.0, 3.0),
+                               QStringLiteral("+Y"), yColor);
         }
     }
 
@@ -761,6 +831,9 @@ private:
             appendLine(lines, pixelToNdc({x+4, y+6}), pixelToNdc({x+6, y+4}), color);
         } else if (glyph == QLatin1Char('.')) {
             appendLine(lines, pixelToNdc({x+2, y+h}), pixelToNdc({x+3, y+h}), color);
+        } else if (glyph == QLatin1Char('+')) {
+            appendLine(lines, pixelToNdc({x, y+h*0.5F}), pixelToNdc({x+w, y+h*0.5F}), color);
+            appendLine(lines, pixelToNdc({x+w*0.5F, y+2}), pixelToNdc({x+w*0.5F, y+h-2}), color);
         } else if (glyph == QLatin1Char('X')) {
             appendLine(lines, pixelToNdc({x, y}), pixelToNdc({x+w, y+h}), color);
             appendLine(lines, pixelToNdc({x+w, y}), pixelToNdc({x, y+h}), color);

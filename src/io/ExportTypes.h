@@ -31,6 +31,7 @@ struct ExportSizeEstimate {
     qint64 estimatedBmpBytes = 0;
     qint64 estimatedTotalBytes = 0;
     qint64 requiredBytes = 0;
+    qint64 skippedBackgroundCount = 0;
 };
 
 struct ExportPreflightResult {
@@ -44,6 +45,7 @@ struct ExportPreflightResult {
     qint64 availableBytes = -1;
     bool spaceKnown = false;
     qint64 conflictCount = 0;
+    qint64 skippedBackgroundCount = 0;
     QStringList conflictSamples;
     QString firstOutput;
     QString lastOutput;

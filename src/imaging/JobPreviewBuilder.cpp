@@ -40,20 +40,23 @@ JobDocumentPtr buildDocument(const ImageMetadata& metadata,
         const qint64 modelCount = grouped ? grouping->groups.size() : count;
         document->models.reserve(static_cast<size_t>(modelCount));
         document->points.reserve(static_cast<size_t>(count));
-        document->linkedCells.resize(static_cast<size_t>(count));
+        document->linkedCells.reserve(static_cast<size_t>(count));
         for (qint64 model = 0; model < modelCount; ++model)
             document->models.push_back({model, QString::number(model), QString::number(model)});
         qint64 lastPermille = -1;
         for (qint64 i = 0; i < count; ++i) {
             if (token->isCancelled()) return {};
             const QPoint cell = order[static_cast<size_t>(i)];
+            if (grouped && grouping->isBackgroundAt(cell.y(), cell.x())) continue;
             const QPointF position = positionFor(cell);
             const JobCoordinate xyz{position.x(), position.y(), 0.0};
             const int groupId = grouped ? grouping->groupIdAt(cell.y(), cell.x())
                                         : static_cast<int>(i);
             const QColor color = grouped ? grouping->colorAt(cell.y(), cell.x()) : QColor{};
-            document->points.push_back({groupId, xyz, i * 2 + 1, i, color});
-            document->linkedCells[static_cast<size_t>(i)] = cell;
+            const qint64 placementId = static_cast<qint64>(document->points.size());
+            document->points.push_back({groupId, xyz, placementId * 2 + 1,
+                                        placementId, color});
+            document->linkedCells.push_back(cell);
             document->bounds.include(xyz);
             if (progress) {
                 const qint64 permille = (i + 1) * 1000 / count;
@@ -62,6 +65,10 @@ JobDocumentPtr buildDocument(const ImageMetadata& metadata,
                     progress({QStringLiteral("生成 Job 预览"), i + 1, count});
                 }
             }
+        }
+        if (document->points.empty()) {
+            if (progress) progress({QStringLiteral("生成 Job 预览"), count, count});
+            return document;
         }
         if (progress) progress({QStringLiteral("建立 Job 预览空间索引"), 0, count});
         if (!JobSpatialIndex::prepare(document.get(), token)) {

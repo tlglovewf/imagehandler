@@ -36,6 +36,9 @@ public:
     [[nodiscard]] QString outputDirectory() const;
     void setOutputDirectory(const QString& directory);
 
+Q_SIGNALS:
+    void invertHeightChanged(bool inverted);
+
 protected:
     void closeEvent(QCloseEvent* event) override;
 
@@ -58,6 +61,8 @@ private:
     void applyPreview(const LayeredMaskPreview& preview);
     void updatePreviewLayer(int row);
     void updatePreviewZScale();
+    void updatePreviewElementLabel();
+    void activatePreviewBlock(qint64 traversalIndex);
     [[nodiscard]] LayeredMaskRequest currentPreviewRequest() const;
 
     TaskManager* tasks_ = nullptr;
@@ -76,7 +81,9 @@ private:
     QSpinBox* outputHeight_ = nullptr;
     QCheckBox* lockAspect_ = nullptr;
     QCheckBox* invertMask_ = nullptr;
+    QCheckBox* invertHeightCheck_ = nullptr;
     QCheckBox* reverseY_ = nullptr;
+    QCheckBox* centerOrigin_ = nullptr;
     QCheckBox* attachToCanvas_ = nullptr;
     QSpinBox* canvasWidth_ = nullptr;
     QSpinBox* canvasHeight_ = nullptr;
@@ -106,7 +113,6 @@ private:
     ElementGroupingResult grouping_;
     TraversalMode traversalMode_ = TraversalMode::SnakeZ;
     double pixelScale_ = 0.25;
-    bool invertHeight_ = true;
     QString directory_;
     Action action_ = Action::None;
     bool updatingDimensions_ = false;

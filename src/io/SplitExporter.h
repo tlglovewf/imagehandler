@@ -22,6 +22,9 @@ public:
     static QPointF physicalPosition(const SegmentationResult& segmentation,
                                     const QPoint& cell,
                                     const JobPlacementOptions& options);
+    static QPointF physicalSelectionOrigin(const SegmentationResult& segmentation,
+                                           const QVector<QPoint>& selectedCells,
+                                           const JobPlacementOptions& options);
     static QString selectedTileFileName(const ImageDocumentPtr& document,
                                         qint64 traversalIndex);
     static bool exportTiles(const QString& outputDirectory, const ImageDocumentPtr& document,

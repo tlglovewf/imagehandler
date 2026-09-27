@@ -10,12 +10,14 @@
 #include <QMouseEvent>
 #include <QMutex>
 #include <QMutexLocker>
+#include <QResizeEvent>
 #include <QShortcut>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <vector>
@@ -97,15 +99,23 @@ public:
         renderer_ = new StackVulkanRenderer(this);
         return renderer_;
     }
+    void setBlockActivated(std::function<void(qint64)> callback) {
+        blockActivated_ = std::move(callback);
+    }
 
     void setPreview(const MaskStackPreviewDataPtr& preview) {
+        bool boundsChanged = true;
         {
             QMutexLocker lock(&mutex_);
+            boundsChanged = !preview_ || !preview ||
+                preview_->physicalSize != preview->physicalSize ||
+                preview_->layerCount != preview->layerCount ||
+                preview_->layerHeight != preview->layerHeight;
             preview_ = preview;
             geometryDirty_ = true;
             rebuildLinesLocked();
         }
-        updateSceneBounds();
+        if (boundsChanged) updateSceneBounds();
         requestUpdate();
     }
     void setColors(const QColor& start, const QColor& end) {
@@ -148,6 +158,7 @@ public:
     }
     void fitAll() {
         camera_.setPose(camera_.fittedPose());
+        invalidateLabels();
         requestUpdate();
     }
     void viewTop() { setPreset(-90.0F, 89.0F); }
@@ -164,10 +175,52 @@ public:
         return true;
     }
     bool takeLines(std::vector<StackLineVertex>* lines) {
-        QMutexLocker lock(&mutex_);
-        if (!linesDirty_) return false;
-        linesDirty_ = false;
-        *lines = lines_;
+        {
+            QMutexLocker lock(&mutex_);
+            if (!linesDirty_) return false;
+            linesDirty_ = false;
+            *lines = lines_;
+        }
+        const QSizeF viewport(size());
+        const auto screenLine = [&](const QPointF& a, const QPointF& b,
+                                    float red, float green, float blue) {
+            const QVector2D p = JobPreviewMath::screenToVulkanNdc(a, viewport);
+            const QVector2D q = JobPreviewMath::screenToVulkanNdc(b, viewport);
+            lines->push_back({p.x(), p.y(), -1000000.0F, red, green, blue});
+            lines->push_back({q.x(), q.y(), -1000000.0F, red, green, blue});
+        };
+        constexpr unsigned char digits[10] = {
+            0x3f, 0x06, 0x5b, 0x4f, 0x66,
+            0x6d, 0x7d, 0x07, 0x7f, 0x6f};
+        for (const auto& badge : labelBadges()) {
+            const float red = badge.selected ? 1.0F : 0.75F;
+            const float green = badge.selected ? 0.84F : 0.95F;
+            const float blue = badge.selected ? 0.12F : 1.0F;
+            const QRectF& box = badge.rect;
+            if ((box.center()-badge.anchor).manhattanLength() > box.width())
+                screenLine(badge.anchor, box.center(), red, green, blue);
+            screenLine(box.topLeft(), box.topRight(), red, green, blue);
+            screenLine(box.topRight(), box.bottomRight(), red, green, blue);
+            screenLine(box.bottomRight(), box.bottomLeft(), red, green, blue);
+            screenLine(box.bottomLeft(), box.topLeft(), red, green, blue);
+            const QString number = QString::number(badge.placementNumber);
+            for (qsizetype i = 0; i < number.size(); ++i) {
+                const unsigned char mask = digits[number[i].digitValue()];
+                const double x = box.left() + 5.0 + i * 12.0;
+                const double y = box.top() + 4.0;
+                const auto stroke = [&](unsigned char bit, double x0, double y0,
+                                        double x1, double y1) {
+                    if (mask & bit) screenLine({x+x0*8.0,y+y0*8.0},
+                                               {x+x1*8.0,y+y1*8.0},red,green,blue);
+                };
+                // Seven-segment masks use top, upper-right, lower-right,
+                // bottom, lower-left, upper-left, middle in bit order.
+                stroke(0x01,0,0,1,0); stroke(0x02,1,0,1,1);
+                stroke(0x04,1,1,1,2); stroke(0x08,0,2,1,2);
+                stroke(0x10,0,1,0,2); stroke(0x20,0,0,0,1);
+                stroke(0x40,0,1,1,1);
+            }
+        }
         return true;
     }
     void invalidateGraphicsResources() {
@@ -200,11 +253,17 @@ public:
     }
 
 protected:
+    void resizeEvent(QResizeEvent* event) override {
+        QVulkanWindow::resizeEvent(event);
+        invalidateLabels();
+        requestUpdate();
+    }
     void mousePressEvent(QMouseEvent* event) override {
         if (event->button() != Qt::LeftButton && event->button() != Qt::RightButton &&
             event->button() != Qt::MiddleButton) return;
         pressedButton_ = event->button();
         lastPosition_ = event->position();
+        pressPosition_ = lastPosition_;
         requestActivate();
         setMouseGrabEnabled(true);
         event->accept();
@@ -219,17 +278,24 @@ protected:
                               camera_.groundForward() * float(delta.y()) * scale);
         }
         lastPosition_ = event->position();
+        invalidateLabels();
         requestUpdate();
         event->accept();
     }
     void mouseReleaseEvent(QMouseEvent* event) override {
         if (event->button() == pressedButton_) {
+            if (pressedButton_ == Qt::LeftButton &&
+                (event->position() - pressPosition_).manhattanLength() <= 4) {
+                const qint64 block = blockAt(event->position());
+                if (block >= 0 && blockActivated_) blockActivated_(block);
+            }
             cancelPointerInteraction();
         }
         event->accept();
     }
     void wheelEvent(QWheelEvent* event) override {
         camera_.zoomBy(std::exp(-float(event->angleDelta().y()) * 0.0012F));
+        invalidateLabels();
         requestUpdate();
         event->accept();
     }
@@ -254,6 +320,120 @@ protected:
 
 private:
     friend class StackVulkanRenderer;
+    struct LabelBadge {
+        QRectF rect;
+        QPointF anchor;
+        qint64 traversalIndex = -1;
+        int placementNumber = 0;
+        bool selected = false;
+    };
+    void invalidateLabels() {
+        QMutexLocker lock(&mutex_);
+        linesDirty_ = true;
+    }
+    QVector<LabelBadge> labelBadges() const {
+        MaskStackPreviewDataPtr preview;
+        QVector3D origin;
+        float scale;
+        MaskStackDisplayMode mode;
+        qint64 active;
+        {
+            QMutexLocker lock(&mutex_);
+            preview = preview_;
+            origin = origin_;
+            scale = zScale_;
+            mode = mode_;
+            active = activeBlock_;
+        }
+        QVector<LabelBadge> badges;
+        if (!preview || preview->blocks.isEmpty()) return badges;
+        const QSizeF viewport(size());
+        const QMatrix4x4 matrix = viewProjection();
+        const float height = float(preview->layerCount * preview->layerHeight) * scale *
+            (mode == MaskStackDisplayMode::Exploded ? kExplodedSpacing : 1.0F);
+        for (const auto& block : preview->blocks) {
+            if (block.placementNumber <= 0) continue;
+            QPointF anchor;
+            const QVector3D position(float(block.physicalRect.center().x()),
+                                     float(block.physicalRect.center().y()), height);
+            if (!JobPreviewMath::project(position-origin, matrix, viewport, &anchor)) continue;
+            const double width = QString::number(block.placementNumber).size()*12.0 + 10.0;
+            QRectF box(anchor.x()+7.0, anchor.y()-32.0, width, 25.0);
+            box.moveLeft(std::clamp(box.left(), 2.0,
+                std::max(2.0, viewport.width()-box.width()-2.0)));
+            box.moveTop(std::clamp(box.top(), 2.0,
+                std::max(2.0, viewport.height()-box.height()-2.0)));
+            for (int tries=0; tries<256; ++tries) {
+                bool overlaps=false;
+                for (const auto& previous:badges) {
+                    if (box.intersects(previous.rect.adjusted(-2,-2,2,2))) {
+                        overlaps=true;
+                        break;
+                    }
+                }
+                if (!overlaps) break;
+                box.translate(0, box.height()+3.0);
+                if (box.bottom()>viewport.height()-2.0) {
+                    box.moveTop(2.0);
+                    box.translate(box.width()+3.0,0);
+                }
+            }
+            badges.push_back({box, anchor, block.traversalIndex,
+                              block.placementNumber, block.traversalIndex==active});
+        }
+        return badges;
+    }
+    qint64 blockAt(const QPointF& screen) const {
+        for (const auto& badge : labelBadges())
+            if (badge.rect.contains(screen)) return badge.traversalIndex;
+        MaskStackPreviewDataPtr preview;
+        QVector3D origin;
+        float scale;
+        MaskStackDisplayMode mode;
+        {
+            QMutexLocker lock(&mutex_);
+            preview = preview_;
+            origin = origin_;
+            scale = zScale_;
+            mode = mode_;
+        }
+        if (!preview || preview->blocks.isEmpty()) return -1;
+        QVector3D rayOrigin, rayDirection;
+        if (!JobPreviewMath::screenRay(screen, QSizeF(size()), viewProjection(),
+                                       &rayOrigin, &rayDirection)) return -1;
+        rayOrigin += origin;
+        const float height = float(preview->layerCount * preview->layerHeight) * scale *
+            (mode == MaskStackDisplayMode::Exploded ? kExplodedSpacing : 1.0F);
+        float nearest = std::numeric_limits<float>::max();
+        qint64 selected = -1;
+        for (const auto& block : preview->blocks) {
+            const float minimum[3] = {float(block.physicalRect.left()),
+                                      float(block.physicalRect.top()), 0.0F};
+            const float maximum[3] = {float(block.physicalRect.right()),
+                                      float(block.physicalRect.bottom()), std::max(height, 0.001F)};
+            float enter = 0.0F;
+            float leave = nearest;
+            bool hit = true;
+            for (int axis = 0; axis < 3; ++axis) {
+                const float direction = rayDirection[axis];
+                if (std::abs(direction) < 1e-7F) {
+                    if (rayOrigin[axis] < minimum[axis] || rayOrigin[axis] > maximum[axis]) hit = false;
+                    continue;
+                }
+                float a = (minimum[axis] - rayOrigin[axis]) / direction;
+                float b = (maximum[axis] - rayOrigin[axis]) / direction;
+                if (a > b) std::swap(a, b);
+                enter = std::max(enter, a);
+                leave = std::min(leave, b);
+                if (enter > leave) { hit = false; break; }
+            }
+            if (hit && enter < nearest) {
+                nearest = enter;
+                selected = block.traversalIndex;
+            }
+        }
+        return selected;
+    }
     void cancelPointerInteraction() {
         pressedButton_ = Qt::NoButton;
         setMouseGrabEnabled(false);
@@ -263,6 +443,7 @@ private:
         pose.azimuth = azimuth;
         pose.elevation = elevation;
         camera_.setPose(pose);
+        invalidateLabels();
         requestUpdate();
     }
     float worldPerPixel() const {
@@ -293,6 +474,7 @@ private:
         if (!preview) {
             { QMutexLocker lock(&mutex_); origin_ = {}; }
             camera_.setSceneBounds({-0.5F,-0.5F,-0.5F},{0.5F,0.5F,0.5F});
+            invalidateLabels();
             return;
         }
         const float width = static_cast<float>(preview->physicalSize.width());
@@ -304,6 +486,7 @@ private:
         { QMutexLocker lock(&mutex_); origin_ = origin; }
         camera_.setSceneBounds(-origin, {width-origin.x(), height-origin.y(),
                                          stackHeight-origin.z()});
+        invalidateLabels();
     }
     void addLine(float x0,float y0,float z0,float x1,float y1,float z1,
                  float r,float g,float b) {
@@ -383,6 +566,8 @@ private:
     bool linesDirty_ = true;
     Qt::MouseButton pressedButton_ = Qt::NoButton;
     QPointF lastPosition_;
+    QPointF pressPosition_;
+    std::function<void(qint64)> blockActivated_;
 };
 
 bool StackVulkanRenderer::createBuffer(VkDeviceSize size,VkBufferUsageFlags usage,Buffer* buffer) {
@@ -409,7 +594,7 @@ void StackVulkanRenderer::releaseResources(){if(!functions_)return;for(auto& buf
 
 class MaskStackWidget::Backend {
 public:
-    explicit Backend(QWidget* host) {
+    explicit Backend(MaskStackWidget* host) {
 #if IMAGE_HANDLER_HAS_VULKAN_PREVIEW
         instance_ = std::make_unique<QVulkanInstance>();
         if (!instance_->create()) {
@@ -417,6 +602,7 @@ public:
             return;
         }
         window_ = new StackVulkanWindow;
+        window_->setBlockActivated([host](qint64 block) { host->blockActivated(block); });
         window_->setObjectName(QStringLiteral("maskStackVulkanWindow"));
         window_->setVulkanInstance(instance_.get());
         if (window_->availablePhysicalDevices().isEmpty()) {
@@ -554,7 +740,7 @@ void MaskStackWidget::setColors(const QColor& start,const QColor& end){startColo
 void MaskStackWidget::setDisplayMode(MaskStackDisplayMode mode){mode_=mode;backend_->setMode(mode);}
 void MaskStackWidget::setSelectedLayer(int layer){selectedLayer_=std::max(1,layer);backend_->setSelectedLayer(selectedLayer_);}
 void MaskStackWidget::setActiveBlock(qint64 traversalIndex){activeBlock_=traversalIndex;backend_->setActiveBlock(traversalIndex);}
-void MaskStackWidget::setZScale(double scale){zScale_=std::clamp(scale,1.0,100.0);backend_->setZScale(zScale_);}
+void MaskStackWidget::setZScale(double scale){const double next=std::clamp(scale,1.0,100.0);if(std::abs(next-zScale_)<1e-9)return;zScale_=next;backend_->setZScale(zScale_);}
 void MaskStackWidget::clear(){preview_.reset();activeBlock_=-1;backend_->setPreview({});backend_->setActiveBlock(-1);}
 void MaskStackWidget::fitAll(){backend_->fitAll();}
 void MaskStackWidget::viewTop(){backend_->top();}

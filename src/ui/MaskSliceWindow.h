@@ -43,6 +43,9 @@ public:
         return stackAnalysis_;
     }
 
+Q_SIGNALS:
+    void invertHeightChanged(bool inverted);
+
 protected:
     void closeEvent(QCloseEvent* event) override;
 
@@ -92,6 +95,7 @@ private:
     QSpinBox* outputHeight_ = nullptr;
     QCheckBox* lockAspect_ = nullptr;
     QCheckBox* invertMask_ = nullptr;
+    QCheckBox* invertHeight_ = nullptr;
     QComboBox* stackMode_ = nullptr;
     QCheckBox* automaticZScale_ = nullptr;
     QDoubleSpinBox* stackZScale_ = nullptr;
