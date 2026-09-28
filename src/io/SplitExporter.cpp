@@ -391,10 +391,11 @@ QPointF SplitExporter::physicalPosition(const SegmentationResult& segmentation,
         pixelY -= static_cast<double>(qint64(segmentation.rows - 1) *
                                       segmentation.settings.cellHeight) * 0.5;
     }
-    const double x = pixelX * options.pixelScale;
+    double x = pixelX * options.pixelScale;
     double y = pixelY * options.pixelScale;
+    if (options.reverseX) x = -x;
     if (options.reverseY) y = -y;
-    return {x, y == 0.0 ? 0.0 : y};
+    return {x == 0.0 ? 0.0 : x, y == 0.0 ? 0.0 : y};
 }
 
 QPointF SplitExporter::physicalSelectionOrigin(
@@ -426,7 +427,8 @@ QPointF SplitExporter::physicalSelectionOrigin(
         if (maximumColumn < minimumColumn || maximumRow < minimumRow) return {};
     }
 
-    const JobPlacementOptions absoluteOptions{options.pixelScale, options.reverseY, false};
+    const JobPlacementOptions absoluteOptions{
+        options.pixelScale, options.reverseY, false, options.reverseX};
     const QPointF minimum = physicalPosition(
         segmentation, {minimumColumn, minimumRow}, absoluteOptions);
     const QPointF maximum = physicalPosition(

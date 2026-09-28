@@ -3,6 +3,7 @@
 #include "domain/MaskSliceModels.h"
 #include "io/LayeredPackageTypes.h"
 
+#include <cstddef>
 #include <functional>
 #include <QPointF>
 
@@ -24,6 +25,7 @@ struct LayeredMaskRequest {
     int activePlacement = 0;
     bool includeThumbnails = true;
     int stackMaximumSide = 512;
+    std::size_t maximumExplodedQuads = 2'000'000;
 };
 
 struct LayeredMaskPreview {

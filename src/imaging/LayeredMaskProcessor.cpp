@@ -394,10 +394,10 @@ LayeredMaskPreview LayeredMaskProcessor::preview(
         double right = std::numeric_limits<double>::lowest();
         double top = std::numeric_limits<double>::lowest();
         for (const auto& placement : request.placements) {
-            left = std::min(left, placement.jobPosition.x());
-            bottom = std::min(bottom, placement.jobPosition.y());
-            right = std::max(right, placement.jobPosition.x() + modelWidth);
-            top = std::max(top, placement.jobPosition.y() + modelHeight);
+            left = std::min(left, placement.jobPosition.x() - modelWidth * 0.5);
+            bottom = std::min(bottom, placement.jobPosition.y() - modelHeight * 0.5);
+            right = std::max(right, placement.jobPosition.x() + modelWidth * 0.5);
+            top = std::max(top, placement.jobPosition.y() + modelHeight * 0.5);
         }
         if (!std::isfinite(right-left) || !std::isfinite(top-bottom) ||
             right <= left || top <= bottom) {
@@ -409,10 +409,17 @@ LayeredMaskPreview LayeredMaskProcessor::preview(
         combined->requestedOutputSize = modelSize;
         combined->layerHeight = request.options.layerHeight;
         combined->layerCount = request.options.baseLayerCount + request.layerCount;
+        combined->jobCoordinateOrigin = QPointF(-left, -bottom);
+        combined->hasJobCoordinates = true;
         combined->blocks.reserve(request.placements.size());
         auto solid = std::make_shared<MaskStackGeometry>();
         auto exploded = std::make_shared<MaskStackGeometry>();
         QHash<QPoint, LayeredMaskPreview> modelPreviews;
+        QHash<QPoint, int> remainingPlacements;
+        for (const auto& placement : request.placements) {
+            const QPoint key(int(placement.modelRegion.x), int(placement.modelRegion.y));
+            remainingPlacements[key] = remainingPlacements.value(key) + 1;
+        }
         const int activePlacement = std::clamp(request.activePlacement, 0,
                                                int(request.placements.size()) - 1);
         const auto appendGeometry = [](MaskStackGeometry* destination,
@@ -438,27 +445,26 @@ LayeredMaskPreview LayeredMaskProcessor::preview(
             single.placements.clear();
             single.region = placement.modelRegion;
             single.includeThumbnails = thumbnails;
-            single.stackMaximumSide = std::clamp(request.stackMaximumSide, 32, 512);
+            single.stackMaximumSide = std::clamp(request.stackMaximumSide, 16, 512);
             return preview(single, token, {}, error);
         };
         const auto& activeModel = request.placements[activePlacement];
         const QPoint activeKey(int(activeModel.modelRegion.x),
                                int(activeModel.modelRegion.y));
-        auto activePreview = generateModel(activeModel, true);
-        if (!activePreview.stackPreview) return {};
-        modelPreviews.insert(activeKey, std::move(activePreview));
         for (qsizetype index = 0; index < request.placements.size(); ++index) {
             if (token && token->isCancelled()) return {};
             const auto& placement = request.placements[index];
             const QPoint key(int(placement.modelRegion.x), int(placement.modelRegion.y));
             if (!modelPreviews.contains(key))
-                modelPreviews.insert(key, generateModel(placement, false));
+                modelPreviews.insert(key, generateModel(placement, key == activeKey));
             const auto& part = modelPreviews[key];
             if (!part.stackPreview) {
                 return {};
             }
-            const float tileX = static_cast<float>(placement.jobPosition.x() - left);
-            const float tileY = static_cast<float>(placement.jobPosition.y() - bottom);
+            const float tileX = static_cast<float>(
+                placement.jobPosition.x() - modelWidth * 0.5 - left);
+            const float tileY = static_cast<float>(
+                placement.jobPosition.y() - modelHeight * 0.5 - bottom);
             const QSizeF exportedSize = part.stackPreview->physicalSize;
             const float scale = static_cast<float>(std::min({1.0,
                 modelWidth / exportedSize.width(), modelHeight / exportedSize.height()}));
@@ -480,6 +486,13 @@ LayeredMaskPreview LayeredMaskProcessor::preview(
                 result.contentSize = part.contentSize;
                 result.outputSize = part.outputSize;
             }
+            const int remaining = remainingPlacements.value(key) - 1;
+            if (remaining <= 0) {
+                remainingPlacements.remove(key);
+                modelPreviews.remove(key);
+            } else {
+                remainingPlacements[key] = remaining;
+            }
             if (progress) progress({QStringLiteral("生成多块导出预览"), index + 1,
                                     request.placements.size()});
         }
@@ -496,7 +509,7 @@ LayeredMaskPreview LayeredMaskProcessor::preview(
     result.actualMaximumHeight = raster.actualMaximumHeight +
         request.options.baseLayerCount * request.options.layerHeight;
     constexpr double kThumbnailSide = 128.0;
-    const double stackSide = std::clamp(request.stackMaximumSide, 32, 512);
+    const double stackSide = std::clamp(request.stackMaximumSide, 16, 512);
     const double thumbScale = std::min({1.0, kThumbnailSide / result.outputSize.width(),
                                         kThumbnailSide / result.outputSize.height()});
     const QSize thumbnailSize(std::max(1, qRound(result.outputSize.width() * thumbScale)),
@@ -554,7 +567,8 @@ LayeredMaskPreview LayeredMaskProcessor::preview(
     }
     stack->solidGeometry = MaskStackMeshBuilder::buildSolid(*stack, token, progress);
     if (!stack->solidGeometry || (token && token->isCancelled())) return {};
-    stack->explodedGeometry = MaskStackMeshBuilder::buildExploded(*stack, token, progress);
+    stack->explodedGeometry = MaskStackMeshBuilder::buildExploded(
+        *stack, token, progress, request.maximumExplodedQuads);
     if (!stack->explodedGeometry || (token && token->isCancelled())) return {};
     result.stackPreview = stack;
     return result;

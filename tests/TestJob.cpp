@@ -647,7 +647,7 @@ void TestJob::millionPointPreviewScale() {
     SegmentationResult segmentation;segmentation.settings={1,1,128,ForegroundPolarity::Dark};segmentation.rows=1000;segmentation.columns=1000;
     QString error;QElapsedTimer elapsed;elapsed.start();
     const auto document=JobPreviewBuilder::build(metadata,segmentation,TraversalMode::SnakeZ,
-                                                  {1000,1000,1,false},std::make_shared<CancellationToken>(),{},&error);
+                                                  PrintExportOptions{1000,1000,1,false},std::make_shared<CancellationToken>(),{},&error);
     QVERIFY2(document,qPrintable(error));QCOMPARE(document->points.size(),size_t(1'000'000));
     QCOMPARE(document->linkedCells.size(),size_t(1'000'000));QCOMPARE(document->idPrefixSums.size(),size_t(1'000'001));
     QVERIFY(document->spatialIndex);QVERIFY2(elapsed.elapsed()<60000,"百万点预览构建超过 60 秒");

@@ -166,6 +166,7 @@ private:
     quint64 mergePreviewGeneration_ = 0;
     bool switchToJobAfterBuild_ = false;
     bool reverseYSetting_ = false;
+    bool reverseXSetting_ = false;
     int selectedRow_ = -1;
     int selectedColumn_ = -1;
 };

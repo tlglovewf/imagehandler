@@ -208,7 +208,7 @@ bool writeJobJson(const QString& path, const LayeredPackageRequest& request,
     }
     if (!writeAll(file, QByteArrayLiteral("  ],\n  \"commands\": [\n"), error)) return false;
     const JobPlacementOptions placement{request.options.pixelScale, request.options.reverseY,
-                                        false};
+                                         false, request.options.reverseX};
     const QString moveCommand = request.options.jobMoveCommand == JobMoveCommand::RelMove
         ? QStringLiteral("relmove") : QStringLiteral("absmove");
     const QString coordinateKey = request.options.jobMoveCommand == JobMoveCommand::RelMove
@@ -285,6 +285,7 @@ bool writeReport(const QString& path, const LayeredPackageRequest& request, int 
             {QStringLiteral("pixel2phy"), request.options.pixelScale},
             {QStringLiteral("maximumHeight"), request.options.maximumHeight},
             {QStringLiteral("invertHeight"), request.options.invertHeight},
+            {QStringLiteral("reverseX"), request.options.reverseX},
             {QStringLiteral("reverseY"), request.options.reverseY},
             {QStringLiteral("coordinateOrigin"), request.options.centerOrigin
                 ? (request.selectedCells.size() > 1
@@ -297,7 +298,8 @@ bool writeReport(const QString& path, const LayeredPackageRequest& request, int 
                     request.segmentation,
                     request.selectedCells.size() > 1
                         ? request.selectedCells : QVector<QPoint>{},
-                    {request.options.pixelScale, request.options.reverseY, false});
+                    {request.options.pixelScale, request.options.reverseY, false,
+                     request.options.reverseX});
                 return QJsonArray{origin.x(), origin.y(), 0.0};
             }()}}},
         {QStringLiteral("layers"), QJsonObject{

@@ -1,5 +1,6 @@
 #include "ui/MaskStackWidget.h"
 
+#include "imaging/JobLabelLod.h"
 #include "imaging/JobPreviewMath.h"
 
 #include <QEvent>
@@ -11,6 +12,7 @@
 #include <QMutex>
 #include <QMutexLocker>
 #include <QResizeEvent>
+#include <QSet>
 #include <QShortcut>
 #include <QVBoxLayout>
 #include <QWheelEvent>
@@ -19,6 +21,7 @@
 #include <cstring>
 #include <functional>
 #include <limits>
+#include <map>
 #include <memory>
 #include <vector>
 
@@ -110,7 +113,8 @@ public:
             boundsChanged = !preview_ || !preview ||
                 preview_->physicalSize != preview->physicalSize ||
                 preview_->layerCount != preview->layerCount ||
-                preview_->layerHeight != preview->layerHeight;
+                preview_->layerHeight != preview->layerHeight ||
+                preview_->hasJobCoordinates != preview->hasJobCoordinates;
             preview_ = preview;
             geometryDirty_ = true;
             rebuildLinesLocked();
@@ -175,11 +179,17 @@ public:
         return true;
     }
     bool takeLines(std::vector<StackLineVertex>* lines) {
+        MaskStackPreviewDataPtr preview;
+        QVector3D floatingOrigin;
+        qint64 activeBlock = -1;
         {
             QMutexLocker lock(&mutex_);
             if (!linesDirty_) return false;
             linesDirty_ = false;
             *lines = lines_;
+            preview = preview_;
+            floatingOrigin = origin_;
+            activeBlock = activeBlock_;
         }
         const QSizeF viewport(size());
         const auto screenLine = [&](const QPointF& a, const QPointF& b,
@@ -189,37 +199,180 @@ public:
             lines->push_back({p.x(), p.y(), -1000000.0F, red, green, blue});
             lines->push_back({q.x(), q.y(), -1000000.0F, red, green, blue});
         };
+        const auto screenArrow = [&](const QPointF& tail, const QPointF& tip,
+                                     float red, float green, float blue) {
+            const QPointF delta = tip - tail;
+            const double length = std::hypot(delta.x(), delta.y());
+            if (length < 0.001) return;
+            const QPointF direction = delta / length;
+            const QPointF normal(-direction.y(), direction.x());
+            const QPointF base = tip - direction * 10.0;
+            screenLine(tip, base + normal * 4.5, red, green, blue);
+            screenLine(tip, base - normal * 4.5, red, green, blue);
+        };
+        const auto badges = labelBadges();
         constexpr unsigned char digits[10] = {
             0x3f, 0x06, 0x5b, 0x4f, 0x66,
             0x6d, 0x7d, 0x07, 0x7f, 0x6f};
-        for (const auto& badge : labelBadges()) {
-            const float red = badge.selected ? 1.0F : 0.75F;
-            const float green = badge.selected ? 0.84F : 0.95F;
-            const float blue = badge.selected ? 0.12F : 1.0F;
-            const QRectF& box = badge.rect;
-            if ((box.center()-badge.anchor).manhattanLength() > box.width())
-                screenLine(badge.anchor, box.center(), red, green, blue);
-            screenLine(box.topLeft(), box.topRight(), red, green, blue);
-            screenLine(box.topRight(), box.bottomRight(), red, green, blue);
-            screenLine(box.bottomRight(), box.bottomLeft(), red, green, blue);
-            screenLine(box.bottomLeft(), box.topLeft(), red, green, blue);
-            const QString number = QString::number(badge.placementNumber);
-            for (qsizetype i = 0; i < number.size(); ++i) {
-                const unsigned char mask = digits[number[i].digitValue()];
-                const double x = box.left() + 5.0 + i * 12.0;
-                const double y = box.top() + 4.0;
-                const auto stroke = [&](unsigned char bit, double x0, double y0,
-                                        double x1, double y1) {
-                    if (mask & bit) screenLine({x+x0*8.0,y+y0*8.0},
-                                               {x+x1*8.0,y+y1*8.0},red,green,blue);
-                };
-                // Seven-segment masks use top, upper-right, lower-right,
-                // bottom, lower-left, upper-left, middle in bit order.
-                stroke(0x01,0,0,1,0); stroke(0x02,1,0,1,1);
-                stroke(0x04,1,1,1,2); stroke(0x08,0,2,1,2);
-                stroke(0x10,0,1,0,2); stroke(0x20,0,0,0,1);
-                stroke(0x40,0,1,1,1);
+        const auto appendGlyph = [&](const QPointF& origin, QChar glyph,
+                                     float red, float green, float blue) {
+            constexpr double width = 6.0, height = 10.0;
+            if (glyph == QLatin1Char('~')) {
+                screenLine(origin + QPointF(0, 6), origin + QPointF(2, 4), red, green, blue);
+                screenLine(origin + QPointF(2, 4), origin + QPointF(4, 6), red, green, blue);
+                screenLine(origin + QPointF(4, 6), origin + QPointF(6, 4), red, green, blue);
+                return;
             }
+            if (glyph == QLatin1Char('+')) {
+                screenLine(origin + QPointF(0, 5), origin + QPointF(6, 5), red, green, blue);
+                screenLine(origin + QPointF(3, 2), origin + QPointF(3, 8), red, green, blue);
+                return;
+            }
+            if (glyph == QLatin1Char('-')) {
+                screenLine(origin + QPointF(0, 5), origin + QPointF(6, 5), red, green, blue);
+                return;
+            }
+            if (glyph == QLatin1Char('.')) {
+                screenLine(origin + QPointF(2, 9), origin + QPointF(3, 10), red, green, blue);
+                return;
+            }
+            if (glyph == QLatin1Char('X')) {
+                screenLine(origin, origin + QPointF(6, 10), red, green, blue);
+                screenLine(origin + QPointF(6, 0), origin + QPointF(0, 10), red, green, blue);
+                return;
+            }
+            if (glyph == QLatin1Char('Y')) {
+                screenLine(origin, origin + QPointF(3, 5), red, green, blue);
+                screenLine(origin + QPointF(6, 0), origin + QPointF(3, 5), red, green, blue);
+                screenLine(origin + QPointF(3, 5), origin + QPointF(3, 10), red, green, blue);
+                return;
+            }
+            if (!glyph.isDigit()) return;
+            const unsigned char mask = digits[glyph.digitValue()];
+            const auto stroke = [&](unsigned char bit, double x0, double y0,
+                                    double x1, double y1) {
+                if (mask & bit) screenLine(origin + QPointF(x0*width,y0*height*0.5),
+                                           origin + QPointF(x1*width,y1*height*0.5),
+                                           red,green,blue);
+            };
+            stroke(0x01,0,0,1,0); stroke(0x02,1,0,1,1);
+            stroke(0x04,1,1,1,2); stroke(0x08,0,2,1,2);
+            stroke(0x10,0,1,0,2); stroke(0x20,0,0,0,1);
+            stroke(0x40,0,1,1,1);
+        };
+        const auto appendText = [&](const QPointF& anchor, const QString& text,
+                                    float red, float green, float blue) {
+            double x = anchor.x() + 7.0;
+            const double y = anchor.y() - 6.0;
+            for (const QChar glyph : text) {
+                appendGlyph({x,y},glyph,red,green,blue);
+                x += 8.0;
+            }
+        };
+        const auto outlinedText = [&](const QPointF& anchor, const QString& text,
+                                      float red, float green, float blue) {
+            static constexpr QPointF offsets[] = {
+                {-1.0,0.0},{1.0,0.0},{0.0,-1.0},{0.0,1.0}};
+            for (const QPointF& offset : offsets)
+                appendText(anchor + offset, text, 0.92F, 0.94F, 0.98F);
+            appendText(anchor, text, red, green, blue);
+        };
+        if (preview && preview->hasJobCoordinates && viewport.width() > 0.0 &&
+            viewport.height() > 0.0) {
+            const QMatrix4x4 matrix = viewProjection();
+            const auto projectPoint = [&](const QPointF& point, QPointF* screen) {
+                return JobPreviewMath::project(
+                    QVector3D(float(point.x()), float(point.y()), 0.0F) - floatingOrigin,
+                    matrix, viewport, screen);
+            };
+            const double width = preview->physicalSize.width();
+            const double height = preview->physicalSize.height();
+            const double padding = std::max(0.001, std::max(width, height) * 0.08);
+            const QPointF zero = preview->jobCoordinateOrigin;
+            const QPointF xMinimum(-padding, zero.y());
+            const QPointF xMaximum(width + padding, zero.y());
+            const QPointF yMinimum(zero.x(), -padding);
+            const QPointF yMaximum(zero.x(), height + padding);
+            QPointF zeroScreen, xMinScreen, xMaxScreen, yMinScreen, yMaxScreen;
+            const bool zeroVisible = projectPoint(zero, &zeroScreen);
+            if (zeroVisible && projectPoint(xMinimum, &xMinScreen) &&
+                projectPoint(xMaximum, &xMaxScreen)) {
+                screenLine(xMinScreen, xMaxScreen, 1.0F, 0.18F, 0.18F);
+                screenArrow(zeroScreen, xMinScreen, 1.0F, 0.18F, 0.18F);
+                screenArrow(zeroScreen, xMaxScreen, 1.0F, 0.18F, 0.18F);
+                outlinedText(xMinScreen + QPointF(-25.0, 2.0), QStringLiteral("-X"),
+                             1.0F, 0.18F, 0.18F);
+                outlinedText(xMaxScreen + QPointF(2.0, 2.0), QStringLiteral("+X"),
+                             1.0F, 0.18F, 0.18F);
+            }
+            if (zeroVisible && projectPoint(yMinimum, &yMinScreen) &&
+                projectPoint(yMaximum, &yMaxScreen)) {
+                screenLine(yMinScreen, yMaxScreen, 0.15F, 1.0F, 0.28F);
+                screenArrow(zeroScreen, yMinScreen, 0.15F, 1.0F, 0.28F);
+                screenArrow(zeroScreen, yMaxScreen, 0.15F, 1.0F, 0.28F);
+                outlinedText(yMinScreen + QPointF(-25.0, 2.0), QStringLiteral("-Y"),
+                             0.15F, 1.0F, 0.28F);
+                outlinedText(yMaxScreen + QPointF(2.0, 2.0), QStringLiteral("+Y"),
+                             0.15F, 1.0F, 0.28F);
+            }
+            if (zeroVisible) {
+                const QPointF originMarker[] = {
+                    zeroScreen + QPointF(0,-6), zeroScreen + QPointF(6,0),
+                    zeroScreen + QPointF(0,6), zeroScreen + QPointF(-6,0)};
+                for (int i = 0; i < 4; ++i)
+                    screenLine(originMarker[i], originMarker[(i+1)%4],
+                               1.0F, 0.84F, 0.08F);
+                outlinedText(zeroScreen + QPointF(3.0,-9.0), QStringLiteral("0"),
+                             1.0F, 0.84F, 0.08F);
+            }
+
+            const auto active = std::find_if(preview->blocks.cbegin(), preview->blocks.cend(),
+                [activeBlock](const MaskStackBlockPlacement& block) {
+                    return block.traversalIndex == activeBlock;
+                });
+            if (zeroVisible && active != preview->blocks.cend()) {
+                const QPointF center = active->physicalRect.center();
+                const QPointF corner(center.x(), zero.y());
+                QPointF centerScreen, cornerScreen;
+                if (projectPoint(center, &centerScreen) && projectPoint(corner, &cornerScreen)) {
+                    screenLine(zeroScreen, cornerScreen, 1.0F, 0.55F, 0.10F);
+                    screenLine(cornerScreen, centerScreen, 1.0F, 0.82F, 0.05F);
+                    const QPointF centerMarker[] = {
+                        centerScreen + QPointF(-6,0), centerScreen + QPointF(6,0),
+                        centerScreen + QPointF(0,-6), centerScreen + QPointF(0,6)};
+                    screenLine(centerMarker[0], centerMarker[1], 1.0F, 0.82F, 0.05F);
+                    screenLine(centerMarker[2], centerMarker[3], 1.0F, 0.82F, 0.05F);
+                    const auto signedNumber = [](double value) {
+                        if (std::abs(value) < 0.0000005) return QStringLiteral("0");
+                        QString text = QString::number(value, 'f', 3);
+                        while (text.contains(QLatin1Char('.')) && text.endsWith(QLatin1Char('0')))
+                            text.chop(1);
+                        if (text.endsWith(QLatin1Char('.'))) text.chop(1);
+                        return value > 0.0 ? QStringLiteral("+") + text : text;
+                    };
+                    outlinedText((zeroScreen + cornerScreen) * 0.5 + QPointF(0,-9),
+                                 QStringLiteral("X%1").arg(signedNumber(active->jobPosition.x())),
+                                 1.0F, 0.55F, 0.10F);
+                    outlinedText((cornerScreen + centerScreen) * 0.5 + QPointF(0,-9),
+                                 QStringLiteral("Y%1").arg(signedNumber(active->jobPosition.y())),
+                                 1.0F, 0.82F, 0.05F);
+                }
+            }
+        }
+        static constexpr QPointF outlineOffsets[] = {
+            {-1.0,0.0},{1.0,0.0},{0.0,-1.0},{0.0,1.0}};
+        for (const auto& badge : badges) {
+            const float red = badge.selected ? 1.0F : 0.72F;
+            const float green = badge.selected ? 0.84F : 0.82F;
+            const float blue = badge.selected ? 0.12F : 0.90F;
+            const QPointF marker[4] = {
+                badge.anchor + QPointF(0,-3), badge.anchor + QPointF(3,0),
+                badge.anchor + QPointF(0,3), badge.anchor + QPointF(-3,0)};
+            for (int i=0;i<4;++i)
+                screenLine(marker[i],marker[(i+1)%4],red,green,blue);
+            for (const QPointF& offset : outlineOffsets)
+                appendText(badge.anchor+offset,badge.text,0.04F,0.06F,0.10F);
+            appendText(badge.anchor,badge.text,red,green,blue);
         }
         return true;
     }
@@ -264,6 +417,11 @@ protected:
         pressedButton_ = event->button();
         lastPosition_ = event->position();
         pressPosition_ = lastPosition_;
+        {
+            QMutexLocker lock(&mutex_);
+            interacting_ = true;
+            linesDirty_ = true;
+        }
         requestActivate();
         setMouseGrabEnabled(true);
         event->accept();
@@ -324,7 +482,7 @@ private:
         QRectF rect;
         QPointF anchor;
         qint64 traversalIndex = -1;
-        int placementNumber = 0;
+        QString text;
         bool selected = false;
     };
     void invalidateLabels() {
@@ -337,6 +495,7 @@ private:
         float scale;
         MaskStackDisplayMode mode;
         qint64 active;
+        bool interacting;
         {
             QMutexLocker lock(&mutex_);
             preview = preview_;
@@ -344,6 +503,7 @@ private:
             scale = zScale_;
             mode = mode_;
             active = activeBlock_;
+            interacting = interacting_;
         }
         QVector<LabelBadge> badges;
         if (!preview || preview->blocks.isEmpty()) return badges;
@@ -351,41 +511,84 @@ private:
         const QMatrix4x4 matrix = viewProjection();
         const float height = float(preview->layerCount * preview->layerHeight) * scale *
             (mode == MaskStackDisplayMode::Exploded ? kExplodedSpacing : 1.0F);
+        struct ProjectedBlock {
+            const MaskStackBlockPlacement* block = nullptr;
+            QPointF screen;
+        };
+        std::vector<ProjectedBlock> projected;
+        std::vector<QPointF> projectedScreens;
+        projected.reserve(preview->blocks.size());
+        projectedScreens.reserve(preview->blocks.size());
         for (const auto& block : preview->blocks) {
             if (block.placementNumber <= 0) continue;
             QPointF anchor;
             const QVector3D position(float(block.physicalRect.center().x()),
                                      float(block.physicalRect.center().y()), height);
-            if (!JobPreviewMath::project(position-origin, matrix, viewport, &anchor)) continue;
-            const double width = QString::number(block.placementNumber).size()*12.0 + 10.0;
-            QRectF box(anchor.x()+7.0, anchor.y()-32.0, width, 25.0);
-            box.moveLeft(std::clamp(box.left(), 2.0,
-                std::max(2.0, viewport.width()-box.width()-2.0)));
-            box.moveTop(std::clamp(box.top(), 2.0,
-                std::max(2.0, viewport.height()-box.height()-2.0)));
-            for (int tries=0; tries<256; ++tries) {
-                bool overlaps=false;
-                for (const auto& previous:badges) {
-                    if (box.intersects(previous.rect.adjusted(-2,-2,2,2))) {
-                        overlaps=true;
-                        break;
-                    }
-                }
-                if (!overlaps) break;
-                box.translate(0, box.height()+3.0);
-                if (box.bottom()>viewport.height()-2.0) {
-                    box.moveTop(2.0);
-                    box.translate(box.width()+3.0,0);
-                }
+            if (!JobPreviewMath::project(position-origin, matrix, viewport, &anchor) ||
+                anchor.x()<0.0 || anchor.y()<0.0 ||
+                anchor.x()>=viewport.width() || anchor.y()>=viewport.height()) continue;
+            projected.push_back({&block,anchor});
+            projectedScreens.push_back(anchor);
+        }
+        QSet<quint64> occupied;
+        int ordinary = 0;
+        const auto add = [&](const QPointF& anchor, const QString& text,
+                             qint64 traversalIndex, bool selected) {
+            const quint32 gx=static_cast<quint32>(anchor.x()/80.0);
+            const quint32 gy=static_cast<quint32>(anchor.y()/22.0);
+            const quint64 key=(quint64(gx)<<32)|gy;
+            if (!selected && occupied.contains(key)) return;
+            occupied.insert(key);
+            const double textWidth=std::max(8.0,double(text.size())*8.0);
+            badges.push_back({QRectF(anchor.x()+5.0,anchor.y()-9.0,
+                                     textWidth+4.0,18.0),
+                              anchor,traversalIndex,text,selected});
+            if (!selected) ++ordinary;
+        };
+        for (const auto& point : projected) {
+            if (point.block->traversalIndex == active) {
+                add(point.screen,QString::number(point.block->placementNumber),
+                    point.block->traversalIndex,true);
+                break;
             }
-            badges.push_back({box, anchor, block.traversalIndex,
-                              block.placementNumber, block.traversalIndex==active});
+        }
+        if (interacting) return badges;
+        const double spacing=JobPreviewMath::projectedPointSpacing(
+            projectedScreens,projectedScreens.size());
+        const JobLabelLodDecision lod=JobLabelLod::decide(
+            spacing,preview->blocks.size());
+        if (lod.level==JobLabelLodLevel::Individual) {
+            for (const auto& point:projected) {
+                if (ordinary>=lod.maximumOrdinaryLabels ||
+                    point.block->traversalIndex==active) continue;
+                add(point.screen,QString::number(point.block->placementNumber),
+                    point.block->traversalIndex,false);
+            }
+        } else if (lod.level==JobLabelLodLevel::Range) {
+            struct RangeAnchor { QPointF sum; qint64 count=0; };
+            std::map<qint64,RangeAnchor> ranges;
+            const qint64 group=std::max<qint64>(1,lod.rangeSize);
+            for (const auto& point:projected) {
+                const qint64 number=point.block->placementNumber;
+                if (number<=0) continue;
+                auto& range=ranges[((number-1)/group)*group+1];
+                range.sum+=point.screen;
+                ++range.count;
+            }
+            for (const auto& [first,range]:ranges) {
+                if (range.count<=0 || ordinary>=lod.maximumOrdinaryLabels) continue;
+                const qint64 last=std::min<qint64>(
+                    first+group-1,preview->blocks.size());
+                add(range.sum/range.count,
+                    QStringLiteral("%1~%2").arg(first).arg(last),-1,false);
+            }
         }
         return badges;
     }
     qint64 blockAt(const QPointF& screen) const {
         for (const auto& badge : labelBadges())
-            if (badge.rect.contains(screen)) return badge.traversalIndex;
+            if (badge.traversalIndex >= 0 && badge.rect.contains(screen))
+                return badge.traversalIndex;
         MaskStackPreviewDataPtr preview;
         QVector3D origin;
         float scale;
@@ -437,6 +640,12 @@ private:
     void cancelPointerInteraction() {
         pressedButton_ = Qt::NoButton;
         setMouseGrabEnabled(false);
+        {
+            QMutexLocker lock(&mutex_);
+            interacting_ = false;
+            linesDirty_ = true;
+        }
+        requestUpdate();
     }
     void setPreset(float azimuth, float elevation) {
         JobCameraPose pose = camera_.fittedPose();
@@ -482,10 +691,13 @@ private:
         const float explode = mode == MaskStackDisplayMode::Exploded ? kExplodedSpacing : 1.0F;
         const float stackHeight = static_cast<float>(preview->layerCount * preview->layerHeight) *
                                   zScale * explode;
+        const float guidePadding = preview->hasJobCoordinates
+            ? std::max(0.001F, std::max(width, height) * 0.08F) : 0.0F;
         const QVector3D origin(width * 0.5F, height * 0.5F, stackHeight * 0.5F);
         { QMutexLocker lock(&mutex_); origin_ = origin; }
-        camera_.setSceneBounds(-origin, {width-origin.x(), height-origin.y(),
-                                         stackHeight-origin.z()});
+        camera_.setSceneBounds({-guidePadding-origin.x(), -guidePadding-origin.y(), -origin.z()},
+                               {width+guidePadding-origin.x(), height+guidePadding-origin.y(),
+                                stackHeight-origin.z()});
         invalidateLabels();
     }
     void addLine(float x0,float y0,float z0,float x1,float y1,float z1,
@@ -506,12 +718,15 @@ private:
         const float height = static_cast<float>(preview_->physicalSize.height());
         const float stackHeight = static_cast<float>(preview_->layerCount * preview_->layerHeight);
         constexpr float grid = 0.32F;
-        addLine(0,0,0,width,0,0,1.0F,0.25F,0.25F);
-        addLine(0,0,0,0,height,0,0.25F,1.0F,0.35F);
-        addLine(0,0,0,0,0,stackHeight,0.25F,0.55F,1.0F);
+        addLine(0,0,0,width,0,0,grid,grid,grid);
         addLine(width,0,0,width,height,0,grid,grid,grid);
         addLine(width,height,0,0,height,0,grid,grid,grid);
         addLine(0,height,0,0,0,0,grid,grid,grid);
+        if (preview_->hasJobCoordinates) {
+            const float ox = static_cast<float>(preview_->jobCoordinateOrigin.x());
+            const float oy = static_cast<float>(preview_->jobCoordinateOrigin.y());
+            addLine(ox,oy,0,ox,oy,stackHeight,0.25F,0.55F,1.0F);
+        }
 
         const auto active = std::find_if(preview_->blocks.cbegin(), preview_->blocks.cend(),
             [this](const MaskStackBlockPlacement& block) {
@@ -564,6 +779,7 @@ private:
     std::vector<StackLineVertex> lines_;
     bool geometryDirty_ = true;
     bool linesDirty_ = true;
+    bool interacting_ = false;
     Qt::MouseButton pressedButton_ = Qt::NoButton;
     QPointF lastPosition_;
     QPointF pressPosition_;

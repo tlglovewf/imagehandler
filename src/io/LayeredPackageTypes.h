@@ -17,6 +17,7 @@ struct JobPlacementOptions {
     double pixelScale = 0.25;
     bool reverseY = false;
     bool centerOrigin = false;
+    bool reverseX = false;
 };
 
 struct LayeredPackageOptions {
@@ -44,6 +45,7 @@ struct LayeredPackageOptions {
     double exportMultiplier = 13.55;
     bool mirrorX = false;
     bool centerOrigin = false;
+    bool reverseX = false;
 };
 
 struct LayeredPackageRequest {

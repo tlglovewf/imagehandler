@@ -30,9 +30,11 @@ public:
                    double maximumHeight, bool invertHeight,
                    bool reverseY, const QString& initialDirectory,
                    const QPoint& activeCell = QPoint(-1, -1),
-                   const QVector<QPoint>& selectedCells = {});
+                   const QVector<QPoint>& selectedCells = {},
+                   bool reverseX = false);
     void setElementGrouping(const ElementGroupingResult& grouping);
     [[nodiscard]] bool reverseY() const;
+    [[nodiscard]] bool reverseX() const;
     [[nodiscard]] QString outputDirectory() const;
     void setOutputDirectory(const QString& directory);
 
@@ -83,6 +85,7 @@ private:
     QCheckBox* invertMask_ = nullptr;
     QCheckBox* invertHeightCheck_ = nullptr;
     QCheckBox* reverseY_ = nullptr;
+    QCheckBox* reverseX_ = nullptr;
     QCheckBox* centerOrigin_ = nullptr;
     QCheckBox* attachToCanvas_ = nullptr;
     QSpinBox* canvasWidth_ = nullptr;

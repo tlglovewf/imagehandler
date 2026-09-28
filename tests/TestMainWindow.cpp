@@ -148,11 +148,19 @@ void TestMainWindow::printCanvasFollowsDocument() {
              QPointF(1.0,0.75));
     QCOMPARE(SplitExporter::physicalPosition(segmentation,QPoint(1,1),{0.25,true}),
              QPointF(1.0,-0.75));
+    QCOMPARE(SplitExporter::physicalPosition(segmentation,QPoint(1,1),{0.25,false,false,true}),
+             QPointF(-1.0,0.75));
+    QCOMPARE(SplitExporter::physicalPosition(segmentation,QPoint(1,1),{0.25,true,false,true}),
+             QPointF(-1.0,-0.75));
     QCOMPARE(SplitExporter::physicalPosition(segmentation,QPoint(0,0),{0.25,false,true}),
              QPointF(-0.5,-0.375));
     QCOMPARE(SplitExporter::physicalPosition(segmentation,QPoint(1,1),{0.25,false,true}),
              QPointF(0.5,0.375));
     QCOMPARE(SplitExporter::physicalPosition(segmentation,QPoint(0,0),{0.25,true,true}),
+             QPointF(-0.5,0.375));
+    QCOMPARE(SplitExporter::physicalPosition(segmentation,QPoint(0,0),{0.25,false,true,true}),
+             QPointF(0.5,-0.375));
+    QCOMPARE(SplitExporter::physicalPosition(segmentation,QPoint(1,1),{0.25,false,true,true}),
              QPointF(-0.5,0.375));
     QCOMPARE(SplitExporter::physicalSelectionOrigin(
                  segmentation, {QPoint(0,0), QPoint(1,1)}, {0.25,false}),
@@ -160,6 +168,9 @@ void TestMainWindow::printCanvasFollowsDocument() {
     QCOMPARE(SplitExporter::physicalSelectionOrigin(
                  segmentation, {QPoint(0,1), QPoint(1,1)}, {0.25,true}),
              QPointF(0.5,-0.75));
+    QCOMPARE(SplitExporter::physicalSelectionOrigin(
+                 segmentation, {QPoint(0,1), QPoint(1,1)}, {0.25,false,false,true}),
+             QPointF(-0.5,0.75));
 }
 
 void TestMainWindow::jobPreviewWorkspaceAndLinking() {
@@ -563,6 +574,7 @@ void TestMainWindow::segmentationStatisticsUpdates() {
     auto* invert=dialog.findChild<QCheckBox*>(QStringLiteral("layeredExportInvertMask"));
     auto* invertHeight=dialog.findChild<QCheckBox*>(QStringLiteral("layeredExportInvertHeight"));
     auto* reverse=dialog.findChild<QCheckBox*>(QStringLiteral("layeredExportReverseY"));
+    auto* reverseX=dialog.findChild<QCheckBox*>(QStringLiteral("layeredExportReverseX"));
     auto* centerOrigin=dialog.findChild<QCheckBox*>(QStringLiteral("layeredExportCenterOrigin"));
     auto* summary=dialog.findChild<QLabel*>(QStringLiteral("layeredExportSummary"));
     auto* start=dialog.findChild<QPushButton*>(QStringLiteral("layeredExportStart"));
@@ -581,7 +593,8 @@ void TestMainWindow::segmentationStatisticsUpdates() {
     auto* sampling=dialog.findChild<QComboBox*>(QStringLiteral("layeredExportTransformSampling"));
     auto* previewElement=dialog.findChild<QLabel*>(QStringLiteral("layeredExportPreviewElement"));
     QVERIFY(layer);QVERIFY(zOffset);QVERIFY(maximum);QVERIFY(strategy);QVERIFY(moveCommand);QVERIFY(baseLayers);QVERIFY(multiplier);QVERIFY(width);QVERIFY(height);
-    QVERIFY(invert);QVERIFY(invertHeight);QVERIFY(reverse);QVERIFY(centerOrigin);QVERIFY(summary);QVERIFY(start);
+    QVERIFY(invert);QVERIFY(invertHeight);QVERIFY(reverse);QVERIFY(reverseX);QVERIFY(centerOrigin);QVERIFY(summary);QVERIFY(start);
+    QVERIFY(!reverseX->isChecked());
     QVERIFY(centerOrigin->isChecked());
     QVERIFY(invertHeight->isChecked());
     QSignalSpy invertHeightSpy(&dialog,&LayeredExportDialog::invertHeightChanged);
@@ -636,7 +649,9 @@ void TestMainWindow::segmentationStatisticsUpdates() {
     strategy->setCurrentIndex(1);QVERIFY(!start->isEnabled());
     QVERIFY(summary->text().contains(QStringLiteral("整除")));
     dialog.configure(document,grid,TraversalMode::SnakeZ,0.25,1.0,true,true,
-                     directory.path(),QPoint(1,1),{QPoint(0,0),QPoint(1,1)});
+                     directory.path(),QPoint(1,1),{QPoint(0,0),QPoint(1,1)},true);
+    QVERIFY(reverseX->isChecked());
+    QVERIFY(dialog.reverseX());
     QCOMPARE(baseLayers->value(),0);
     QCOMPARE(multiplier->value(),13.55);
     QCOMPARE(width->value(),14);QCOMPARE(height->value(),7);

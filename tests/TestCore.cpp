@@ -90,6 +90,7 @@ private Q_SLOTS:
     void elementGroupingSupportsGrayDepthsAndResiduals();
     void pureBackgroundCellsAreSkipped();
     void layeredMasksPadTransformAndValidate();
+    void layeredLargeSelectionPreviewCompletes();
     void layeredMirrorFollowsRotation();
     void layeredMaskTransformIsComputedOnce();
     void exportPreflightEstimatesAndSpacePolicy();
@@ -1231,6 +1232,7 @@ void TestCore::layeredPackageUsesPhysicalCoordinatesAndUniformLayers() {
     LayeredPackageRequest request{output,document,grid,TraversalMode::SnakeZ,
         {0.5,1.0,0.2,4,2,false,false,true,LayerCountStrategy::RoundUp},true};
     request.options.attachToCanvas=false;
+    request.options.reverseX=true;
     const auto estimate=LayeredPackageExporter::estimateOutput(request);
     QVERIFY2(estimate.valid,qPrintable(estimate.error));QCOMPARE(estimate.bmpFileCount,qint64(20));
     const auto preflight=LayeredPackageExporter::inspect(request);
@@ -1257,13 +1259,16 @@ void TestCore::layeredPackageUsesPhysicalCoordinatesAndUniformLayers() {
     QFile job(QDir(output).filePath("job.json"));QVERIFY(job.open(QIODevice::ReadOnly));
     const QByteArray jobBytes=job.readAll();job.close();
     QVERIFY(jobBytes.contains("\"path\": \"0\""));
-    QVERIFY(jobBytes.contains("\"by\": [1.0, 0.0, 0.0]"));
-    QVERIFY(jobBytes.contains("\"by\": [1.0, -0.5, 0.0]"));
+    QVERIFY(jobBytes.contains("\"by\": [-1.0, 0.0, 0.0]"));
+    QVERIFY(jobBytes.contains("\"by\": [-1.0, -0.5, 0.0]"));
     QFile parameters(QDir(output).filePath("param.txt"));QVERIFY(parameters.open(QIODevice::ReadOnly));
     QCOMPARE(parameters.readAll().trimmed(),QByteArray("4;5;0.2"));
     QFile report(QDir(output).filePath("export-report.json"));QVERIFY(report.open(QIODevice::ReadOnly));
     const QJsonObject reportObject=QJsonDocument::fromJson(report.readAll()).object();
     QCOMPARE(reportObject.value("mode").toString(),QStringLiteral("layered_package"));
+    const QJsonObject reportMapping=reportObject.value("mapping").toObject();
+    QCOMPARE(reportMapping.value("reverseX").toBool(),true);
+    QCOMPARE(reportMapping.value("reverseY").toBool(),true);
     const QJsonObject reportOutput=reportObject.value("output").toObject();
     QCOMPARE(reportOutput.value("residualAlignment").toString(),QStringLiteral("top_left"));
     QCOMPARE(reportOutput.value("attachToCanvas").toBool(),false);
@@ -2038,6 +2043,52 @@ void TestCore::layeredMasksPadTransformAndValidate() {
     request.options.scaleY = 5.0;
     QVERIFY(!LayeredMaskProcessor::validate(request, &error));
     QVERIFY(error.contains(QStringLiteral("超过导出底图")));
+}
+
+void TestCore::layeredLargeSelectionPreviewCompletes() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    constexpr int columns = 18;
+    constexpr int rows = 9;
+    QImage source(columns, rows, QImage::Format_Grayscale8);
+    for (int y = 0; y < rows; ++y)
+        for (int x = 0; x < columns; ++x)
+            source.scanLine(y)[x] = uchar((x * 17 + y * 29) & 0xff);
+    const QString path = directory.filePath("large-selection.bmp");
+    QVERIFY(source.save(path, "BMP"));
+    QString error;
+    const auto document = ImageLoader::load(path, 1699, &error);
+    QVERIFY2(document, qPrintable(error));
+
+    LayeredPackageOptions options{1.0, 1.0, 0.1, 8, 8, false, false, false,
+                                  LayerCountStrategy::RoundUp};
+    options.attachToCanvas = false;
+    LayeredMaskRequest request{document, {0, 0, 1, 1}, {1, 1}, options, 10};
+    request.stackMaximumSide = 40;
+    request.maximumExplodedQuads = 4'000;
+    request.activePlacement = 80;
+    for (int y = 0; y < rows; ++y) {
+        for (int x = 0; x < columns; ++x) {
+            const int index = y * columns + x;
+            request.placements.push_back({{x, y, 1, 1}, {x, y},
+                                          QPointF(x, rows - y - 1), index});
+        }
+    }
+
+    const auto preview = LayeredMaskProcessor::preview(
+        request, std::make_shared<CancellationToken>(), {}, &error);
+    QVERIFY2(preview.stackPreview, qPrintable(error));
+    QCOMPARE(preview.stackPreview->blocks.size(), qsizetype(columns * rows));
+    QVERIFY(preview.stackPreview->hasJobCoordinates);
+    QCOMPARE(preview.stackPreview->jobCoordinateOrigin, QPointF(0.5, 0.5));
+    QCOMPARE(preview.stackPreview->blocks.front().physicalRect.center(),
+             preview.stackPreview->blocks.front().jobPosition +
+                 preview.stackPreview->jobCoordinateOrigin);
+    QCOMPARE(preview.stackPreview->blocks[request.activePlacement].placementNumber,
+             request.activePlacement + 1);
+    QCOMPARE(preview.thumbnails.size(), 10);
+    QVERIFY(preview.stackPreview->solidGeometry);
+    QVERIFY(preview.stackPreview->explodedGeometry);
+    QVERIFY(!preview.stackPreview->solidGeometry->vertices.empty());
 }
 
 void TestCore::layeredMirrorFollowsRotation() {

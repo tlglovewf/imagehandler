@@ -83,6 +83,11 @@ struct MaskStackPreviewData {
     bool downsampled = false;
     double actualMaximumHeight = 0.0;
     QVector<MaskStackBlockPlacement> blocks;
+    // Local preview-space position of the physical Job coordinate origin.
+    // Multi-placement export previews use this to draw the real X/Y axes after
+    // their geometry has been translated into a compact local bounding box.
+    QPointF jobCoordinateOrigin;
+    bool hasJobCoordinates = false;
     std::shared_ptr<const MaskStackGeometry> solidGeometry;
     std::shared_ptr<const MaskStackGeometry> explodedGeometry;
 };
