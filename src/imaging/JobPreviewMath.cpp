@@ -93,12 +93,13 @@ double JobPreviewMath::projectedPointSpacing(std::span<const QPointF> projectedP
 }
 
 JobGuideGeometry JobPreviewMath::guideGeometry(const JobDocument& document,
-                                               const JobCoordinate& floatingOrigin) {
+                                               const JobCoordinate& floatingOrigin,
+                                               const JobCoordinate& coordinateOrigin) {
     JobGuideGeometry geometry;
     if (!document.bounds.valid || document.points.empty()) return geometry;
     JobBounds displayBounds = document.bounds;
-    displayBounds.include({0.0, 0.0, 0.0});
-    geometry.coordinateOrigin = JobCoordinate{}.relativeTo(floatingOrigin);
+    displayBounds.include(coordinateOrigin);
+    geometry.coordinateOrigin = coordinateOrigin.relativeTo(floatingOrigin);
     geometry.minimum = displayBounds.minimum.relativeTo(floatingOrigin);
     geometry.maximum = displayBounds.maximum.relativeTo(floatingOrigin);
     geometry.xStart = {geometry.minimum.x(), geometry.coordinateOrigin.y(), geometry.coordinateOrigin.z()};

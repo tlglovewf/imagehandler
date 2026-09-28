@@ -61,6 +61,7 @@ Q_SIGNALS:
     void pixelValueChanged(qint64 x, qint64 y, quint32 value, bool valid);
     void fixedGrayPointCountChanged(int count);
     void fixedGrayPointError(const QString& error);
+    void pixelProbeError(const QString& error);
 
 protected:
     void paintEvent(QPaintEvent*) override;
@@ -133,6 +134,7 @@ private:
     QPoint hoverPixel_{-1, -1};
     bool probePending_ = false;
     quint64 probeRequestSerial_ = 0;
+    QSet<QPoint> failedProbeBlocks_;
     QVector<FixedGrayPoint> fixedGrayPoints_;
     quint64 selectedFixedGrayPointId_ = 0;
     quint64 nextFixedGrayPointId_ = 1;

@@ -95,7 +95,10 @@ target_compile_definitions(job_preview_ui PUBLIC
 if(JOB_PREVIEW_HAS_VULKAN)
     target_include_directories(job_preview_ui PRIVATE ${Vulkan_INCLUDE_DIRS})
     set(JOB_SHADER_OUTPUTS)
-    foreach(JOB_SHADER IN ITEMS job_points.vert job_points.frag job_lines.vert job_lines.frag)
+    foreach(JOB_SHADER IN ITEMS
+            job_points.vert job_points.frag
+            job_lines.vert job_lines.frag
+            job_stack.vert job_stack.frag)
         set(JOB_SHADER_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/shaders/${JOB_SHADER}")
         set(JOB_SHADER_PACK "${CMAKE_CURRENT_BINARY_DIR}/job_shaders/${JOB_SHADER}.qsb")
         set(JOB_SHADER_SPV "${CMAKE_CURRENT_BINARY_DIR}/job_shaders/${JOB_SHADER}.spv")
@@ -155,6 +158,7 @@ qt_add_executable(ImageHandler WIN32
     src/ui/ElementPointCloudWindow.h src/ui/ElementPointCloudWindow.cpp
     src/ui/MaskSliceWindow.h src/ui/MaskSliceWindow.cpp
     src/ui/LayeredExportDialog.h src/ui/LayeredExportDialog.cpp
+    src/ui/ProcessingPreviewWindow.h src/ui/ProcessingPreviewWindow.cpp
     src/ui/MainWindow.h src/ui/MainWindow.cpp
 )
 target_include_directories(ImageHandler PRIVATE
@@ -225,6 +229,7 @@ qt_add_executable(MainWindowTests
     src/ui/ElementPointCloudWindow.h src/ui/ElementPointCloudWindow.cpp
     src/ui/MaskSliceWindow.h src/ui/MaskSliceWindow.cpp
     src/ui/LayeredExportDialog.h src/ui/LayeredExportDialog.cpp
+    src/ui/ProcessingPreviewWindow.h src/ui/ProcessingPreviewWindow.cpp
 )
 target_include_directories(MainWindowTests PRIVATE
     "${VIPS_ROOT}/include"

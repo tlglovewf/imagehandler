@@ -45,7 +45,7 @@ void LargeImageView::setDocument(const ImageDocumentPtr& document) {
     if (tileRequestToken_) tileRequestToken_->cancel();
     tileRequestToken_ = std::make_shared<CancellationToken>();
     document_ = document; cache_.clear(); pending_.clear(); failedTiles_.clear(); visibleTileKeys_.clear(); showGrid_ = false; grouping_ = {};
-    probeCache_ = {}; probeCacheOrigin_ = {-1, -1}; hoverPixel_ = {-1, -1}; probePending_ = false; ++probeRequestSerial_;
+    probeCache_ = {}; probeCacheOrigin_ = {-1, -1}; hoverPixel_ = {-1, -1}; probePending_ = false; failedProbeBlocks_.clear(); ++probeRequestSerial_;
     const bool hadFixedPoints = !fixedGrayPoints_.isEmpty();
     fixedGrayPoints_.clear(); selectedFixedGrayPointId_ = 0;
     if (hadFixedPoints) Q_EMIT fixedGrayPointCountChanged(0);
@@ -414,7 +414,9 @@ void LargeImageView::updatePixelProbe(const QPoint& viewportPosition) {
         x < probeCacheOrigin_.x() + probeCache_.width() &&
         y < probeCacheOrigin_.y() + probeCache_.height()) {
         emitCachedProbe();
-    } else if (!probePending_) {
+    } else if (!probePending_ &&
+               !failedProbeBlocks_.contains({static_cast<int>((x / 64) * 64),
+                                             static_cast<int>((y / 64) * 64)})) {
         requestProbeBlock(x, y);
     }
 }
@@ -426,21 +428,28 @@ void LargeImageView::requestProbeBlock(qint64 x, qint64 y) {
     const qint64 blockY = (y / blockSize) * blockSize;
     const qint64 blockWidth = std::min(blockSize, document_->metadata.width - blockX);
     const qint64 blockHeight = std::min(blockSize, document_->metadata.height - blockY);
+    const QPoint blockOrigin(static_cast<int>(blockX), static_cast<int>(blockY));
+    if (failedProbeBlocks_.contains(blockOrigin)) return;
     const auto doc = document_;
     const quint64 generation = doc->generation;
     const quint64 requestSerial = ++probeRequestSerial_;
     probePending_ = true;
-    auto* watcher = new QFutureWatcher<QImage>(this);
-    connect(watcher, &QFutureWatcher<QImage>::finished, this,
-            [this, watcher, generation, requestSerial, blockX, blockY] {
-        const QImage image = watcher->result();
+    auto* watcher = new QFutureWatcher<QPair<QImage, QString>>(this);
+    connect(watcher, &QFutureWatcher<QPair<QImage, QString>>::finished, this,
+            [this, watcher, generation, requestSerial, blockOrigin] {
+        const auto result = watcher->result();
         watcher->deleteLater();
         if (requestSerial != probeRequestSerial_) return;
         probePending_ = false;
         if (!document_ || document_->generation != generation) return;
-        if (!image.isNull()) {
-            probeCache_ = image;
-            probeCacheOrigin_ = {static_cast<int>(blockX), static_cast<int>(blockY)};
+        if (!result.first.isNull()) {
+            probeCache_ = result.first;
+            probeCacheOrigin_ = blockOrigin;
+        } else {
+            failedProbeBlocks_.insert(blockOrigin);
+            Q_EMIT pixelProbeError(result.second.isEmpty()
+                ? QStringLiteral("无法读取源图像像素。") : result.second);
+            Q_EMIT pixelValueChanged(-1, -1, 0, false);
         }
         if (hoverPixel_.x() < 0) return;
         if (!probeCache_.isNull() && hoverPixel_.x() >= probeCacheOrigin_.x() &&
@@ -449,12 +458,17 @@ void LargeImageView::requestProbeBlock(qint64 x, qint64 y) {
             hoverPixel_.y() < probeCacheOrigin_.y() + probeCache_.height()) {
             emitCachedProbe();
         } else {
-            requestProbeBlock(hoverPixel_.x(), hoverPixel_.y());
+            const QPoint hoverBlock((hoverPixel_.x() / 64) * 64,
+                                    (hoverPixel_.y() / 64) * 64);
+            if (!failedProbeBlocks_.contains(hoverBlock))
+                requestProbeBlock(hoverPixel_.x(), hoverPixel_.y());
         }
     });
     watcher->setFuture(QtConcurrent::run([doc, blockX, blockY, blockWidth, blockHeight] {
         QString error;
-        return VipsSupport::renderRegion(doc, blockX, blockY, blockWidth, blockHeight, 1.0, &error);
+        QImage image = VipsSupport::renderRegion(
+            doc, blockX, blockY, blockWidth, blockHeight, 1.0, &error);
+        return qMakePair(image, error);
     }));
 }
 

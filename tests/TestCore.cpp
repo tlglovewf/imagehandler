@@ -62,6 +62,7 @@ private Q_SLOTS:
     void mosaicAllowsDifferentTileSizesAndPrefixes();
     void mosaicRejectsDifferentBitDepths();
     void mosaicMissingTilesRequireConfirmation();
+    void mosaicExtremeCoordinatesDoNotOverflow();
     void mosaicProgressIsCumulative();
     void mergedExporterWritesGray8();
     void mergedExporterWritesGray16PngWithoutDownsampling();
@@ -736,6 +737,18 @@ void TestCore::mosaicMissingTilesRequireConfirmation() {
     const QImage rendered=VipsSupport::renderRegion(continued.document,0,0,8,10,1.0,&error);QVERIFY2(!rendered.isNull(),qPrintable(error));
     QCOMPARE(rendered.constScanLine(0)[0],uchar(10));QCOMPARE(rendered.constScanLine(0)[3],uchar(255));QCOMPARE(rendered.constScanLine(3)[0],uchar(255));QCOMPARE(rendered.constScanLine(6)[0],uchar(30));QCOMPARE(rendered.constScanLine(6)[5],uchar(40));
 }
+void TestCore::mosaicExtremeCoordinatesDoNotOverflow() {
+    QString error;
+    const QString first = QStringLiteral("tile_2147483647_0.bmp");
+    const QString second = QStringLiteral("tile_2147483647_2.bmp");
+    const auto result = MosaicBuilder::build(
+        {first, second}, 14, {}, std::make_shared<CancellationToken>(), {}, &error);
+    QCOMPARE(result.status, MosaicBuildStatus::MissingTiles);
+    QCOMPARE(result.missingCount, qint64(1));
+    QCOMPARE(result.missingCoordinateSamples,
+             QStringList({QStringLiteral("2147483647,1")}));
+    QVERIFY(error.isEmpty());
+}
 void TestCore::mosaicProgressIsCumulative() {
     QTemporaryDir dir;QVERIFY(dir.isValid());QStringList paths;
     for(int column=0;column<2;++column){QImage image(2,2,QImage::Format_Grayscale8);image.fill(20+column);const QString path=dir.filePath(QString("tile_0_%1.bmp").arg(column));QVERIFY(image.save(path,"BMP"));paths<<path;}
@@ -1145,8 +1158,16 @@ void TestCore::exportPreflightConflictsAndPortableReports() {
     QCOMPARE(root.value("output").toObject().value("indexBase").toInt(),1);
     QVERIFY(!root.contains("print"));
 
+    request.writeReport=false;
+    const auto noReportPreflight=ExportPreflight::inspect(request,token,{});
+    QVERIFY(noReportPreflight.valid);QCOMPARE(noReportPreflight.conflictCount,qint64(5));
+    QVERIFY2(SplitExporter::exportTiles(outputPath,document,grid,TraversalMode::ClockwiseSpiral,
+        {true,false,noReportPreflight.targetFingerprint},token,{},&error),qPrintable(error));
+    QVERIFY(!QFileInfo::exists(QDir(outputPath).filePath("export-report.json")));
+    request.writeReport=true;
+
     const ExportPreflightResult conflicts=ExportPreflight::inspect(request,token,{});
-    QVERIFY(conflicts.valid);QCOMPARE(conflicts.conflictCount,qint64(5));
+    QVERIFY(conflicts.valid);QCOMPARE(conflicts.conflictCount,qint64(4));
     QFile changed(QDir(outputPath).filePath("1.bmp"));QVERIFY(changed.open(QIODevice::Append));
     QCOMPARE(changed.write("x",1),qint64(1));changed.close();
     QString fingerprintError;const QString changedFingerprint=ExportPreflight::targetFingerprint(
@@ -1167,10 +1188,17 @@ void TestCore::exportPreflightConflictsAndPortableReports() {
         request.printOptions,{false,true,printPreflight.targetFingerprint},token,{},&error),qPrintable(error));
     QFile printReport(QDir(printPath).filePath("export-report.json"));QVERIFY(printReport.open(QIODevice::ReadOnly));
     const QJsonObject printRoot=QJsonDocument::fromJson(printReport.readAll()).object();
+    printReport.close();
     QCOMPARE(printRoot.value("mode").toString(),QStringLiteral("print_package"));
     QCOMPARE(printRoot.value("output").toObject().value("indexBase").toInt(),0);
     QCOMPARE(printRoot.value("print").toObject().value("repeatTimes").toInt(),2);
     QCOMPARE(printRoot.value("print").toObject().value("reverseY").toBool(),true);
+    request.writeReport=false;
+    const auto printNoReport=ExportPreflight::inspect(request,token,{});
+    QVERIFY(printNoReport.valid);
+    QVERIFY2(SplitExporter::exportPrintPackage(printPath,document,grid,TraversalMode::SnakeZ,
+        request.printOptions,{true,false,printNoReport.targetFingerprint},token,{},&error),qPrintable(error));
+    QVERIFY(!QFileInfo::exists(QDir(printPath).filePath("export-report.json")));
 
     const QString unsafePath=directory.filePath("unsafe");QVERIFY(QDir().mkpath(unsafePath));
     QVERIFY(QDir(unsafePath).mkdir("export-report.json"));request.outputDirectory=unsafePath;
@@ -1263,8 +1291,10 @@ void TestCore::layeredPackageUsesPhysicalCoordinatesAndUniformLayers() {
     QVERIFY(jobBytes.contains("\"by\": [-1.0, -0.5, 0.0]"));
     QFile parameters(QDir(output).filePath("param.txt"));QVERIFY(parameters.open(QIODevice::ReadOnly));
     QCOMPARE(parameters.readAll().trimmed(),QByteArray("4;5;0.2"));
+    parameters.close();
     QFile report(QDir(output).filePath("export-report.json"));QVERIFY(report.open(QIODevice::ReadOnly));
     const QJsonObject reportObject=QJsonDocument::fromJson(report.readAll()).object();
+    report.close();
     QCOMPARE(reportObject.value("mode").toString(),QStringLiteral("layered_package"));
     const QJsonObject reportMapping=reportObject.value("mapping").toObject();
     QCOMPARE(reportMapping.value("reverseX").toBool(),true);
@@ -1285,6 +1315,16 @@ void TestCore::layeredPackageUsesPhysicalCoordinatesAndUniformLayers() {
         {true,true,replacementPreflight.targetFingerprint},cancelled,{},&error));
     QFile unchangedJob(QDir(output).filePath("job.json"));QVERIFY(unchangedJob.open(QIODevice::ReadOnly));
     QCOMPARE(unchangedJob.readAll(),jobBytes);
+    unchangedJob.close();
+
+    request.writeReport=false;
+    const auto noReportPreflight=LayeredPackageExporter::inspect(request);
+    QVERIFY(noReportPreflight.valid);QCOMPARE(noReportPreflight.conflictCount,qint64(7));
+    error.clear();
+    QVERIFY2(LayeredPackageExporter::exportPackage(request,
+        {true,false,noReportPreflight.targetFingerprint},std::make_shared<CancellationToken>(),{},&error),
+        qPrintable(error));
+    QVERIFY(!QFileInfo::exists(QDir(output).filePath("export-report.json")));
 
     const QString unsafeOutput=directory.filePath("unsafe-package");
     QVERIFY(QDir().mkpath(unsafeOutput));QFile unsafe(QDir(unsafeOutput).filePath("0"));

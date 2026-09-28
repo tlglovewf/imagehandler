@@ -159,11 +159,17 @@ std::shared_ptr<JobPlacementSpatialIndex> JobPlacementSpatialIndex::build(
         if (point.placeId < 0 || point.placeId >= static_cast<qint64>(document.models.size())) continue;
         const JobModel& model = document.models[static_cast<std::size_t>(point.placeId)];
         if (!model.stack) continue;
+        const double halfWidth = model.stack->physicalSize.width() * 0.5;
+        const double halfHeight = model.stack->physicalSize.height() * 0.5;
+        const JobCoordinate minimum{
+            point.position.x - halfWidth,
+            point.position.y - halfHeight,
+            point.position.z};
         const JobCoordinate maximum{
-            point.position.x + model.stack->physicalSize.width(),
-            point.position.y + model.stack->physicalSize.height(),
+            point.position.x + halfWidth,
+            point.position.y + halfHeight,
             point.position.z + model.stack->layerCount * model.stack->layerHeight};
-        result->bounds_.push_back({point.position, maximum, pointIndex});
+        result->bounds_.push_back({minimum, maximum, pointIndex});
     }
     if (result->bounds_.empty() || result->bounds_.size() > std::numeric_limits<quint32>::max())
         return {};

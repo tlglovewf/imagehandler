@@ -42,6 +42,12 @@ std::shared_ptr<MaskStackGeometry> MaskStackMeshBuilder::buildSolid(
     const float pitchX = static_cast<float>(preview.physicalSize.width() / width);
     const float pitchY = static_cast<float>(preview.physicalSize.height() / height);
     const float layerHeight = static_cast<float>(preview.layerHeight);
+    const auto yLow = [&](int begin, int end) {
+        return (preview.mapRasterYToPositiveY ? height - end : begin) * pitchY;
+    };
+    const auto yHigh = [&](int begin, int end) {
+        return (preview.mapRasterYToPositiveY ? height - begin : end) * pitchY;
+    };
     // Merge coplanar cells into rectangles. Exported masks commonly contain large
     // flat areas; emitting one quad per cell made a 512 x 512 preview consume
     // hundreds of MB and multiplied that work for every Job placement.
@@ -74,8 +80,8 @@ std::shared_ptr<MaskStackGeometry> MaskStackMeshBuilder::buildSolid(
                     consumed[static_cast<std::size_t>(nextY) * width + nextX] = 1;
             const float x0 = x * pitchX;
             const float x1 = endX * pitchX;
-            const float y0 = (height - endY) * pitchY;
-            const float y1 = (height - y) * pitchY;
+            const float y0 = yLow(y, endY);
+            const float y1 = yHigh(y, endY);
             const float top = level * layerHeight;
             const float layer = static_cast<float>(level);
             addQuad(result.get(), vertex(x0,y0,top,0,0,1,layer,0),
@@ -99,21 +105,21 @@ std::shared_ptr<MaskStackGeometry> MaskStackMeshBuilder::buildSolid(
                 while (endY < height && levelAt(preview, x, endY) == level &&
                        levelAt(preview, x + (side ? 1 : -1), endY) == neighbor) ++endY;
                 const float wallX = (x + side) * pitchX;
-                const float yLow = (height - endY) * pitchY;
-                const float yHigh = (height - y) * pitchY;
+                const float wallYLow = yLow(y, endY);
+                const float wallYHigh = yHigh(y, endY);
                 const float bottom = neighbor * layerHeight;
                 const float top = level * layerHeight;
                 const float layer = static_cast<float>(level);
                 if (!side)
-                    addQuad(result.get(), vertex(wallX,yHigh,bottom,-1,0,0,layer,1),
-                            vertex(wallX,yLow,bottom,-1,0,0,layer,1),
-                            vertex(wallX,yLow,top,-1,0,0,layer,1),
-                            vertex(wallX,yHigh,top,-1,0,0,layer,1));
+                    addQuad(result.get(), vertex(wallX,wallYHigh,bottom,-1,0,0,layer,1),
+                            vertex(wallX,wallYLow,bottom,-1,0,0,layer,1),
+                            vertex(wallX,wallYLow,top,-1,0,0,layer,1),
+                            vertex(wallX,wallYHigh,top,-1,0,0,layer,1));
                 else
-                    addQuad(result.get(), vertex(wallX,yLow,bottom,1,0,0,layer,1),
-                            vertex(wallX,yHigh,bottom,1,0,0,layer,1),
-                            vertex(wallX,yHigh,top,1,0,0,layer,1),
-                            vertex(wallX,yLow,top,1,0,0,layer,1));
+                    addQuad(result.get(), vertex(wallX,wallYLow,bottom,1,0,0,layer,1),
+                            vertex(wallX,wallYHigh,bottom,1,0,0,layer,1),
+                            vertex(wallX,wallYHigh,top,1,0,0,layer,1),
+                            vertex(wallX,wallYLow,top,1,0,0,layer,1));
                 y = endY;
             }
         }
@@ -134,11 +140,13 @@ std::shared_ptr<MaskStackGeometry> MaskStackMeshBuilder::buildSolid(
                        levelAt(preview, endX, y + (side ? 1 : -1)) == neighbor) ++endX;
                 const float x0 = x * pitchX;
                 const float x1 = endX * pitchX;
-                const float wallY = (height - y - (side ? 1 : 0)) * pitchY;
+                const int edge = y + (side ? 1 : 0);
+                const float wallY = (preview.mapRasterYToPositiveY ? height - edge : edge) * pitchY;
                 const float bottom = neighbor * layerHeight;
                 const float top = level * layerHeight;
                 const float layer = static_cast<float>(level);
-                if (!side)
+                const bool positiveNormal = preview.mapRasterYToPositiveY ? !side : side;
+                if (positiveNormal)
                     addQuad(result.get(), vertex(x1,wallY,bottom,0,1,0,layer,1),
                             vertex(x0,wallY,bottom,0,1,0,layer,1),
                             vertex(x0,wallY,top,0,1,0,layer,1),
@@ -216,8 +224,10 @@ std::shared_ptr<MaskStackGeometry> MaskStackMeshBuilder::buildExploded(
         if (token && token->isCancelled()) return {};
         const float x0 = rectangle.x0 * pitchX;
         const float x1 = rectangle.x1 * pitchX;
-        const float y0 = (height - rectangle.y1) * pitchY;
-        const float y1 = (height - rectangle.y0) * pitchY;
+        const float y0 = (preview.mapRasterYToPositiveY
+                              ? height - rectangle.y1 : rectangle.y0) * pitchY;
+        const float y1 = (preview.mapRasterYToPositiveY
+                              ? height - rectangle.y0 : rectangle.y1) * pitchY;
         for (int layer = 1; layer <= rectangle.level; layer += result->layerStride) {
             const float z = layer * layerHeight;
             const float layerValue = static_cast<float>(layer);

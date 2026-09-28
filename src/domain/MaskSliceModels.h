@@ -81,6 +81,9 @@ struct MaskStackPreviewData {
     double layerHeight = 0.0;
     int layerCount = 0;
     bool downsampled = false;
+    // Normal stack previews map raster row 0 to the positive-Y edge. Processing
+    // playback disables this so mask rows retain their native Y order.
+    bool mapRasterYToPositiveY = true;
     double actualMaximumHeight = 0.0;
     QVector<MaskStackBlockPlacement> blocks;
     // Local preview-space position of the physical Job coordinate origin.

@@ -199,8 +199,7 @@ QString ExportPreflight::targetFingerprint(const ExportRequest& request, qint64*
         } else if (name.compare(QStringLiteral("job.json"), Qt::CaseInsensitive) == 0) {
             managed = true;
         }
-        if (request.writeReport &&
-            name.compare(QStringLiteral("export-report.json"), Qt::CaseInsensitive) == 0) {
+        if (name.compare(QStringLiteral("export-report.json"), Qt::CaseInsensitive) == 0) {
             managed = true;
             expectDirectory = false;
         }

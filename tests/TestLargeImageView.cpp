@@ -15,6 +15,7 @@ private Q_SLOTS:
     void cleanupTestCase();
     void edgeTileAndGridClipping();
     void failedTileIsNotRetriedContinuously();
+    void failedPixelProbeIsNotRetriedContinuously();
     void cellSelectionAndTraversalPath();
     void cellMultiSelectionAndSliceShortcut();
     void cellBoxSelectionWithW();
@@ -90,6 +91,34 @@ void TestLargeImageView::failedTileIsNotRetriedContinuously() {
     const QColor failedArea = view.grab().toImage().pixelColor(150, 150);
     QVERIFY(std::abs(failedArea.red() - failedArea.green()) < 8);
     QVERIFY(std::abs(failedArea.green() - failedArea.blue()) < 8);
+}
+
+void TestLargeImageView::failedPixelProbeIsNotRetriedContinuously() {
+    auto document = std::make_shared<ImageDocument>();
+    document->generation = 100;
+    document->metadata.width = 64;
+    document->metadata.height = 64;
+    document->metadata.kind = PixelKind::Gray8;
+
+    LargeImageView view;
+    view.resize(128, 128);
+    QSignalSpy errors(&view, &LargeImageView::pixelProbeError);
+    view.show();
+    view.setDocument(document);
+    for (int i = 0; i < 5; ++i) {
+        QMouseEvent move(QEvent::MouseMove, QPointF(64, 64), QPointF(64, 64),
+                         QPointF(64, 64), Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(&view, &move);
+        QTest::qWait(30);
+    }
+    QTRY_COMPARE_WITH_TIMEOUT(errors.count(), 1, 3000);
+    for (int i = 0; i < 5; ++i) {
+        QMouseEvent move(QEvent::MouseMove, QPointF(65, 65), QPointF(65, 65),
+                         QPointF(65, 65), Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(&view, &move);
+        QTest::qWait(30);
+    }
+    QCOMPARE(errors.count(), 1);
 }
 
 void TestLargeImageView::cellSelectionAndTraversalPath() {

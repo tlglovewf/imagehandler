@@ -59,7 +59,8 @@ struct alignas(16) CameraUniform {
     float hoveredId = -1.0F;
     float viewportSize[2]{1.0F,1.0F};
     float stackExplode = 1.0F;
-    float padding[3]{};
+    float processingMode = 0.0F;
+    float padding[2]{};
 };
 static_assert(sizeof(MaskStackVertex) == 32);
 static_assert(sizeof(StackInstance) == 32);
@@ -105,6 +106,7 @@ std::shared_ptr<const MaskStackGeometry> buildLodGeometry(
                                             source.columnLayers.cend());
     preview.layerHeight = stack->layerHeight;
     preview.layerCount = stack->layerCount;
+    preview.mapRasterYToPositiveY = stack->mapRasterYToPositiveY;
     return mode == JobStackDisplayMode::Solid
         ? MaskStackMeshBuilder::buildSolid(preview, token, {})
         : MaskStackMeshBuilder::buildExploded(preview, token, {}, 100'000);
@@ -280,14 +282,57 @@ public:
 
     void setGuidesVisible(bool visible) { guidesVisible_ = visible; requestUpdate(); }
 
+    void setCoordinateDisplay(bool reverseCoordinates, bool centerRelative,
+                              bool xAxisPositiveLeft, bool yAxisPositiveDown) {
+        if (reverseCoordinates_ == reverseCoordinates &&
+            centerRelative_ == centerRelative &&
+            xAxisPositiveLeft_ == xAxisPositiveLeft &&
+            yAxisPositiveDown_ == yAxisPositiveDown) return;
+        reverseCoordinates_ = reverseCoordinates;
+        centerRelative_ = centerRelative;
+        xAxisPositiveLeft_ = xAxisPositiveLeft;
+        yAxisPositiveDown_ = yAxisPositiveDown;
+        requestUpdate();
+    }
+
     void fitAll() {
         animateTo(camera_.fittedPose());
     }
 
+    void viewTop() {
+        JobCameraPose pose = camera_.fittedPose();
+        pose.azimuth = -90.0F;
+        pose.elevation = 89.0F;
+        animateTo(pose);
+    }
+
+    void setForceIndividualLabels(bool force) {
+        if (forceIndividualLabels_ == force) return;
+        forceIndividualLabels_ = force;
+        requestUpdate();
+    }
+
+    void setVisibleStackPlacementCount(qint64 count) {
+        if (visibleStackPlacementCount_ == count) return;
+        visibleStackPlacementCount_ = count;
+        markStackBuffersDirty();
+        requestUpdate();
+    }
+
     [[nodiscard]] const JobDocumentPtr& document() const { return document_; }
     [[nodiscard]] JobCoordinate origin() const { return origin_; }
+    [[nodiscard]] JobCoordinate coordinateOrigin() const {
+        if (!centerRelative_ || !document_) return {};
+        JobCoordinate center = document_->hasImageCenter ? document_->imageCenter
+                                                         : document_->bounds.center();
+        center.z = 0.0;
+        return center;
+    }
     [[nodiscard]] qint64 selectedId() const { return selectedId_; }
     [[nodiscard]] qint64 hoveredId() const { return hoveredId_; }
+    [[nodiscard]] qint64 visibleStackPlacementCount() const noexcept {
+        return visibleStackPlacementCount_;
+    }
     [[nodiscard]] qint64 pointIndexForPlacement(qint64 id) const {
         return id >= 0 && id < static_cast<qint64>(idToIndex_.size())
             ? idToIndex_[static_cast<std::size_t>(id)] : -1;
@@ -354,7 +399,11 @@ public:
         projection.perspective(45.0F, aspect,
                                std::max(0.001F, camera_.pose().distance * 0.001F),
                                std::max(100.0F, camera_.pose().distance + camera_.sceneRadius() * 8.0F));
-        return const_cast<JobVulkanWindow*>(this)->clipCorrectionMatrix() * projection * camera_.viewMatrix();
+        QMatrix4x4 screenAxes;
+        screenAxes.scale(xAxisPositiveLeft_ ? -1.0F : 1.0F,
+                         yAxisPositiveDown_ ? -1.0F : 1.0F, 1.0F);
+        return const_cast<JobVulkanWindow*>(this)->clipCorrectionMatrix() *
+               screenAxes * projection * camera_.viewMatrix();
     }
 
     std::vector<LineVertex> buildLineVertices() const {
@@ -741,7 +790,8 @@ private:
     }
 
     void appendGuides(std::vector<LineVertex>& lines, const QMatrix4x4& mvp) const {
-        const JobGuideGeometry guides = JobPreviewMath::guideGeometry(*document_, origin_);
+        const JobGuideGeometry guides = JobPreviewMath::guideGeometry(
+            *document_, origin_, coordinateOrigin());
         if (!guides.valid) return;
         const float extent = std::max({1.0F, static_cast<float>(guides.xDimension),
                                       static_cast<float>(guides.yDimension)});
@@ -784,9 +834,11 @@ private:
             appendOutlinedText(lines, midpoint,
                                QStringLiteral("X %1").arg(formatDimension(guides.xDimension)), xColor);
             appendOutlinedText(lines, xStartScreen + QPointF(-26.0, 3.0),
-                               QStringLiteral("-X"), xColor);
+                               reverseCoordinates_ ? QStringLiteral("+X")
+                                                   : QStringLiteral("-X"), xColor);
             appendOutlinedText(lines, xEndScreen + QPointF(3.0, 3.0),
-                               QStringLiteral("+X"), xColor);
+                               reverseCoordinates_ ? QStringLiteral("-X")
+                                                   : QStringLiteral("+X"), xColor);
             appendOutlinedText(lines, originScreen + QPointF(3.0, -9.0),
                                QStringLiteral("0"), {1.0F, 0.85F, 0.15F});
             const QPointF diamond[] = {
@@ -801,9 +853,11 @@ private:
             appendOutlinedText(lines, midpoint,
                                QStringLiteral("Y %1").arg(formatDimension(guides.yDimension)), yColor);
             appendOutlinedText(lines, yStartScreen + QPointF(-26.0, 3.0),
-                               QStringLiteral("-Y"), yColor);
+                               reverseCoordinates_ ? QStringLiteral("+Y")
+                                                   : QStringLiteral("-Y"), yColor);
             appendOutlinedText(lines, yEndScreen + QPointF(3.0, 3.0),
-                               QStringLiteral("+Y"), yColor);
+                               reverseCoordinates_ ? QStringLiteral("-Y")
+                                                   : QStringLiteral("+Y"), yColor);
         }
     }
 
@@ -889,6 +943,18 @@ private:
 
     void appendLabels(std::vector<LineVertex>& lines, const QMatrix4x4& mvp) const {
         if (document_->points.empty()) return;
+        if (forceIndividualLabels_ && !interacting_) {
+            for (const JobPoint& point : document_->points) {
+                if (point.placementId == selectedId_ || point.placementId == hoveredId_) continue;
+                QPointF screen;
+                if (project(localPosition(point), mvp, &screen) && screen.x() >= 0.0 &&
+                    screen.y() >= 0.0 && screen.x() < width() && screen.y() < height())
+                    appendText(lines, screen, QString::number(point.placementId),
+                               {0.72F, 0.82F, 0.90F});
+            }
+            appendPriorityLabels(lines, mvp);
+            return;
+        }
         std::vector<quint32> visible;
         if(document_->spatialIndex)document_->spatialIndex->queryVisible(
             mvp,origin_,&visible,kMaximumLabelCandidates);
@@ -963,6 +1029,12 @@ private:
     qint64 selectedId_ = -1;
     qint64 hoveredId_ = -1;
     bool guidesVisible_ = true;
+    bool reverseCoordinates_ = true;
+    bool centerRelative_ = true;
+    bool xAxisPositiveLeft_ = false;
+    bool yAxisPositiveDown_ = false;
+    bool forceIndividualLabels_ = false;
+    qint64 visibleStackPlacementCount_ = -1;
     bool pointBufferDirty_ = true;
     quint64 stackBufferRevision_ = 1;
     JobStackDisplayMode stackMode_ = JobStackDisplayMode::Solid;
@@ -1274,11 +1346,16 @@ void JobVulkanRenderer::initResources() {
     VkShaderModule pointFragment = loadShader(QStringLiteral(":/job_shaders/job_points.frag.spv"));
     VkShaderModule lineVertex = loadShader(QStringLiteral(":/job_shaders/job_lines.vert.spv"));
     VkShaderModule lineFragment = loadShader(QStringLiteral(":/job_shaders/job_lines.frag.spv"));
+    VkShaderModule stackVertex = loadShader(QStringLiteral(":/job_shaders/job_stack.vert.spv"));
+    VkShaderModule stackFragment = loadShader(QStringLiteral(":/job_shaders/job_stack.frag.spv"));
     if (pointVertex && pointFragment) pointPipeline_ = createPipeline(pointVertex, pointFragment, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, true);
     if (lineVertex && lineFragment) linePipeline_ = createPipeline(lineVertex, lineFragment, VK_PRIMITIVE_TOPOLOGY_LINE_LIST, false);
-    for (VkShaderModule module : {pointVertex, pointFragment, lineVertex, lineFragment})
+    if (stackVertex && stackFragment)
+        stackPipeline_ = createStackPipeline(stackVertex, stackFragment);
+    for (VkShaderModule module : {pointVertex, pointFragment, lineVertex, lineFragment,
+                                  stackVertex, stackFragment})
         if (module) deviceFunctions_->vkDestroyShaderModule(device_, module, nullptr);
-    initialized_ = pointPipeline_ && linePipeline_;
+    initialized_ = pointPipeline_ && linePipeline_ && stackPipeline_;
     rebuildPointBuffer();
 }
 
@@ -1376,16 +1453,21 @@ void JobVulkanRenderer::rebuildStackBuffers(int frame) {
     candidates.reserve(visible.size());
     const QMatrix4x4 mvp = window_->viewProjection();
     const JobCoordinate origin = window_->origin();
+    const bool processingPlayback = window_->visibleStackPlacementCount() >= 0;
     for (quint32 pointIndex : visible) {
         if (pointIndex >= document->points.size()) continue;
         const JobPoint& point = document->points[pointIndex];
+        if (window_->visibleStackPlacementCount() >= 0 &&
+            point.placementId >= window_->visibleStackPlacementCount()) continue;
         if (point.placeId < 0 || point.placeId >= static_cast<qint64>(document->models.size())) continue;
         const JobModel& model = document->models[static_cast<std::size_t>(point.placeId)];
         if (!model.stack) continue;
-        const QVector3D base = point.position.relativeTo(origin);
         const QVector3D extent(static_cast<float>(model.stack->physicalSize.width()),
                                static_cast<float>(model.stack->physicalSize.height()),
                                static_cast<float>(model.stack->layerCount * model.stack->layerHeight));
+        QVector3D base = point.position.relativeTo(origin);
+        if (processingPlayback)
+            base -= QVector3D(extent.x() * 0.5F, extent.y() * 0.5F, 0.0F);
         double minimumX = std::numeric_limits<double>::max();
         double minimumY = std::numeric_limits<double>::max();
         double maximumX = std::numeric_limits<double>::lowest();
@@ -1430,10 +1512,25 @@ void JobVulkanRenderer::rebuildStackBuffers(int frame) {
         const JobPoint& point = document->points[candidate.pointIndex];
         int desiredLevel = JobStackLod::chooseLevel(candidate.stack->lodLevels,
             candidate.projectedWidth, candidate.projectedHeight, window_->interacting(),
-            window_->frameBudget().qualityOffset() + (candidate.priority > 0 ? 1 : 0));
+            window_->frameBudget().qualityOffset() +
+                (candidate.priority > 0 && !processingPlayback ? 1 : 0));
+        // Processing playback can add a new instance every 125 ms. A selected
+        // placement still needs its highlight, but promoting a detailed binary
+        // mask to 256/512 cells and exempting it from the frame budget can upload
+        // millions of triangles on the render thread and stall the UI. 128 cells
+        // preserves the mask silhouette while keeping cumulative playback bounded.
+        if (processingPlayback) {
+            while (desiredLevel > 0) {
+                const QSize size = candidate.stack->lodLevels[
+                    static_cast<std::size_t>(desiredLevel)].gridSize;
+                if (std::max(size.width(), size.height()) <= 128) break;
+                --desiredLevel;
+            }
+        }
         GeometrySelection selection = window_->geometryFor(candidate.stack, desiredLevel);
         qint64 triangles = selection.geometry
             ? static_cast<qint64>(selection.geometry->indices.size() / 3) : 0;
+        const bool budgetExempt = candidate.priority > 0 && !processingPlayback;
         constexpr std::size_t maximumGpuMeshBytes = 256U * 1024U * 1024U;
         const auto gpuMeshUnavailable = [&](const GeometrySelection& value) {
             if (!value.geometry) return true;
@@ -1443,7 +1540,7 @@ void JobVulkanRenderer::rebuildStackBuffers(int frame) {
                 (!meshCache_.contains(value.geometry.get()) &&
                   gpuMeshBytes_ + bytes > maximumGpuMeshBytes);
         };
-        if (selection.geometry && candidate.priority == 0 &&
+        if (selection.geometry && !budgetExempt &&
             (gpuMeshUnavailable(selection) ||
              usedTriangles + triangles > triangleBudget)) {
             for (int lowerLevel = selection.level - 1; lowerLevel >= 0; --lowerLevel) {
@@ -1457,7 +1554,7 @@ void JobVulkanRenderer::rebuildStackBuffers(int frame) {
             }
         }
         const bool unavailable = !selection.geometry || gpuMeshUnavailable(selection) ||
-            (candidate.priority == 0 && usedTriangles + triangles > triangleBudget);
+            (!budgetExempt && usedTriangles + triangles > triangleBudget);
         if (unavailable) {
             ++proxyCount;
             continue;
@@ -1467,7 +1564,12 @@ void JobVulkanRenderer::rebuildStackBuffers(int frame) {
         PendingBatch& batch = batches[geometry.get()];
         batch.geometry = geometry;
         batch.lodLevel = selection.level;
-        const QVector3D local = point.position.relativeTo(origin);
+        QVector3D local = point.position.relativeTo(origin);
+        if (processingPlayback) {
+            local -= QVector3D(static_cast<float>(candidate.stack->physicalSize.width() * 0.5),
+                               static_cast<float>(candidate.stack->physicalSize.height() * 0.5),
+                               0.0F);
+        }
         batch.instances.push_back({local.x(), local.y(), local.z(),
                                    static_cast<float>(point.placementId),
                                    static_cast<float>(candidate.stack->layerCount),
@@ -1556,7 +1658,9 @@ void JobVulkanRenderer::startNextFrame() {
     uniform.viewportSize[0]=static_cast<float>(std::max(1,window_->swapChainImageSize().width()));
     uniform.viewportSize[1]=static_cast<float>(std::max(1,window_->swapChainImageSize().height()));
     uniform.stackExplode = window_->stackDisplayMode() == JobStackDisplayMode::Exploded ? 1.2F : 1.0F;
+    uniform.processingMode = window_->visibleStackPlacementCount() >= 0 ? 1.0F : 0.0F;
     upload(&uniformBuffers_[frame], &uniform, sizeof(uniform), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+    rebuildStackBuffers(frame);
     const std::vector<LineVertex> lines = window_->buildLineVertices();
     if (!lines.empty()) upload(&lineBuffers_[frame], lines.data(), lines.size() * sizeof(LineVertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
 
@@ -1583,6 +1687,23 @@ void JobVulkanRenderer::startNextFrame() {
     deviceFunctions_->vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                                pipelineLayout_, 0, 1,
                                                &descriptorSets_[frame], 0, nullptr);
+    if (stackPipeline_ && frame >= 0 && frame < static_cast<int>(stackFrames_.size())) {
+        deviceFunctions_->vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                             stackPipeline_);
+        for (const auto& [key, batch] : stackFrames_[frame]) {
+            Q_UNUSED(key);
+            if (!batch.mesh || !batch.mesh->vertex.buffer || !batch.mesh->index.buffer ||
+                !batch.instances.buffer || batch.mesh->indexCount == 0 ||
+                batch.instanceCount == 0) continue;
+            const VkBuffer vertexBuffers[]{batch.mesh->vertex.buffer, batch.instances.buffer};
+            const VkDeviceSize offsets[]{0, 0};
+            deviceFunctions_->vkCmdBindVertexBuffers(command, 0, 2, vertexBuffers, offsets);
+            deviceFunctions_->vkCmdBindIndexBuffer(command, batch.mesh->index.buffer, 0,
+                                                    VK_INDEX_TYPE_UINT32);
+            deviceFunctions_->vkCmdDrawIndexed(command, batch.mesh->indexCount,
+                                                batch.instanceCount, 0, 0, 0);
+        }
+    }
     if (document && pointBuffer_.buffer) {
         const VkDeviceSize offset = 0;
         deviceFunctions_->vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pointPipeline_);
@@ -1731,11 +1852,40 @@ public:
         if (window_) window_->fitAll();
 #endif
     }
+    void viewTop() {
+#if IMAGE_HANDLER_HAS_VULKAN_PREVIEW
+        if (window_) window_->viewTop();
+#endif
+    }
+    void setForceIndividualLabels(bool force) {
+#if IMAGE_HANDLER_HAS_VULKAN_PREVIEW
+        if (window_) window_->setForceIndividualLabels(force);
+#else
+        Q_UNUSED(force);
+#endif
+    }
+    void setVisibleStackPlacementCount(qint64 count) {
+#if IMAGE_HANDLER_HAS_VULKAN_PREVIEW
+        if (window_) window_->setVisibleStackPlacementCount(count);
+#else
+        Q_UNUSED(count);
+#endif
+    }
     void setGuides(bool visible) {
 #if IMAGE_HANDLER_HAS_VULKAN_PREVIEW
         if (window_) window_->setGuidesVisible(visible);
 #else
         Q_UNUSED(visible);
+#endif
+    }
+    void setCoordinateDisplay(bool reverseCoordinates, bool centerRelative,
+                              bool xAxisPositiveLeft, bool yAxisPositiveDown) {
+#if IMAGE_HANDLER_HAS_VULKAN_PREVIEW
+        if (window_) window_->setCoordinateDisplay(
+            reverseCoordinates, centerRelative, xAxisPositiveLeft, yAxisPositiveDown);
+#else
+        Q_UNUSED(reverseCoordinates); Q_UNUSED(centerRelative); Q_UNUSED(xAxisPositiveLeft);
+        Q_UNUSED(yAxisPositiveDown);
 #endif
     }
     QImage grabFrame() {
@@ -1762,11 +1912,21 @@ JobPreviewWidget::JobPreviewWidget(QWidget* parent) : QWidget(parent) {
     auto* tools = new QHBoxLayout;
     fitButton_ = new QPushButton(QStringLiteral("适配全部")); fitButton_->setObjectName(QStringLiteral("jobFitAllButton"));
     guidesCheck_ = new QCheckBox(QStringLiteral("坐标轴与网格")); guidesCheck_->setObjectName(QStringLiteral("jobGuidesCheck")); guidesCheck_->setChecked(true);
+    reverseCoordinatesCheck_ = new QCheckBox(QStringLiteral("X/Y 逆向"));
+    reverseCoordinatesCheck_->setObjectName(QStringLiteral("jobReverseCoordinatesCheck"));
+    reverseCoordinatesCheck_->setToolTip(QStringLiteral("勾选后 X 正方向向左、Y 正方向向下"));
+    reverseCoordinatesCheck_->setChecked(true);
+    centerRelativeCheck_ = new QCheckBox(QStringLiteral("相对中心点偏移"));
+    centerRelativeCheck_->setObjectName(QStringLiteral("jobCenterRelativeCheck"));
+    centerRelativeCheck_->setToolTip(QStringLiteral("以图片中心为物理坐标原点"));
+    centerRelativeCheck_->setChecked(true);
     statusLabel_ = new QLabel(QStringLiteral("未加载 Job")); statusLabel_->setObjectName(QStringLiteral("jobPreviewStatus"));
     coordinateLabel_ = new QLabel; coordinateLabel_->setObjectName(QStringLiteral("jobSelectedCoordinate"));
     coordinateLabel_->setTextFormat(Qt::RichText); coordinateLabel_->setVisible(false);
     coordinateLabel_->setStyleSheet(QStringLiteral("QLabel { background: #25282b; border-radius: 3px; padding: 3px 7px; }"));
-    tools->addWidget(fitButton_); tools->addWidget(guidesCheck_); tools->addStretch();
+    tools->addWidget(fitButton_); tools->addWidget(guidesCheck_);
+    tools->addWidget(reverseCoordinatesCheck_); tools->addWidget(centerRelativeCheck_);
+    tools->addStretch();
     tools->addWidget(coordinateLabel_); tools->addWidget(statusLabel_);
     root->addLayout(tools);
     backend_ = new Backend(this, this);
@@ -1779,7 +1939,17 @@ JobPreviewWidget::JobPreviewWidget(QWidget* parent) : QWidget(parent) {
     }
     connect(fitButton_, &QPushButton::clicked, this, &JobPreviewWidget::fitAll);
     connect(guidesCheck_, &QCheckBox::toggled, this, [this](bool visible) { backend_->setGuides(visible); });
+    const auto updateCoordinates = [this] {
+        backend_->setCoordinateDisplay(reverseCoordinates(), centerRelativeCoordinates(),
+                                       xAxisPositiveLeft_, yAxisPositiveDown_);
+        updateCoordinateLabel();
+    };
+    connect(reverseCoordinatesCheck_, &QCheckBox::toggled, this, updateCoordinates);
+    connect(centerRelativeCheck_, &QCheckBox::toggled, this, updateCoordinates);
     fitButton_->setEnabled(backend_->available()); guidesCheck_->setEnabled(backend_->available());
+    reverseCoordinatesCheck_->setEnabled(backend_->available());
+    centerRelativeCheck_->setEnabled(backend_->available());
+    updateCoordinates();
 }
 
 JobPreviewWidget::~JobPreviewWidget() { delete backend_; }
@@ -1807,7 +1977,91 @@ void JobPreviewWidget::setSelectedPlaceId(qint64 placeId, bool focus, bool prese
 
 void JobPreviewWidget::clearSelection() { setSelectedPlaceId(-1, false); }
 void JobPreviewWidget::fitAll() { if (backend_) backend_->fitAll(); }
+void JobPreviewWidget::viewTop() { if (backend_) backend_->viewTop(); }
 QImage JobPreviewWidget::grabFrame() { return backend_ ? backend_->grabFrame() : QImage(); }
+
+void JobPreviewWidget::setForceIndividualLabels(bool force) {
+    forceIndividualLabels_ = force;
+    if (backend_) backend_->setForceIndividualLabels(force);
+}
+
+bool JobPreviewWidget::forceIndividualLabels() const noexcept {
+    return forceIndividualLabels_;
+}
+
+void JobPreviewWidget::setVisibleStackPlacementCount(qint64 count) {
+    visibleStackPlacementCount_ = count;
+    if (backend_) backend_->setVisibleStackPlacementCount(count);
+}
+
+qint64 JobPreviewWidget::visibleStackPlacementCount() const noexcept {
+    return visibleStackPlacementCount_;
+}
+
+void JobPreviewWidget::setReverseCoordinates(bool reverse) {
+    if (reverseCoordinatesCheck_) reverseCoordinatesCheck_->setChecked(reverse);
+}
+
+bool JobPreviewWidget::reverseCoordinates() const noexcept {
+    return reverseCoordinatesCheck_ && reverseCoordinatesCheck_->isChecked();
+}
+
+void JobPreviewWidget::setCenterRelativeCoordinates(bool relative) {
+    if (centerRelativeCheck_) centerRelativeCheck_->setChecked(relative);
+}
+
+bool JobPreviewWidget::centerRelativeCoordinates() const noexcept {
+    return centerRelativeCheck_ && centerRelativeCheck_->isChecked();
+}
+
+void JobPreviewWidget::setCoordinateOptionsVisible(bool visible) {
+    if (reverseCoordinatesCheck_) reverseCoordinatesCheck_->setVisible(visible);
+    if (centerRelativeCheck_) centerRelativeCheck_->setVisible(visible);
+}
+
+void JobPreviewWidget::setXAxisPositiveLeft(bool positiveLeft) {
+    if (xAxisPositiveLeft_ == positiveLeft) return;
+    xAxisPositiveLeft_ = positiveLeft;
+    if (backend_)
+        backend_->setCoordinateDisplay(reverseCoordinates(), centerRelativeCoordinates(),
+                                       xAxisPositiveLeft_, yAxisPositiveDown_);
+}
+
+void JobPreviewWidget::setYAxisPositiveDown(bool positiveDown) {
+    if (yAxisPositiveDown_ == positiveDown) return;
+    yAxisPositiveDown_ = positiveDown;
+    if (backend_)
+        backend_->setCoordinateDisplay(reverseCoordinates(), centerRelativeCoordinates(),
+                                       xAxisPositiveLeft_, yAxisPositiveDown_);
+    updateCoordinateLabel();
+}
+
+void JobPreviewWidget::setPreserveCoordinateValues(bool preserve) {
+    if (preserveCoordinateValues_ == preserve) return;
+    preserveCoordinateValues_ = preserve;
+    updateCoordinateLabel();
+}
+
+JobCoordinate JobPreviewWidget::displayCoordinate(const JobCoordinate& coordinate) const {
+    JobCoordinate center;
+    if (centerRelativeCoordinates() && document_) {
+        center = document_->hasImageCenter ? document_->imageCenter
+                                          : document_->bounds.center();
+        center.z = 0.0;
+    }
+    JobCoordinate result{coordinate.x - center.x, coordinate.y - center.y,
+                         coordinate.z - center.z};
+    if (!preserveCoordinateValues_) {
+        if (reverseCoordinates()) {
+            result.x = -result.x;
+            result.y = -result.y;
+        }
+    }
+    if (result.x == 0.0) result.x = 0.0;
+    if (result.y == 0.0) result.y = 0.0;
+    if (result.z == 0.0) result.z = 0.0;
+    return result;
+}
 
 void JobPreviewWidget::updateCoordinateLabel() {
     if (!coordinateLabel_) return;
@@ -1826,12 +2080,13 @@ void JobPreviewWidget::updateCoordinateLabel() {
         if (value == 0.0) value = 0.0;
         return QString::number(value, 'g', 15).toHtmlEscaped();
     };
+    const JobCoordinate coordinate = displayCoordinate(selected->position);
     coordinateLabel_->setText(QStringLiteral(
         "<span style=\"color:#d7e8ff\">[</span>"
         "<span style=\"color:#ff5252\">%1</span>"
         "<span style=\"color:#d7e8ff\">,</span>"
         "<span style=\"color:#4caf50\">%2</span>"
         "<span style=\"color:#d7e8ff\">]</span>")
-        .arg(number(selected->position.x), number(selected->position.y)));
+        .arg(number(coordinate.x), number(coordinate.y)));
     coordinateLabel_->show();
 }

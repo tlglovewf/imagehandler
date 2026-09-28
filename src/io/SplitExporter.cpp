@@ -567,7 +567,7 @@ bool SplitExporter::exportTiles(const QString& outputDirectory, const ImageDocum
         committed << name;
         reportProgress(QStringLiteral("提交文件"), qint64(order.size()) * 1000 + i + 1);
     }
-    if (execution.writeReport) {
+    {
         const QString name = QString::fromLatin1(kExportReportName);
         const QString target = output.filePath(name);
         const QFileInfo targetInfo(target);
@@ -586,11 +586,13 @@ bool SplitExporter::exportTiles(const QString& outputDirectory, const ImageDocum
             }
             backedUp << name;
         }
-        if (!QFile::rename(temp.filePath(name), target)) {
-            if (error) *error = QStringLiteral("无法提交：%1").arg(name);
-            goto rollback;
+        if (execution.writeReport) {
+            if (!QFile::rename(temp.filePath(name), target)) {
+                if (error) *error = QStringLiteral("无法提交：%1").arg(name);
+                goto rollback;
+            }
+            committed << name;
         }
-        committed << name;
     }
     cleanup(); return true;
 
@@ -865,7 +867,7 @@ bool SplitExporter::exportPrintPackage(const QString& outputDirectory,
         }
         existingTargets << QStringLiteral("job.json");
     }
-    if (execution.writeReport) {
+    {
         const QFileInfo reportInfo(output.filePath(QString::fromLatin1(kExportReportName)));
         if (reportInfo.exists() || reportInfo.isSymLink() || reportInfo.isJunction()) {
             if (!isSafeManagedTarget(reportInfo, false)) {

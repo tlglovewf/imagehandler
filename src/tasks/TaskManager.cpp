@@ -4,6 +4,7 @@
 #include "imaging/ElementGrouping.h"
 #include "imaging/MosaicBuilder.h"
 #include "io/ExportTypes.h"
+#include "io/JobPackageLoader.h"
 
 #include <QFutureWatcher>
 #include <QMutex>
@@ -32,6 +33,7 @@ TaskManager::TaskManager(QObject* parent) : QObject(parent) {
     qRegisterMetaType<ElementGroupingResult>();
     qRegisterMetaType<PointCloudDocumentPtr>();
     qRegisterMetaType<ExportPreflightResult>();
+    qRegisterMetaType<JobPackageLoader::ProcessingLoadResult>();
 }
 
 TaskManager::~TaskManager() {

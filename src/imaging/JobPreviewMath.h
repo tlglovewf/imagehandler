@@ -46,7 +46,8 @@ namespace JobPreviewMath {
 [[nodiscard]] double projectedPointSpacing(std::span<const QPointF> projectedPoints,
                                            size_t pointCount);
 [[nodiscard]] JobGuideGeometry guideGeometry(const JobDocument& document,
-                                             const JobCoordinate& floatingOrigin);
+                                             const JobCoordinate& floatingOrigin,
+                                             const JobCoordinate& coordinateOrigin = {});
 
 } // namespace JobPreviewMath
 

@@ -112,9 +112,10 @@ MosaicBuildResult MosaicBuilder::build(const QStringList& paths, quint64 generat
     if (expected > 1000000) {
         problems << QStringLiteral("行列范围过大且明显存在大量缺块。");
     } else if (expected != static_cast<qint64>(tiles.size())) {
-        for (int r = minRow; r <= maxRow; ++r) {
-            for (int c = minCol; c <= maxCol; ++c) {
-                if (!positions.contains({r,c})) {
+        for (qint64 r = minRow; r <= qint64(maxRow); ++r) {
+            for (qint64 c = minCol; c <= qint64(maxCol); ++c) {
+                const auto coordinate = qMakePair(static_cast<int>(r), static_cast<int>(c));
+                if (!positions.contains(coordinate)) {
                     ++buildResult.missingCount;
                     if (buildResult.missingCoordinateSamples.size() < 20)
                         buildResult.missingCoordinateSamples << QStringLiteral("%1,%2").arg(r).arg(c);

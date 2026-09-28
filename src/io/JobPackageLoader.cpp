@@ -1,6 +1,7 @@
 #include "io/JobPackageLoader.h"
 
 #include "domain/MaskSliceModels.h"
+#include "imaging/JobSpatialIndex.h"
 #include "imaging/JobStackLod.h"
 #include "imaging/MaskStackMeshBuilder.h"
 #include "io/JobFileLoader.h"
@@ -28,8 +29,11 @@ constexpr std::size_t kTargetExplodedQuadInstances = 250'000;
 struct PackageSettings {
     double pixelScale = 0.0;
     double layerHeight = 0.0;
+    double exportMultiplier = 0.0;
     int layerCount = 0;
     QSize outputSize;
+    QSize standardSize;
+    QSize sourceCellSize;
     bool invertMask = false;
 };
 
@@ -83,7 +87,16 @@ bool readPackageSettings(const QString& path, PackageSettings* settings, QString
     }
     settings->invertMask = layers.value(QStringLiteral("invertMask")).toBool();
     const bool attached = output.value(QStringLiteral("attachToCanvas")).toBool();
-    int width = 0, height = 0;
+    int standardWidth = 0, standardHeight = 0;
+    if (!positiveInteger(output.value(QStringLiteral("standardWidth")),
+                         std::numeric_limits<int>::max(), &standardWidth) ||
+        !positiveInteger(output.value(QStringLiteral("standardHeight")),
+                         std::numeric_limits<int>::max(), &standardHeight)) {
+        *error = QStringLiteral("export-report.json 缺少有效的标准块尺寸。");
+        return false;
+    }
+    settings->standardSize = {standardWidth, standardHeight};
+    int width = standardWidth, height = standardHeight;
     const QString widthKey = attached ? QStringLiteral("canvasWidth")
                                       : QStringLiteral("standardWidth");
     const QString heightKey = attached ? QStringLiteral("canvasHeight")
@@ -94,6 +107,22 @@ bool readPackageSettings(const QString& path, PackageSettings* settings, QString
         return false;
     }
     settings->outputSize = {width, height};
+    int sourceCellWidth = 0, sourceCellHeight = 0;
+    const bool hasSourceCellWidth = output.contains(QStringLiteral("sourceCellWidth"));
+    const bool hasSourceCellHeight = output.contains(QStringLiteral("sourceCellHeight"));
+    if (hasSourceCellWidth != hasSourceCellHeight ||
+        (hasSourceCellWidth &&
+         (!positiveInteger(output.value(QStringLiteral("sourceCellWidth")),
+                           std::numeric_limits<int>::max(), &sourceCellWidth) ||
+          !positiveInteger(output.value(QStringLiteral("sourceCellHeight")),
+                           std::numeric_limits<int>::max(), &sourceCellHeight)))) {
+        *error = QStringLiteral("export-report.json 的源方块尺寸无效。");
+        return false;
+    }
+    if (hasSourceCellWidth)
+        settings->sourceCellSize = {sourceCellWidth, sourceCellHeight};
+    positiveFinite(output.value(QStringLiteral("exportMultiplier")),
+                   &settings->exportMultiplier);
     const double physicalWidth = width * settings->pixelScale;
     const double physicalHeight = height * settings->pixelScale;
     const double physicalDepth = settings->layerCount * settings->layerHeight;
@@ -169,7 +198,8 @@ bool inspectBinaryBmp(const uchar* bytes, qint64 size, const QSize& expected,
         return false;
     }
     const int height = std::abs(signedHeight);
-    if (signedWidth != expected.width() || height != expected.height()) {
+    if (!expected.isEmpty() &&
+        (signedWidth != expected.width() || height != expected.height())) {
         *error = QStringLiteral("BMP 尺寸与报告不一致");
         return false;
     }
@@ -210,6 +240,23 @@ bool inspectBinaryBmp(const uchar* bytes, qint64 size, const QSize& expected,
     view->topDown = signedHeight < 0;
     view->white = {luminance[0] == 255, luminance[1] == 255};
     return true;
+}
+
+bool inspectBinaryBmpFile(const QString& path, BinaryBmpView* view, QString* error) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        *error = QStringLiteral("无法打开 BMP：%1").arg(file.errorString());
+        return false;
+    }
+    const qint64 size = file.size();
+    uchar* bytes = size > 0 ? file.map(0, size) : nullptr;
+    if (!bytes) {
+        *error = QStringLiteral("无法映射 BMP：%1").arg(file.errorString());
+        return false;
+    }
+    const bool result = inspectBinaryBmp(bytes, size, {}, view, error);
+    file.unmap(bytes);
+    return result;
 }
 
 bool accumulateBinaryBmp(const QString& path, const QSize& expected, const QSize& grid,
@@ -399,6 +446,117 @@ JobModelStackPtr loadModelStackData(const QString& directoryPath,
     return result;
 }
 
+JobModelStackPtr loadFirstLayerData(const QString& imagePath, const QSize& sourceSize,
+                                    const QSizeF& physicalSize, double layerHeight,
+                                    bool invertMask, const CancellationTokenPtr& token,
+                                    QString* error) {
+    // Processing playback needs a predictable, already-built mesh for every model.
+    // Keeping the first layer at 64 cells per side avoids starting a series of
+    // expensive LOD builds on the render thread as successive placements appear.
+    constexpr qint64 kProcessingPreviewCells = 64LL * 64LL;
+    const QSize grid = previewSize(sourceSize, kProcessingPreviewCells);
+    QVector<quint16> columnLayers(qsizetype(grid.width()) * grid.height(), 0);
+    QString imageError;
+    if (!accumulateBinaryBmp(imagePath, sourceSize, grid, 1, invertMask,
+                             &columnLayers, nullptr, &imageError)) {
+        *error = QStringLiteral("无法读取 1.bmp：%1").arg(imageError);
+        return {};
+    }
+    if (token && token->isCancelled()) return {};
+
+    MaskStackPreviewData preview;
+    preview.gridSize = grid;
+    preview.requestedOutputSize = sourceSize;
+    preview.physicalSize = physicalSize;
+    preview.columnLayers = std::move(columnLayers);
+    preview.layerHeight = layerHeight;
+    preview.layerCount = 1;
+    preview.downsampled = grid != sourceSize;
+    preview.mapRasterYToPositiveY = false;
+    preview.actualMaximumHeight = layerHeight;
+    auto lodLevels = JobStackLod::buildPyramid(grid, preview.columnLayers, token);
+    if (lodLevels.empty() || (token && token->isCancelled())) return {};
+    JobStackHeightLevel playbackLevel = std::move(lodLevels.back());
+    lodLevels.clear();
+    lodLevels.push_back(std::move(playbackLevel));
+    MaskStackPreviewData coarse = preview;
+    coarse.gridSize = lodLevels.front().gridSize;
+    coarse.columnLayers = QVector<quint16>(lodLevels.front().columnLayers.cbegin(),
+                                           lodLevels.front().columnLayers.cend());
+    coarse.solidGeometry = MaskStackMeshBuilder::buildSolid(coarse, token, {});
+    if (!coarse.solidGeometry || (token && token->isCancelled())) {
+        if (error && error->isEmpty()) *error = QStringLiteral("无法生成首层切片几何。");
+        return {};
+    }
+
+    auto result = std::make_shared<JobModelStack>();
+    result->sourceSize = sourceSize;
+    result->gridSize = grid;
+    result->physicalSize = physicalSize;
+    result->layerHeight = layerHeight;
+    result->layerCount = 1;
+    result->downsampled = preview.downsampled;
+    result->mapRasterYToPositiveY = preview.mapRasterYToPositiveY;
+    result->lodLevels = lodLevels;
+    result->solidGeometry = coarse.solidGeometry;
+    return result;
+}
+
+double minimumPositiveSpacing(const std::vector<JobPoint>& points, bool xAxis) {
+    std::vector<double> values;
+    values.reserve(points.size());
+    for (const JobPoint& point : points)
+        values.push_back(xAxis ? point.position.x : point.position.y);
+    std::sort(values.begin(), values.end());
+    double spacing = std::numeric_limits<double>::infinity();
+    for (std::size_t index = 1; index < values.size(); ++index) {
+        const double delta = values[index] - values[index - 1];
+        if (std::isfinite(delta) && delta > 0.0) spacing = std::min(spacing, delta);
+    }
+    return spacing;
+}
+
+QSizeF inferredPhysicalSize(const QSize& pixels, double xSpacing, double ySpacing) {
+    if (!std::isfinite(xSpacing) && !std::isfinite(ySpacing))
+        return QSizeF(pixels.width(), pixels.height());
+    if (!std::isfinite(xSpacing)) xSpacing = ySpacing;
+    if (!std::isfinite(ySpacing)) ySpacing = xSpacing;
+    const double scale = std::min(xSpacing / pixels.width(), ySpacing / pixels.height());
+    return QSizeF(pixels.width() * scale, pixels.height() * scale);
+}
+
+double legacyCellExtent(int standardPixels, double pixelScale, double exportMultiplier) {
+    if (standardPixels <= 0 || !std::isfinite(pixelScale) || pixelScale <= 0.0)
+        return std::numeric_limits<double>::infinity();
+    if (std::isfinite(exportMultiplier) && exportMultiplier > 0.0) {
+        const double sourcePixels = std::round(
+            standardPixels / (exportMultiplier * pixelScale));
+        if (std::isfinite(sourcePixels) && sourcePixels > 0.0)
+            return sourcePixels * pixelScale;
+    }
+    return standardPixels * pixelScale;
+}
+
+QSizeF processingPhysicalSize(const QSize& rasterSize, const PackageSettings& settings,
+                              double xSpacing, double ySpacing) {
+    double maximumWidth = xSpacing;
+    double maximumHeight = ySpacing;
+    if (!settings.sourceCellSize.isEmpty()) {
+        maximumWidth = settings.sourceCellSize.width() * settings.pixelScale;
+        maximumHeight = settings.sourceCellSize.height() * settings.pixelScale;
+    } else {
+        if (!std::isfinite(maximumWidth))
+            maximumWidth = legacyCellExtent(settings.standardSize.width(),
+                                            settings.pixelScale,
+                                            settings.exportMultiplier);
+        if (!std::isfinite(maximumHeight))
+            maximumHeight = legacyCellExtent(settings.standardSize.height(),
+                                             settings.pixelScale,
+                                             settings.exportMultiplier);
+    }
+    return inferredPhysicalSize(rasterSize, maximumWidth, maximumHeight);
+}
+
 QString normalizedModelPath(QString path) {
     path = QDir::cleanPath(path.trimmed());
     return path.replace(QLatin1Char('\\'), QLatin1Char('/')).toCaseFolded();
@@ -532,5 +690,160 @@ JobPackageLoader::StackLoadResult JobPackageLoader::loadStack(
     } catch (const std::bad_alloc&) {
         if (error) *error = QStringLiteral("模型切片过大，生成堆叠预览时内存不足。");
         return result;
+    }
+}
+
+JobPackageLoader::ProcessingLoadResult JobPackageLoader::loadProcessingPackage(
+    const QString& path, const CancellationTokenPtr& token,
+    const Progress& progress, QString* error) {
+    ProcessingLoadResult result;
+    if (error) error->clear();
+    JobDocumentPtr document = JobFileLoader::load(path, token, progress, error);
+    if (!document || (token && token->isCancelled())) return result;
+
+    const QDir root(QFileInfo(path).absolutePath());
+    const QFileInfo reportInfo(root.filePath(QStringLiteral("export-report.json")));
+    const bool reportPresent = reportInfo.exists() || reportInfo.isSymLink() ||
+                               reportInfo.isJunction();
+    PackageSettings reportSettings;
+    if (reportPresent) {
+        QString reportError;
+        if (!reportInfo.isFile() || reportInfo.isSymLink() || reportInfo.isJunction() ||
+            !readPackageSettings(reportInfo.absoluteFilePath(), &reportSettings, &reportError)) {
+            if (error) *error = reportError.isEmpty()
+                ? QStringLiteral("export-report.json 不是安全的普通文件") : reportError;
+            return result;
+        }
+    } else {
+        result.inferredGeometry = true;
+        result.warning = QStringLiteral("未找到 export-report.json，切片尺寸由 Job 点距推断。");
+    }
+
+    try {
+        const double xSpacing = minimumPositiveSpacing(document->points, true);
+        const double ySpacing = minimumPositiveSpacing(document->points, false);
+        std::map<QString, JobModelStackPtr> stacks;
+        const qint64 modelCount = static_cast<qint64>(document->models.size());
+        for (qint64 index = 0; index < modelCount; ++index) {
+            if (token && token->isCancelled()) return {};
+            JobModel& model = document->models[static_cast<std::size_t>(index)];
+            const QString key = normalizedModelPath(model.path);
+            if (key.isEmpty()) {
+                if (error) *error = QStringLiteral("模型 %1 的 path 为空。").arg(index);
+                return {};
+            }
+            if (const auto cached = stacks.find(key); cached != stacks.end()) {
+                model.stackState = JobModelStackState::Loaded;
+                model.stack = cached->second;
+                continue;
+            }
+
+            QString directoryPath;
+            if (!isInsideRoot(root, model.path, &directoryPath)) {
+                if (error) *error = QStringLiteral("模型 %1 的 path 不是 Job 目录内的安全相对路径。")
+                                        .arg(index);
+                return {};
+            }
+            const QFileInfo directoryInfo(directoryPath);
+            if (!directoryInfo.isDir() || directoryInfo.isSymLink() ||
+                directoryInfo.isJunction()) {
+                if (error) *error = QStringLiteral("模型切片目录不存在或不安全：%1")
+                                        .arg(model.path);
+                return {};
+            }
+            const QString imagePath = QDir(directoryPath).filePath(QStringLiteral("1.bmp"));
+            const QFileInfo imageInfo(imagePath);
+            if (!imageInfo.isFile() || imageInfo.isSymLink() || imageInfo.isJunction()) {
+                if (error) *error = QStringLiteral("模型 %1 缺少安全的 1.bmp。").arg(model.path);
+                return {};
+            }
+
+            BinaryBmpView bmp;
+            QString bmpError;
+            if (!inspectBinaryBmpFile(imagePath, &bmp, &bmpError)) {
+                if (error) *error = QStringLiteral("无法读取 %1/1.bmp：%2")
+                                        .arg(model.path, bmpError);
+                return {};
+            }
+            const QSize sourceSize(bmp.width, bmp.height);
+            QSizeF physicalSize;
+            double layerHeight = 0.0;
+            bool invertMask = false;
+            if (reportPresent) {
+                if (sourceSize != reportSettings.outputSize) {
+                    if (error) *error = QStringLiteral("模型 %1 的 1.bmp 尺寸与报告不一致。")
+                                            .arg(model.path);
+                    return {};
+                }
+                // Raster resolution is independent from the Job tile footprint.
+                // Fit the slice inside that footprint; the Job point is its centre.
+                physicalSize = processingPhysicalSize(
+                    sourceSize, reportSettings, xSpacing, ySpacing);
+                layerHeight = reportSettings.layerHeight;
+                invertMask = reportSettings.invertMask;
+            } else {
+                physicalSize = inferredPhysicalSize(sourceSize, xSpacing, ySpacing);
+                layerHeight = std::max(1.0e-6,
+                    std::min(physicalSize.width(), physicalSize.height()) * 0.01);
+            }
+            if (!std::isfinite(physicalSize.width()) ||
+                !std::isfinite(physicalSize.height()) || physicalSize.isEmpty() ||
+                physicalSize.width() > std::numeric_limits<float>::max() ||
+                physicalSize.height() > std::numeric_limits<float>::max()) {
+                if (error) *error = QStringLiteral("模型 %1 的推断尺寸超出可渲染范围。")
+                                        .arg(model.path);
+                return {};
+            }
+            QString stackError;
+            JobModelStackPtr stack = loadFirstLayerData(
+                imagePath, sourceSize, physicalSize, layerHeight, invertMask, token,
+                &stackError);
+            if (!stack || (token && token->isCancelled())) {
+                if (error && !(token && token->isCancelled()))
+                    *error = stackError.isEmpty()
+                        ? QStringLiteral("无法生成模型 %1 的首层预览。").arg(model.path)
+                        : stackError;
+                return {};
+            }
+            stacks.emplace(key, stack);
+            model.stackState = JobModelStackState::Loaded;
+            model.stack = std::move(stack);
+            if (progress) progress({QStringLiteral("加载加工切片 %1/%2")
+                                        .arg(index + 1).arg(modelCount),
+                                    index + 1, std::max<qint64>(1, modelCount)});
+        }
+
+        // Keep the coordinates from the Job file unchanged. The processing
+        // preview owns its screen-axis mapping and must not rewrite model data.
+        if (!JobSpatialIndex::prepare(document.get(), token)) {
+            if (error && !(token && token->isCancelled()))
+                *error = QStringLiteral("无法建立加工预览坐标索引。");
+            return {};
+        }
+        document->sceneBounds = {};
+        for (const JobPoint& point : document->points) {
+            if (point.placeId < 0 ||
+                point.placeId >= static_cast<qint64>(document->models.size())) continue;
+            const JobModel& model = document->models[static_cast<std::size_t>(point.placeId)];
+            if (!model.stack) continue;
+            const double halfWidth = model.stack->physicalSize.width() * 0.5;
+            const double halfHeight = model.stack->physicalSize.height() * 0.5;
+            document->sceneBounds.include({point.position.x - halfWidth,
+                                           point.position.y - halfHeight,
+                                           point.position.z});
+            document->sceneBounds.include({
+                point.position.x + halfWidth,
+                point.position.y + halfHeight,
+                point.position.z + model.stack->layerCount * model.stack->layerHeight});
+        }
+        document->layeredPackageDetected = true;
+        document->placementSpatialIndex = JobPlacementSpatialIndex::build(*document, token);
+        if (token && token->isCancelled()) return {};
+        assignPathColors(document.get());
+        result.document = std::move(document);
+        return result;
+    } catch (const std::bad_alloc&) {
+        if (error) *error = QStringLiteral("加工预览数据过大，内存不足。");
+        return {};
     }
 }

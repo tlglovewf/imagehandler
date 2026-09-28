@@ -32,6 +32,7 @@ struct JobModelStack {
     double layerHeight = 0.0;
     int layerCount = 0;
     bool downsampled = false;
+    bool mapRasterYToPositiveY = true;
     // Coarsest to finest. Geometry is generated lazily from these immutable levels.
     std::vector<JobStackHeightLevel> lodLevels;
     std::shared_ptr<const MaskStackGeometry> solidGeometry;
@@ -107,6 +108,10 @@ struct JobDocument {
     std::vector<JobPoint> points;
     JobBounds bounds;
     JobBounds sceneBounds;
+    // Center of the complete source-image grid. Generated previews keep this
+    // separately because background cells may be omitted from points/bounds.
+    JobCoordinate imageCenter;
+    bool hasImageCenter = false;
     std::shared_ptr<JobSpatialIndex> spatialIndex;
     std::shared_ptr<JobPlacementSpatialIndex> placementSpatialIndex;
     // Prefix sums in placement order; entry 0 is zero and entry N+1 includes point N.

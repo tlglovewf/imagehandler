@@ -323,6 +323,8 @@ bool writeReport(const QString& path, const LayeredPackageRequest& request, int 
                 ? request.grouping.strategyId : QStringLiteral("none")},
             {QStringLiteral("standardWidth"), request.options.outputWidth},
             {QStringLiteral("standardHeight"), request.options.outputHeight},
+            {QStringLiteral("sourceCellWidth"), request.segmentation.settings.cellWidth},
+            {QStringLiteral("sourceCellHeight"), request.segmentation.settings.cellHeight},
             {QStringLiteral("exportMultiplier"), request.options.exportMultiplier},
             {QStringLiteral("residualAlignment"), QStringLiteral("top_left")},
             {QStringLiteral("attachToCanvas"), request.options.attachToCanvas},
@@ -390,8 +392,7 @@ QString targetFingerprint(const LayeredPackageRequest& request, qint64* count,
         const bool isDirectory = numeric.match(name).hasMatch();
         const bool isFile = name.compare(QStringLiteral("job.json"), Qt::CaseInsensitive) == 0 ||
             name.compare(QString::fromLatin1(kParameterName), Qt::CaseInsensitive) == 0 ||
-            (request.writeReport && name.compare(QString::fromLatin1(kReportName),
-                                                 Qt::CaseInsensitive) == 0);
+            name.compare(QString::fromLatin1(kReportName), Qt::CaseInsensitive) == 0;
         if (isDirectory || isFile) {
             if (!safeTarget(info, isDirectory)) {
                 if (error) *error = QStringLiteral("目标路径类型不安全，无法替换：%1").arg(name);
@@ -736,8 +737,8 @@ bool LayeredPackageExporter::exportPackage(
             info.fileName().compare(QStringLiteral("job.json"), Qt::CaseInsensitive) == 0 ||
             info.fileName().compare(QString::fromLatin1(kParameterName),
                                     Qt::CaseInsensitive) == 0 ||
-            (request.writeReport && info.fileName().compare(QString::fromLatin1(kReportName),
-                                                             Qt::CaseInsensitive) == 0))
+            info.fileName().compare(QString::fromLatin1(kReportName),
+                                    Qt::CaseInsensitive) == 0)
             existingTargets << info.fileName();
     }
     QStringList backedUp;

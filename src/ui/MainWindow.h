@@ -15,6 +15,7 @@ class PointCloudWidget;
 class ElementPointCloudWindow;
 class MaskSliceWindow;
 class LayeredExportDialog;
+class ProcessingPreviewWindow;
 class TaskManager;
 struct MosaicBuildResult;
 class QListWidget;
@@ -68,6 +69,7 @@ private:
     void chooseExportDirectory();
     void chooseSelectedBlocksExportDirectory();
     void chooseJobFile();
+    void showProcessingPreview();
     void loadJobFile(const QString& path, bool exported);
     void scheduleJobPreview(bool switchToJob);
     void rebuildJobPreview();
@@ -117,6 +119,7 @@ private:
     ElementPointCloudWindow* elementCloudWindow_ = nullptr;
     MaskSliceWindow* maskSliceWindow_ = nullptr;
     MaskSliceWindow* jobStackWindow_ = nullptr;
+    ProcessingPreviewWindow* processingPreviewWindow_ = nullptr;
     QWidget* imagePreviewHost_ = nullptr;
     QSplitter* previewSplitter_ = nullptr;
     QTabBar* previewTabs_ = nullptr;
@@ -126,7 +129,7 @@ private:
     QPushButton *detectButton_=nullptr,*exportButton_=nullptr,*previousButton_=nullptr,*nextButton_=nullptr;
     QPushButton *manualPreviewButton_=nullptr,*pathButton_=nullptr,*cancelButton_=nullptr;
     QPushButton* groupElementsButton_ = nullptr;
-    QPushButton *mergedExportButton_=nullptr,*jobImportButton_=nullptr,*resetParametersButton_=nullptr;
+    QPushButton *mergedExportButton_=nullptr,*jobImportButton_=nullptr,*processingPreviewButton_=nullptr,*resetParametersButton_=nullptr;
     QPushButton* selectedBlocksExportButton_ = nullptr;
     QPushButton* clearFixedGrayPointsButton_ = nullptr;
     QPushButton* generateCloudButton_ = nullptr;

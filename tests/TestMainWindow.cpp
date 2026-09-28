@@ -13,6 +13,7 @@
 #include "ui/ElementPointCloudWindow.h"
 #include "ui/MaskSliceWindow.h"
 #include "ui/LayeredExportDialog.h"
+#include "ui/ProcessingPreviewWindow.h"
 #include "ui/MaskStackWidget.h"
 #include "ui/MainWindow.h"
 
@@ -57,6 +58,7 @@ private Q_SLOTS:
     void printCanvasFollowsDocument();
     void jobPreviewWorkspaceAndLinking();
     void elementGroupingButtonUpdatesJobPreview();
+    void groupedBackgroundKeepsImageJobLinking();
     void denseJobPointCanBeSelectedAfterOrbit();
     void settingsPersistenceAndReset();
     void multipleImageDropIsSortedAndSelected();
@@ -74,6 +76,7 @@ private Q_SLOTS:
     void maskSliceMultiSelectionAndStackPlacement();
     void layeredJobStackModesRender();
     void largeLayeredJobFrameCompletes();
+    void processingPreviewWindowIsReusedAndHasControls();
 
 private:
     QTemporaryDir settingsDirectory_;
@@ -186,12 +189,16 @@ void TestMainWindow::jobPreviewWorkspaceAndLinking() {
     auto* jobView=window.findChild<JobPreviewWidget*>(QStringLiteral("jobPreviewWidget"));
     auto* status=window.findChild<QLabel*>(QStringLiteral("jobPreviewStatus"));
     auto* coordinate=window.findChild<QLabel*>(QStringLiteral("jobSelectedCoordinate"));
+    auto* reverseCoordinates=window.findChild<QCheckBox*>(QStringLiteral("jobReverseCoordinatesCheck"));
+    auto* centerRelative=window.findChild<QCheckBox*>(QStringLiteral("jobCenterRelativeCheck"));
     auto* previewButton=window.findChild<QPushButton*>(QStringLiteral("manualSegmentationPreviewButton"));
     auto* cellWidth=window.findChild<QSpinBox*>(QStringLiteral("segmentationCellWidth"));
     auto* cellHeight=window.findChild<QSpinBox*>(QStringLiteral("segmentationCellHeight"));
     auto* imageView=window.findChild<LargeImageView*>();
     QVERIFY(importButton);QVERIFY(layoutMode);QVERIFY(autoJump);QVERIFY(tabs);QVERIFY(jobView);
-    QVERIFY(status);QVERIFY(coordinate);QVERIFY(previewButton);QVERIFY(cellWidth);QVERIFY(cellHeight);QVERIFY(imageView);
+    QVERIFY(status);QVERIFY(coordinate);QVERIFY(reverseCoordinates);QVERIFY(centerRelative);
+    QVERIFY(previewButton);QVERIFY(cellWidth);QVERIFY(cellHeight);QVERIFY(imageView);
+    QVERIFY(reverseCoordinates->isChecked());QVERIFY(centerRelative->isChecked());
     QVERIFY(!coordinate->isVisible());
     QCOMPARE(layoutMode->currentIndex(),0);QVERIFY(!autoJump->isChecked());QCOMPARE(tabs->count(),3);
     QVERIFY(QMetaObject::invokeMethod(&window,"acceptDocument",Qt::DirectConnection,Q_ARG(ImageDocumentPtr,document)));
@@ -224,8 +231,14 @@ void TestMainWindow::jobPreviewWorkspaceAndLinking() {
         const auto selectedPoint=std::find_if(jobView->document()->points.cbegin(),jobView->document()->points.cend(),
             [](const JobPoint& point){return point.placementId==1;});
         QVERIFY(selectedPoint!=jobView->document()->points.cend());
-        QVERIFY(coordinate->text().contains(QString::number(selectedPoint->position.x,'g',15)));
-        QVERIFY(coordinate->text().contains(QString::number(selectedPoint->position.y,'g',15)));
+        const JobCoordinate displayed=jobView->displayCoordinate(selectedPoint->position);
+        QVERIFY(coordinate->text().contains(QString::number(displayed.x,'g',15)));
+        QVERIFY(coordinate->text().contains(QString::number(displayed.y,'g',15)));
+        reverseCoordinates->setChecked(false);
+        const JobCoordinate normal=jobView->displayCoordinate(selectedPoint->position);
+        QCOMPARE(normal.x,-displayed.x);QCOMPARE(normal.y,-displayed.y);
+        centerRelative->setChecked(false);
+        QCOMPARE(jobView->displayCoordinate(selectedPoint->position),selectedPoint->position);
         QCOMPARE(tabs->currentIndex(),0);
         QVERIFY(QMetaObject::invokeMethod(jobView,"placeSelected",Qt::DirectConnection,Q_ARG(qint64,2)));
         QCOMPARE(imageView->selectedCell(),QPoint(1,1));
@@ -360,6 +373,47 @@ void TestMainWindow::elementGroupingButtonUpdatesJobPreview() {
     }
 }
 
+void TestMainWindow::groupedBackgroundKeepsImageJobLinking() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    QImage source(4, 1, QImage::Format_Grayscale8);
+    source.scanLine(0)[0] = 255; source.scanLine(0)[1] = 255;
+    source.scanLine(0)[2] = 0; source.scanLine(0)[3] = 128;
+    const QString path = directory.filePath(QStringLiteral("group-background-link.bmp"));
+    QVERIFY(source.save(path, "BMP"));
+    QString error;
+    const auto document = ImageLoader::load(path, 252, &error);
+    QVERIFY2(document, qPrintable(error));
+    MainWindow window;
+    auto* width = window.findChild<QSpinBox*>(QStringLiteral("segmentationCellWidth"));
+    auto* height = window.findChild<QSpinBox*>(QStringLiteral("segmentationCellHeight"));
+    auto* preview = window.findChild<QPushButton*>(QStringLiteral("manualSegmentationPreviewButton"));
+    auto* grouping = window.findChild<QPushButton*>(QStringLiteral("groupElementsButton"));
+    auto* imageView = window.findChild<LargeImageView*>();
+    auto* jobView = window.findChild<JobPreviewWidget*>(QStringLiteral("jobPreviewWidget"));
+    QVERIFY(width); QVERIFY(height); QVERIFY(preview); QVERIFY(grouping); QVERIFY(imageView); QVERIFY(jobView);
+    if (!jobView->isVulkanAvailable()) QSKIP("Vulkan preview unavailable");
+    QVERIFY(QMetaObject::invokeMethod(&window, "acceptDocument", Qt::DirectConnection,
+                                      Q_ARG(ImageDocumentPtr, document)));
+    width->setValue(2); height->setValue(1);
+    QTest::mouseClick(preview, Qt::LeftButton);
+    QTest::mouseClick(grouping, Qt::LeftButton);
+    QTRY_VERIFY_WITH_TIMEOUT(grouping->text().contains(QStringLiteral("1 组/1 空")), 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(jobView->document() != nullptr, 5000);
+    QCOMPARE(jobView->document()->points.size(), size_t(1));
+    QCOMPARE(jobView->document()->linkedCells, std::vector<QPoint>({QPoint(1, 0)}));
+    QVERIFY(jobView->document()->hasImageCenter);
+    QCOMPARE(jobView->document()->imageCenter, (JobCoordinate{0.25, 0.0, 0.0}));
+    QCOMPARE(jobView->displayCoordinate(jobView->document()->points.front().position),
+             (JobCoordinate{-0.25, 0.0, 0.0}));
+
+    QVERIFY(QMetaObject::invokeMethod(imageView, "segmentationCellSelected", Qt::DirectConnection,
+                                      Q_ARG(int, 0), Q_ARG(int, 0)));
+    QCOMPARE(jobView->selectedPlaceId(), qint64(-1));
+    QVERIFY(QMetaObject::invokeMethod(imageView, "segmentationCellSelected", Qt::DirectConnection,
+                                      Q_ARG(int, 0), Q_ARG(int, 1)));
+    QCOMPARE(jobView->selectedPlaceId(), qint64(0));
+}
+
 void TestMainWindow::pointCloudControlsAndTab() {
     QTemporaryDir directory;QVERIFY(directory.isValid());
     QImage source(4,4,QImage::Format_Grayscale8);for(int y=0;y<4;++y)for(int x=0;x<4;++x)source.setPixel(x,y,uchar((x+y)*32));
@@ -488,9 +542,14 @@ void TestMainWindow::settingsPersistenceAndReset() {
         auto* height=window.findChild<QSpinBox*>(QStringLiteral("segmentationCellHeight"));
         auto* threshold=window.findChild<QSpinBox*>(QStringLiteral("segmentationThreshold"));
         auto* traversal=window.findChild<QComboBox*>(QStringLiteral("segmentationTraversal"));
+        auto* reverseCoordinates=window.findChild<QCheckBox*>(QStringLiteral("jobReverseCoordinatesCheck"));
+        auto* centerRelative=window.findChild<QCheckBox*>(QStringLiteral("jobCenterRelativeCheck"));
 
         QVERIFY(width);QVERIFY(height);QVERIFY(threshold);QVERIFY(traversal);
+        QVERIFY(reverseCoordinates);QVERIFY(centerRelative);
+        QVERIFY(reverseCoordinates->isChecked());QVERIFY(centerRelative->isChecked());
         width->setValue(321);height->setValue(123);threshold->setValue(77);traversal->setCurrentIndex(1);
+        reverseCoordinates->setChecked(false);centerRelative->setChecked(false);
 
         window.show();QTest::qWait(10);window.close();
     }
@@ -499,17 +558,22 @@ void TestMainWindow::settingsPersistenceAndReset() {
     auto* height=restored.findChild<QSpinBox*>(QStringLiteral("segmentationCellHeight"));
     auto* threshold=restored.findChild<QSpinBox*>(QStringLiteral("segmentationThreshold"));
     auto* traversal=restored.findChild<QComboBox*>(QStringLiteral("segmentationTraversal"));
+    auto* reverseCoordinates=restored.findChild<QCheckBox*>(QStringLiteral("jobReverseCoordinatesCheck"));
+    auto* centerRelative=restored.findChild<QCheckBox*>(QStringLiteral("jobCenterRelativeCheck"));
     auto* reset=restored.findChild<QPushButton*>(QStringLiteral("resetParametersButton"));
     auto* cloudStart=restored.findChild<QPushButton*>(QStringLiteral("cloudStartColorButton"));auto* cloudEnd=restored.findChild<QPushButton*>(QStringLiteral("cloudEndColorButton"));
     QVERIFY(width);QVERIFY(height);QVERIFY(threshold);QVERIFY(traversal);QVERIFY(reset);QVERIFY(cloudStart);QVERIFY(cloudEnd);
+    QVERIFY(reverseCoordinates);QVERIFY(centerRelative);
     QCOMPARE(width->value(),321);QCOMPARE(height->value(),123);QCOMPARE(threshold->value(),77);
     QCOMPARE(traversal->currentIndex(),1);QCOMPARE(cloudStart->property("cloudColor").value<QColor>(),QColor(0,0,255));QCOMPARE(cloudEnd->property("cloudColor").value<QColor>(),QColor(0,255,0));
+    QVERIFY(!reverseCoordinates->isChecked());QVERIFY(!centerRelative->isChecked());
     const auto restoredLabels=restored.findChildren<QLabel*>();
     QVERIFY(std::any_of(restoredLabels.cbegin(),restoredLabels.cend(),
         [](const QLabel* label){return label->text()==QStringLiteral("未加载图像");}));
     QTest::mouseClick(reset,Qt::LeftButton);
     QCOMPARE(width->value(),220);QCOMPARE(height->value(),220);QCOMPARE(threshold->value(),128);
     QCOMPARE(traversal->currentIndex(),0);
+    QVERIFY(reverseCoordinates->isChecked());QVERIFY(centerRelative->isChecked());
 
     QSettings settings;settings.setValue(QStringLiteral("segmentation/cellWidth"),-5);
     settings.setValue(QStringLiteral("segmentation/threshold"),999);
@@ -998,10 +1062,12 @@ void TestMainWindow::layeredExportDialogWritesJobCommands() {
                               : QJsonArray({-0.125, 0.0, 0.0}));
         QFile report(QDir(output).filePath(QStringLiteral("export-report.json")));
         QVERIFY(report.open(QIODevice::ReadOnly));
-        QCOMPARE(QJsonDocument::fromJson(report.readAll()).object()
-                     .value(QStringLiteral("output")).toObject()
-                     .value(QStringLiteral("jobMoveCommand")).toString(),
+        const QJsonObject reportOutput = QJsonDocument::fromJson(report.readAll()).object()
+            .value(QStringLiteral("output")).toObject();
+        QCOMPARE(reportOutput.value(QStringLiteral("jobMoveCommand")).toString(),
                  command->currentText());
+        QCOMPARE(reportOutput.value(QStringLiteral("sourceCellWidth")).toInt(), 1);
+        QCOMPARE(reportOutput.value(QStringLiteral("sourceCellHeight")).toInt(), 1);
         report.seek(0);
         const QJsonObject mapping = QJsonDocument::fromJson(report.readAll()).object()
             .value(QStringLiteral("mapping")).toObject();
@@ -1012,6 +1078,129 @@ void TestMainWindow::layeredExportDialogWritesJobCommands() {
                  scenario < 2 ? QJsonArray({0.5, 0.0, 0.0})
                               : QJsonArray({0.375, 0.0, 0.0}));
     }
+}
+
+void TestMainWindow::processingPreviewWindowIsReusedAndHasControls() {
+    MainWindow window;
+    auto* button = window.findChild<QPushButton*>(QStringLiteral("processingPreviewButton"));
+    QVERIFY(button);
+    QCOMPARE(button->text(), QStringLiteral("加工预览"));
+    auto* mainJob = window.findChild<JobPreviewWidget*>(QStringLiteral("jobPreviewWidget"));
+    QVERIFY(mainJob);
+    QVERIFY(button->isEnabled());
+
+    QTest::mouseClick(button, Qt::LeftButton);
+    auto* processing = window.findChild<ProcessingPreviewWindow*>(
+        QStringLiteral("processingPreviewWindow"));
+    QVERIFY(processing);
+    QVERIFY(processing->isVisible());
+    QCOMPARE(processing->windowTitle(), QStringLiteral("加工展示"));
+    QVERIFY(processing->findChild<QPushButton*>(QStringLiteral("processingImportButton")));
+    QVERIFY(processing->findChild<QPushButton*>(QStringLiteral("processingPlayPauseButton")));
+    QVERIFY(processing->findChild<QPushButton*>(QStringLiteral("processingPreviousButton")));
+    QVERIFY(processing->findChild<QPushButton*>(QStringLiteral("processingNextButton")));
+    auto* processingImport = processing->findChild<QPushButton*>(
+        QStringLiteral("processingImportButton"));
+    QVERIFY(processingImport);
+    QCOMPARE(processingImport->isEnabled(), mainJob->isVulkanAvailable());
+    auto* speed = processing->findChild<QComboBox*>(QStringLiteral("processingSpeedCombo"));
+    QVERIFY(speed);
+    QCOMPARE(speed->count(), 4);
+    QCOMPARE(processing->playbackInterval(), 1000);
+    speed->setCurrentIndex(3);
+    QCOMPARE(processing->playbackInterval(), 125);
+    auto* preview = processing->findChild<JobPreviewWidget*>(
+        QStringLiteral("processingJobPreviewWidget"));
+    QVERIFY(preview);
+    QVERIFY(preview->forceIndividualLabels());
+    QCOMPARE(preview->visibleStackPlacementCount(), qint64(0));
+    QVERIFY(!preview->findChild<QCheckBox*>(QStringLiteral("jobReverseCoordinatesCheck"))->isVisible());
+    QVERIFY(!preview->findChild<QCheckBox*>(QStringLiteral("jobCenterRelativeCheck"))->isVisible());
+    QVERIFY(!preview->reverseCoordinates());
+    QVERIFY(!preview->centerRelativeCoordinates());
+    QVERIFY(preview->xAxisPositiveLeft());
+    QVERIFY(preview->yAxisPositiveDown());
+    QVERIFY(preview->preserveCoordinateValues());
+    QCOMPARE(preview->displayCoordinate(JobCoordinate{-45,-45,0}),
+             (JobCoordinate{-45,-45,0}));
+
+    if (mainJob->isVulkanAvailable()) {
+        QTemporaryDir package;
+        QVERIFY(package.isValid());
+        QVERIFY(QDir(package.path()).mkdir(QStringLiteral("0")));
+        // Fine alternating islands make the 512-cell mesh extremely expensive.
+        // Playback must keep using its bounded LOD instead of promoting the
+        // highlighted point and freezing the render thread.
+        QImage mask(512, 512, QImage::Format_Mono);
+        mask.setColorTable({qRgb(0,0,0), qRgb(255,255,255)});
+        for (int y = 0; y < mask.height(); ++y)
+            for (int x = 0; x < mask.width(); ++x)
+                mask.setPixel(x, y, ((x / 2) + (y / 2)) % 2);
+        QVERIFY(mask.save(QDir(package.filePath(QStringLiteral("0"))).filePath(
+                              QStringLiteral("1.bmp")), "BMP"));
+        QFile job(package.filePath(QStringLiteral("job.json")));
+        QVERIFY(job.open(QIODevice::WriteOnly));
+        const QByteArray json = QByteArrayLiteral(R"({
+          "models":[{"label":"0","path":"0"}],
+          "commands":[
+            {"command":"relmove","by":[0,0,0]},{"command":"place","id":0},
+            {"command":"relmove","by":[2,0,0]},{"command":"place","id":0},
+            {"command":"relmove","by":[4,0,0]},{"command":"place","id":0}
+          ]
+        })");
+        QCOMPARE(job.write(json), json.size());
+        job.close();
+        processing->loadFile(job.fileName());
+        QTRY_VERIFY_WITH_TIMEOUT(processing->document() != nullptr, 5000);
+        QCOMPARE(processing->processedCount(), qint64(0));
+        QCOMPARE(preview->visibleStackPlacementCount(), qint64(0));
+
+        const auto yellowPixelCount = [](const QImage& image) {
+            qint64 count = 0;
+            for (int y = 0; y < image.height(); ++y) {
+                for (int x = 0; x < image.width(); ++x) {
+                    const QColor color = image.pixelColor(x, y);
+                    if (color.red() > 180 && color.green() > 130 && color.blue() < 100)
+                        ++count;
+                }
+            }
+            return count;
+        };
+        QImage emptyFrame;
+        QTRY_VERIFY_WITH_TIMEOUT(!(emptyFrame = preview->grabFrame()).isNull(), 3000);
+        const qint64 emptyYellowPixels = yellowPixelCount(emptyFrame);
+
+        processing->togglePlayback();
+        QCOMPARE(processing->currentIndex(), qint64(0));
+        QCOMPARE(processing->processedCount(), qint64(1));
+        QVERIFY(processing->isPlaying());
+        QCOMPARE(preview->visibleStackPlacementCount(), qint64(1));
+        QImage firstSliceFrame;
+        QTRY_VERIFY_WITH_TIMEOUT(
+            !(firstSliceFrame = preview->grabFrame()).isNull() &&
+                yellowPixelCount(firstSliceFrame) > emptyYellowPixels + 20,
+            3000);
+        processing->togglePlayback();
+        QVERIFY(!processing->isPlaying());
+        processing->stepNext();
+        QCOMPARE(processing->currentIndex(), qint64(1));
+        QVERIFY(!processing->isPlaying());
+        processing->stepPrevious();
+        QCOMPARE(processing->currentIndex(), qint64(0));
+        processing->stepNext();
+        processing->stepNext();
+        QCOMPARE(processing->currentIndex(), qint64(2));
+        processing->togglePlayback();
+        QCOMPARE(processing->currentIndex(), qint64(0));
+        QCOMPARE(processing->processedCount(), qint64(1));
+        processing->togglePlayback();
+    }
+
+    processing->close();
+    QTest::mouseClick(button, Qt::LeftButton);
+    QCOMPARE(window.findChild<ProcessingPreviewWindow*>(
+                 QStringLiteral("processingPreviewWindow")), processing);
+    processing->close();
 }
 
 void TestMainWindow::maskSliceWindowDefaultsAndReuse() {

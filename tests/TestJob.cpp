@@ -41,6 +41,11 @@ private Q_SLOTS:
     void layeredPackageLoadsStacksAndSceneBounds();
     void modelPathsAssignStablePointColors();
     void layeredPackageKeepsSharedLodDetail();
+    void processingPackageLoadsFirstLayers();
+    void processingMaskKeepsRasterYOrder();
+    void processingPackageCentersLegacyExportedMasks();
+    void processingPackageInfersGeometryWithoutReport();
+    void processingPackageRejectsIncompleteInputs();
     void incompleteLayeredPackageFallsBackToPoints();
     void stackLodPyramidAndFrameBudget();
     void placementVisibilityUsesEntityBounds();
@@ -79,6 +84,7 @@ QByteArray packageReport(int layers = 2, bool invertMask = false) {
       "layers": {"layerHeight": 0.25, "count": %1, "invertMask": %2},
       "output": {"attachToCanvas": false, "standardWidth": 2,
                  "standardHeight": 2, "canvasWidth": 8, "canvasHeight": 6,
+                 "sourceCellWidth": 2, "sourceCellHeight": 2,
                  "bitsPerPixel": 1}
     })").arg(layers).arg(invertMask ? QStringLiteral("true") : QStringLiteral("false")).toUtf8();
 }
@@ -309,7 +315,9 @@ void TestJob::placementVisibilityUsesEntityBounds() {
     JobDocument document;
     document.models.push_back({0,QStringLiteral("0"),QStringLiteral("0"),
                                JobModelStackState::Loaded,stack,{}});
-    document.points.push_back({0,{-2.0,0.0,0.0},0,0,{}});
+    // The Job point is the centre: a width-2.5 placement centred at x=2 still
+    // reaches the identity frustum at x=0.75. Corner anchoring would cull it.
+    document.points.push_back({0,{2.0,0.0,0.0},0,0,{}});
     const auto token=std::make_shared<CancellationToken>();
     document.placementSpatialIndex=JobPlacementSpatialIndex::build(document,token);
     QVERIFY(document.placementSpatialIndex);
@@ -380,6 +388,162 @@ void TestJob::layeredPackageKeepsSharedLodDetail() {
     QCOMPARE(stack.preview->solidGeometry->indices.size(),size_t(30));
 }
 
+void TestJob::processingPackageLoadsFirstLayers() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    const QByteArray job = QByteArrayLiteral(R"({
+      "models":[{"label":"a","path":"0"},{"label":"b","path":"0"}],
+      "commands":[
+        {"command":"relmove","by":[10,20,0]},{"command":"place","id":1},
+        {"command":"relmove","by":[20,0,0]},{"command":"place","id":0},
+        {"command":"relmove","by":[7,8,0]},{"command":"place","id":1}
+      ]
+    })");
+    const QString jobPath = writeJob(directory, QStringLiteral("job.json"), job);
+    QVERIFY(!writeJob(directory, QStringLiteral("export-report.json"),
+                      packageReport()).isEmpty());
+    QVERIFY(QDir(directory.path()).mkdir(QStringLiteral("0")));
+    QVERIFY(writeBinaryMask(QDir(directory.filePath(QStringLiteral("0"))).filePath(
+                                QStringLiteral("1.bmp")), {{0,0},{1,1}}));
+    QString error;
+    const auto loaded = JobPackageLoader::loadProcessingPackage(
+        jobPath, std::make_shared<CancellationToken>(), {}, &error);
+    QVERIFY2(loaded.document, qPrintable(error));
+    QVERIFY(!loaded.inferredGeometry);
+    QCOMPARE(loaded.document->points.size(), size_t(3));
+    QCOMPARE(loaded.document->points[0].position, (JobCoordinate{10,20,0}));
+    QCOMPARE(loaded.document->points[0].placeId, qint64(1));
+    QCOMPARE(loaded.document->points[1].position, (JobCoordinate{20,0,0}));
+    QVERIFY(loaded.document->points[1].position.x >
+            loaded.document->points[0].position.x);
+    QCOMPARE(loaded.document->idPrefixSums.back(), (JobCoordinate{37,28,0}));
+    QCOMPARE(loaded.document->loadedStackCount(), 2);
+    QCOMPARE(loaded.document->models[0].stack.get(), loaded.document->models[1].stack.get());
+    QCOMPARE(loaded.document->models[0].stack->physicalSize, QSizeF(1,1));
+    QCOMPARE(loaded.document->models[0].stack->layerCount, 1);
+    QCOMPARE(loaded.document->models[0].stack->layerHeight, 0.25);
+    QCOMPARE(loaded.document->models[0].stack->lodLevels.size(), size_t(1));
+    QVERIFY(std::max(loaded.document->models[0].stack->lodLevels[0].gridSize.width(),
+                     loaded.document->models[0].stack->lodLevels[0].gridSize.height()) <= 64);
+    QVERIFY(loaded.document->sceneBounds.valid);
+    QCOMPARE(loaded.document->sceneBounds.minimum, (JobCoordinate{6.5,-0.5,0}));
+    QCOMPARE(loaded.document->sceneBounds.maximum, (JobCoordinate{20.5,20.5,0.25}));
+}
+
+void TestJob::processingMaskKeepsRasterYOrder() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    const QByteArray job = QByteArrayLiteral(R"({
+      "models":[{"label":"0","path":"0"}],
+      "commands":[
+        {"command":"relmove","by":[0,0,0]},{"command":"place","id":0}
+      ]
+    })");
+    const QString jobPath = writeJob(directory, QStringLiteral("job.json"), job);
+    QVERIFY(!writeJob(directory, QStringLiteral("export-report.json"),
+                      packageReport(1)).isEmpty());
+    QVERIFY(QDir(directory.path()).mkdir(QStringLiteral("0")));
+    QVERIFY(writeBinaryMask(QDir(directory.filePath(QStringLiteral("0"))).filePath(
+                                QStringLiteral("1.bmp")), {{0,0}}));
+
+    QString error;
+    const auto loaded = JobPackageLoader::loadProcessingPackage(
+        jobPath, std::make_shared<CancellationToken>(), {}, &error);
+    QVERIFY2(loaded.document, qPrintable(error));
+    const auto& stack = loaded.document->models[0].stack;
+    QVERIFY(stack);
+    QVERIFY(!stack->mapRasterYToPositiveY);
+    QVERIFY(stack->solidGeometry);
+
+    float minimumY = std::numeric_limits<float>::max();
+    float maximumY = std::numeric_limits<float>::lowest();
+    for (const MaskStackVertex& vertex : stack->solidGeometry->vertices) {
+        minimumY = std::min(minimumY, vertex.y);
+        maximumY = std::max(maximumY, vertex.y);
+    }
+    QCOMPARE(minimumY, 0.0F);
+    QCOMPARE(maximumY, 0.5F);
+}
+
+void TestJob::processingPackageCentersLegacyExportedMasks() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    const QByteArray job = QByteArrayLiteral(R"({
+      "models":[{"label":"0","path":"0"}],
+      "commands":[
+        {"command":"relmove","by":[-45,-45,0]},{"command":"place","id":0},
+        {"command":"relmove","by":[0,-45,0]},{"command":"place","id":0},
+        {"command":"relmove","by":[0,0,0]},{"command":"place","id":0},
+        {"command":"relmove","by":[-45,0,0]},{"command":"place","id":0}
+      ]
+    })");
+    const QString jobPath = writeJob(directory, QStringLiteral("job.json"), job);
+    const QByteArray legacyReport = QByteArrayLiteral(R"({
+      "schemaVersion":3,"mode":"layered_package",
+      "mapping":{"pixel2phy":0.25},
+      "layers":{"layerHeight":1,"count":1,"invertMask":false},
+      "output":{"attachToCanvas":false,"standardWidth":610,
+                "standardHeight":610,"canvasWidth":1920,"canvasHeight":1080,
+                "exportMultiplier":13.55,"bitsPerPixel":1}
+    })");
+    QVERIFY(!writeJob(directory, QStringLiteral("export-report.json"), legacyReport).isEmpty());
+    QVERIFY(QDir(directory.path()).mkdir(QStringLiteral("0")));
+    QImage mask(610, 610, QImage::Format_Mono);
+    mask.setColorTable({qRgb(0,0,0), qRgb(255,255,255)});
+    mask.fill(1);
+    QVERIFY(mask.save(QDir(directory.filePath(QStringLiteral("0"))).filePath(
+                          QStringLiteral("1.bmp")), "BMP"));
+
+    QString error;
+    const auto loaded = JobPackageLoader::loadProcessingPackage(
+        jobPath, std::make_shared<CancellationToken>(), {}, &error);
+    QVERIFY2(loaded.document, qPrintable(error));
+    QCOMPARE(loaded.document->models[0].stack->physicalSize, QSizeF(45,45));
+    QCOMPARE(loaded.document->points[0].position, (JobCoordinate{-45,-45,0}));
+    QCOMPARE(loaded.document->sceneBounds.minimum, (JobCoordinate{-67.5,-67.5,0}));
+    QCOMPARE(loaded.document->sceneBounds.maximum, (JobCoordinate{22.5,22.5,1}));
+}
+
+void TestJob::processingPackageInfersGeometryWithoutReport() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    const QString jobPath = writeJob(directory, QStringLiteral("job.aldl"), validJob());
+    for (const QString& name : {QStringLiteral("0"), QStringLiteral("1")}) {
+        QVERIFY(QDir(directory.path()).mkdir(name));
+        QVERIFY(writeBinaryMask(QDir(directory.filePath(name)).filePath(
+                                    QStringLiteral("1.bmp")), {{0,0}}));
+    }
+    QString error;
+    const auto loaded = JobPackageLoader::loadProcessingPackage(
+        jobPath, std::make_shared<CancellationToken>(), {}, &error);
+    QVERIFY2(loaded.document, qPrintable(error));
+    QVERIFY(loaded.inferredGeometry);
+    QVERIFY(loaded.warning.contains(QStringLiteral("推断")));
+    QCOMPARE(loaded.document->loadedStackCount(), 2);
+    QCOMPARE(loaded.document->models[0].stack->physicalSize, QSizeF(2.5,2.5));
+    QVERIFY(loaded.document->models[0].stack->layerHeight > 0.0);
+}
+
+void TestJob::processingPackageRejectsIncompleteInputs() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    const QString jobPath = writeJob(directory, QStringLiteral("job.json"), validJob());
+    QVERIFY(QDir(directory.path()).mkdir(QStringLiteral("0")));
+    QVERIFY(writeBinaryMask(QDir(directory.filePath(QStringLiteral("0"))).filePath(
+                                QStringLiteral("1.bmp")), {{0,0}}));
+    QString error;
+    auto loaded = JobPackageLoader::loadProcessingPackage(
+        jobPath, std::make_shared<CancellationToken>(), {}, &error);
+    QVERIFY(!loaded.document);
+    QVERIFY(error.contains(QStringLiteral("目录")) || error.contains(QStringLiteral("1.bmp")));
+
+    QVERIFY(QDir(directory.path()).mkdir(QStringLiteral("1")));
+    QVERIFY(writeBinaryMask(QDir(directory.filePath(QStringLiteral("1"))).filePath(
+                                QStringLiteral("1.bmp")), {{0,0}}));
+    QVERIFY(!writeJob(directory, QStringLiteral("export-report.json"),
+                      QByteArrayLiteral("not-json")).isEmpty());
+    error.clear();
+    loaded = JobPackageLoader::loadProcessingPackage(
+        jobPath, std::make_shared<CancellationToken>(), {}, &error);
+    QVERIFY(!loaded.document);
+    QVERIFY(error.contains(QStringLiteral("export-report.json")));
+}
+
 void TestJob::incompleteLayeredPackageFallsBackToPoints() {
     QTemporaryDir directory; QVERIFY(directory.isValid());
     const QByteArray job = QByteArrayLiteral(R"({
@@ -441,6 +605,8 @@ void TestJob::previewMatchesExporterCoordinates() {
     QCOMPARE(document->points.size(), size_t(4));
     QCOMPARE(document->linkedCells[2], QPoint(1, 1));
     QCOMPARE(document->points[2].position, (JobCoordinate{10.0, -5.0, 0.0}));
+    QVERIFY(document->hasImageCenter);
+    QCOMPARE(document->imageCenter, (JobCoordinate{5.0, -2.5, 0.0}));
     QVERIFY(document->isLinked());
 }
 
@@ -524,6 +690,13 @@ void TestJob::guidesUseCoordinateOriginAndFullBounds() {
     QCOMPARE(guides.yStart.x(), guides.coordinateOrigin.x());
     QCOMPARE(guides.xDimension, 20.0);
     QCOMPARE(guides.yDimension, 30.0);
+
+    const JobCoordinate centeredOrigin{20.0, -25.0, 3.0};
+    const JobGuideGeometry centered = JobPreviewMath::guideGeometry(
+        document, floatingOrigin, centeredOrigin);
+    QCOMPARE(centered.coordinateOrigin, centeredOrigin.relativeTo(floatingOrigin));
+    QCOMPARE(centered.xStart.y(), centered.coordinateOrigin.y());
+    QCOMPARE(centered.yStart.x(), centered.coordinateOrigin.x());
 }
 
 void TestJob::terrainCameraIsGroundOrientedAndClamped() {

@@ -35,6 +35,14 @@ JobDocumentPtr buildDocument(const ImageMetadata& metadata,
     try {
         auto document = std::make_shared<JobDocument>();
         document->source = JobDocumentSource::GeneratedPreview;
+        const QPointF firstPosition = positionFor({0, 0});
+        const QPointF lastPosition = positionFor(
+            {segmentation.columns - 1, segmentation.rows - 1});
+        document->imageCenter = {
+            (firstPosition.x() + lastPosition.x()) * 0.5,
+            (firstPosition.y() + lastPosition.y()) * 0.5,
+            0.0};
+        document->hasImageCenter = true;
         const bool grouped = grouping && grouping->valid &&
             grouping->rows == segmentation.rows && grouping->columns == segmentation.columns;
         const qint64 modelCount = grouped ? grouping->groups.size() : count;
