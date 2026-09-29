@@ -33,6 +33,7 @@
 #include <QMessageBox>
 #include <QMimeData>
 #include <QProgressBar>
+#include <QPointer>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QSplitter>
@@ -232,13 +233,14 @@ void TestMainWindow::jobPreviewWorkspaceAndLinking() {
             [](const JobPoint& point){return point.placementId==1;});
         QVERIFY(selectedPoint!=jobView->document()->points.cend());
         const JobCoordinate displayed=jobView->displayCoordinate(selectedPoint->position);
+        QCOMPARE(displayed,selectedPoint->position);
         QVERIFY(coordinate->text().contains(QString::number(displayed.x,'g',15)));
         QVERIFY(coordinate->text().contains(QString::number(displayed.y,'g',15)));
         reverseCoordinates->setChecked(false);
         const JobCoordinate normal=jobView->displayCoordinate(selectedPoint->position);
-        QCOMPARE(normal.x,-displayed.x);QCOMPARE(normal.y,-displayed.y);
+        QCOMPARE(normal,displayed);
         centerRelative->setChecked(false);
-        QCOMPARE(jobView->displayCoordinate(selectedPoint->position),selectedPoint->position);
+        QCOMPARE(jobView->displayCoordinate(selectedPoint->position),displayed);
         QCOMPARE(tabs->currentIndex(),0);
         QVERIFY(QMetaObject::invokeMethod(jobView,"placeSelected",Qt::DirectConnection,Q_ARG(qint64,2)));
         QCOMPARE(imageView->selectedCell(),QPoint(1,1));
@@ -404,7 +406,7 @@ void TestMainWindow::groupedBackgroundKeepsImageJobLinking() {
     QVERIFY(jobView->document()->hasImageCenter);
     QCOMPARE(jobView->document()->imageCenter, (JobCoordinate{0.25, 0.0, 0.0}));
     QCOMPARE(jobView->displayCoordinate(jobView->document()->points.front().position),
-             (JobCoordinate{-0.25, 0.0, 0.0}));
+             jobView->document()->points.front().position);
 
     QVERIFY(QMetaObject::invokeMethod(imageView, "segmentationCellSelected", Qt::DirectConnection,
                                       Q_ARG(int, 0), Q_ARG(int, 0)));
@@ -1175,6 +1177,26 @@ void TestMainWindow::processingPreviewWindowIsReusedAndHasControls() {
         QCOMPARE(processing->processedCount(), qint64(1));
         QVERIFY(processing->isPlaying());
         QCOMPARE(preview->visibleStackPlacementCount(), qint64(1));
+        QWindow* vulkanWindow = nullptr;
+        for (QWindow* candidate : QGuiApplication::allWindows())
+            if (candidate->objectName() == QStringLiteral("jobVulkanWindow") &&
+                candidate->isVisible())
+                vulkanWindow = candidate;
+        QVERIFY(vulkanWindow);
+        const QPointF local(vulkanWindow->width() * 0.5, vulkanWindow->height() * 0.5);
+        for (int eventIndex = 0; eventIndex < 4; ++eventIndex) {
+            const QPointF global = vulkanWindow->mapToGlobal(local.toPoint());
+            QWheelEvent wheel(local, global, QPoint(), QPoint(0, 120),
+                              Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+            QCoreApplication::sendEvent(vulkanWindow, &wheel);
+        }
+        // Playback ticks received during camera interaction must remain queued,
+        // while camera-only frames stay responsive.
+        QElapsedTimer interactionResponse;
+        interactionResponse.start();
+        QImage interactionFrame;
+        QTRY_VERIFY_WITH_TIMEOUT(!(interactionFrame = preview->grabFrame()).isNull(), 1000);
+        QVERIFY(interactionResponse.elapsed() < 750);
         QImage firstSliceFrame;
         QTRY_VERIFY_WITH_TIMEOUT(
             !(firstSliceFrame = preview->grabFrame()).isNull() &&
@@ -1196,11 +1218,20 @@ void TestMainWindow::processingPreviewWindowIsReusedAndHasControls() {
         processing->togglePlayback();
     }
 
+    QPointer<ProcessingPreviewWindow> closedWindow(processing);
     processing->close();
+    QTRY_VERIFY_WITH_TIMEOUT(closedWindow.isNull(), 3000);
+    QVERIFY(!window.findChild<ProcessingPreviewWindow*>(
+        QStringLiteral("processingPreviewWindow")));
+
     QTest::mouseClick(button, Qt::LeftButton);
-    QCOMPARE(window.findChild<ProcessingPreviewWindow*>(
-                 QStringLiteral("processingPreviewWindow")), processing);
-    processing->close();
+    auto* reopened = window.findChild<ProcessingPreviewWindow*>(
+        QStringLiteral("processingPreviewWindow"));
+    QVERIFY(reopened);
+    QVERIFY(reopened->isVisible());
+    QVERIFY(!reopened->document());
+    QCOMPARE(reopened->processedCount(), qint64(0));
+    reopened->close();
 }
 
 void TestMainWindow::maskSliceWindowDefaultsAndReuse() {

@@ -24,6 +24,7 @@ ProcessingPreviewWindow::ProcessingPreviewWindow(QWidget* parent)
       playbackTimer_(new QTimer(this)) {
     setObjectName(QStringLiteral("processingPreviewWindow"));
     setWindowTitle(QStringLiteral("加工展示"));
+    setAttribute(Qt::WA_DeleteOnClose);
     resize(1180, 760);
     lastDirectory_ = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
     if (lastDirectory_.isEmpty()) lastDirectory_ = QDir::homePath();
@@ -265,5 +266,13 @@ void ProcessingPreviewWindow::updateControls() {
 void ProcessingPreviewWindow::closeEvent(QCloseEvent* event) {
     pausePlayback();
     if (tasks_->isBusy()) tasks_->cancel();
+    // Closing the secondary window is also the cache boundary. Release the
+    // package and preview-owned CPU/GPU resources before deletion is queued.
+    preview_->setDocument({});
+    document_.reset();
+    currentIndex_ = -1;
+    processedCount_ = 0;
+    statusLabel_->clear();
+    statusLabel_->setToolTip({});
     QWidget::closeEvent(event);
 }

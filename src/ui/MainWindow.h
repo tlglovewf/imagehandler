@@ -7,6 +7,7 @@
 #include "imaging/ElementGrouping.h"
 #include "io/ExportTypes.h"
 #include <QMainWindow>
+#include <QPointer>
 #include <QVector>
 
 class LargeImageView;
@@ -119,7 +120,7 @@ private:
     ElementPointCloudWindow* elementCloudWindow_ = nullptr;
     MaskSliceWindow* maskSliceWindow_ = nullptr;
     MaskSliceWindow* jobStackWindow_ = nullptr;
-    ProcessingPreviewWindow* processingPreviewWindow_ = nullptr;
+    QPointer<ProcessingPreviewWindow> processingPreviewWindow_;
     QWidget* imagePreviewHost_ = nullptr;
     QSplitter* previewSplitter_ = nullptr;
     QTabBar* previewTabs_ = nullptr;

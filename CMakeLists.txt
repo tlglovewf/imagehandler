@@ -155,6 +155,7 @@ endif()
 qt_add_executable(ImageHandler WIN32
     src/app/main.cpp
     src/ui/LargeImageView.h src/ui/LargeImageView.cpp
+    src/ui/QuadrantSelectionWidget.h src/ui/QuadrantSelectionWidget.cpp
     src/ui/ElementPointCloudWindow.h src/ui/ElementPointCloudWindow.cpp
     src/ui/MaskSliceWindow.h src/ui/MaskSliceWindow.cpp
     src/ui/LayeredExportDialog.h src/ui/LayeredExportDialog.cpp
@@ -222,10 +223,27 @@ set_property(TEST LargeImageViewTests PROPERTY ENVIRONMENT_MODIFICATION
     "PATH=path_list_prepend:${QT_ROOT}/bin"
     "PATH=path_list_prepend:${VIPS_ROOT}/bin")
 
+qt_add_executable(QuadrantSelectionWidgetTests
+    tests/TestQuadrantSelectionWidget.cpp
+    src/ui/QuadrantSelectionWidget.h src/ui/QuadrantSelectionWidget.cpp
+)
+target_include_directories(QuadrantSelectionWidgetTests PRIVATE
+    "${VIPS_ROOT}/include"
+    "${VIPS_ROOT}/include/glib-2.0"
+    "${VIPS_ROOT}/lib/glib-2.0/include"
+)
+target_link_libraries(QuadrantSelectionWidgetTests PRIVATE
+    image_handler_core Qt6::Widgets Qt6::Test)
+add_test(NAME QuadrantSelectionWidgetTests COMMAND QuadrantSelectionWidgetTests)
+set_property(TEST QuadrantSelectionWidgetTests PROPERTY ENVIRONMENT_MODIFICATION
+    "PATH=path_list_prepend:${QT_ROOT}/bin"
+    "PATH=path_list_prepend:${VIPS_ROOT}/bin")
+
 qt_add_executable(MainWindowTests
     tests/TestMainWindow.cpp
     src/ui/MainWindow.h src/ui/MainWindow.cpp
     src/ui/LargeImageView.h src/ui/LargeImageView.cpp
+    src/ui/QuadrantSelectionWidget.h src/ui/QuadrantSelectionWidget.cpp
     src/ui/ElementPointCloudWindow.h src/ui/ElementPointCloudWindow.cpp
     src/ui/MaskSliceWindow.h src/ui/MaskSliceWindow.cpp
     src/ui/LayeredExportDialog.h src/ui/LayeredExportDialog.cpp

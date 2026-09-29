@@ -14,6 +14,7 @@ class QPainter;
 class QFocusEvent;
 
 enum class FixedGrayPointState { Loading, Ready, Failed };
+enum class CellSelectionMode { Replace, Add };
 
 struct FixedGrayPoint {
     quint64 id = 0;
@@ -35,9 +36,14 @@ public:
     void setTraversalMode(TraversalMode mode);
     void setTraversalPathVisible(bool visible);
     void setSelectedCell(int row, int column, bool centerOnSelection = false);
+    void setSelectedCells(const QVector<QPoint>& cells,
+                          CellSelectionMode mode = CellSelectionMode::Replace);
+    void setSelectionPreview(const QRect& cellBounds);
+    void clearSelectionPreview();
     void centerOnCell(int row, int column);
     [[nodiscard]] QPoint selectedCell() const { return selectedCell_; }
     [[nodiscard]] QVector<QPoint> selectedCells() const;
+    [[nodiscard]] QRect selectionPreview() const { return selectionPreview_; }
     [[nodiscard]] const QVector<FixedGrayPoint>& fixedGrayPoints() const noexcept {
         return fixedGrayPoints_;
     }
@@ -110,6 +116,7 @@ private:
     TraversalMode traversalMode_ = TraversalMode::SnakeZ;
     QPoint selectedCell_{-1, -1};
     QSet<QPoint> selectedCells_;
+    QRect selectionPreview_;
     double zoom_ = 1.0;
     QPointF offset_;
     QPoint pressPosition_;

@@ -33,6 +33,8 @@ private Q_SLOTS:
     void rayQueryPrioritizesNearestPoints();
     void vulkanScreenCoordinatesKeepYDirection();
     void guidesUseCoordinateOriginAndFullBounds();
+    void coordinateDisplayTransformMovesScene();
+    void coordinateOriginRemapsAcrossExportFrames();
     void terrainCameraIsGroundOrientedAndClamped();
     void terrainCameraContinuousOrbitCrossesPoles();
     void terrainCameraPanNearHorizonStaysBounded();
@@ -697,6 +699,44 @@ void TestJob::guidesUseCoordinateOriginAndFullBounds() {
     QCOMPARE(centered.coordinateOrigin, centeredOrigin.relativeTo(floatingOrigin));
     QCOMPARE(centered.xStart.y(), centered.coordinateOrigin.y());
     QCOMPARE(centered.yStart.x(), centered.coordinateOrigin.x());
+}
+
+void TestJob::coordinateDisplayTransformMovesScene() {
+    const JobCoordinate floatingOrigin{100.0, 200.0, 5.0};
+    const JobCoordinate imageCenter{110.0, 190.0, 0.0};
+    const JobCoordinate firstPoint{90.0, 205.0, 0.0};
+    const QVector3D point(30.0F, -5.0F, 2.0F);
+    const QVector3D center = imageCenter.relativeTo(floatingOrigin);
+    const QVector3D firstLocal = firstPoint.relativeTo(floatingOrigin);
+
+    const QMatrix4x4 fromFirstPoint = JobPreviewMath::coordinateDisplayTransform(
+        floatingOrigin, firstPoint, false);
+    QCOMPARE(fromFirstPoint.map(point), QVector3D(40.0F, -10.0F, 2.0F));
+    QCOMPARE(fromFirstPoint.map(firstLocal), QVector3D(0.0F, 0.0F, firstLocal.z()));
+
+    const QMatrix4x4 centered = JobPreviewMath::coordinateDisplayTransform(
+        floatingOrigin, imageCenter, false);
+    QCOMPARE(centered.map(point), QVector3D(20.0F, 5.0F, 2.0F));
+    QCOMPARE(centered.map(center), QVector3D(0.0F, 0.0F, center.z()));
+
+    const QMatrix4x4 reversed = JobPreviewMath::coordinateDisplayTransform(
+        floatingOrigin, firstPoint, true);
+    QCOMPARE(reversed.map(point), QVector3D(-40.0F, 10.0F, 2.0F));
+
+    const QMatrix4x4 centeredAndReversed = JobPreviewMath::coordinateDisplayTransform(
+        floatingOrigin, imageCenter, true);
+    QCOMPARE(centeredAndReversed.map(point), QVector3D(-20.0F, -5.0F, 2.0F));
+    QCOMPARE(centeredAndReversed.map(center), QVector3D(0.0F, 0.0F, center.z()));
+}
+
+void TestJob::coordinateOriginRemapsAcrossExportFrames() {
+    const JobCoordinate previewCenter{-6120.0, -5805.0, 0.0};
+    const JobCoordinate previewFirst{0.0, 0.0, 0.0};
+    const JobCoordinate exportedFirst{6120.0, 5805.0, 0.0};
+
+    QCOMPARE(JobPreviewMath::remapCoordinateOrigin(
+                 previewCenter, previewFirst, exportedFirst),
+             (JobCoordinate{0.0, 0.0, 0.0}));
 }
 
 void TestJob::terrainCameraIsGroundOrientedAndClamped() {

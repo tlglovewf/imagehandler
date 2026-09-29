@@ -196,9 +196,14 @@ public:
         settleTimer_.setSingleShot(true);
         settleTimer_.setInterval(200);
         QObject::connect(&settleTimer_, &QTimer::timeout, this, [this] {
+            const bool processingPlayback = visibleStackPlacementCount_ >= 0;
+            const bool needsStackRebuild = !processingPlayback || stackBuffersPending_;
             interacting_ = false;
-            markStackBuffersDirty();
-            recoveryFramesRemaining_ = 120;
+            if (needsStackRebuild)
+                markStackBuffersDirty();
+            // Processing playback has one fixed LOD. A short burst is enough to
+            // update every swap-chain frame without keeping the UI busy for 2 s.
+            recoveryFramesRemaining_ = processingPlayback ? 6 : 120;
             recoveryTimer_.start();
             requestUpdate();
         });
@@ -256,6 +261,7 @@ public:
         }
         animationActive_ = false;
         interacting_ = false;
+        stackBuffersPending_ = false;
         activeKeys_.clear();
         interactionTimer_.stop();
         recoveryTimer_.stop();
@@ -322,11 +328,17 @@ public:
     [[nodiscard]] const JobDocumentPtr& document() const { return document_; }
     [[nodiscard]] JobCoordinate origin() const { return origin_; }
     [[nodiscard]] JobCoordinate coordinateOrigin() const {
-        if (!centerRelative_ || !document_) return {};
-        JobCoordinate center = document_->hasImageCenter ? document_->imageCenter
-                                                         : document_->bounds.center();
-        center.z = 0.0;
-        return center;
+        if (!document_) return {};
+        JobCoordinate anchor;
+        if (centerRelative_)
+            anchor = document_->hasImageCenter ? document_->imageCenter
+                                               : document_->bounds.center();
+        else if (!idToIndex_.empty() && idToIndex_.front() >= 0)
+            anchor = document_->points[static_cast<size_t>(idToIndex_.front())].position;
+        else if (!document_->points.empty())
+            anchor = document_->points.front().position;
+        anchor.z = 0.0;
+        return anchor;
     }
     [[nodiscard]] qint64 selectedId() const { return selectedId_; }
     [[nodiscard]] qint64 hoveredId() const { return hoveredId_; }
@@ -402,8 +414,10 @@ public:
         QMatrix4x4 screenAxes;
         screenAxes.scale(xAxisPositiveLeft_ ? -1.0F : 1.0F,
                          yAxisPositiveDown_ ? -1.0F : 1.0F, 1.0F);
+        const QMatrix4x4 coordinateTransform = JobPreviewMath::coordinateDisplayTransform(
+            origin_, coordinateOrigin(), reverseCoordinates_);
         return const_cast<JobVulkanWindow*>(this)->clipCorrectionMatrix() *
-               screenAxes * projection * camera_.viewMatrix();
+               screenAxes * projection * camera_.viewMatrix() * coordinateTransform;
     }
 
     std::vector<LineVertex> buildLineVertices() const {
@@ -567,9 +581,14 @@ private:
     }
 
     void markStackBuffersDirty() {
-        // Camera interaction reuses the last complete batches. Any model/mode/LOD
-        // changes are folded into the single rebuild scheduled by settleTimer_.
-        if (interacting_) return;
+        // Camera interaction reuses the last complete batches. Remember updates
+        // arriving from processing playback and merge them into one rebuild when
+        // the 200 ms interaction settle timer fires.
+        if (interacting_) {
+            stackBuffersPending_ = true;
+            return;
+        }
+        stackBuffersPending_ = false;
         ++stackBufferRevision_;
         if (stackBufferRevision_ == 0) ++stackBufferRevision_;
     }
@@ -665,8 +684,10 @@ private:
         if (!document_ || selectedId_ < 0 || selectedId_ >= static_cast<qint64>(idToIndex_.size())) return;
         const qint64 index = idToIndex_[static_cast<size_t>(selectedId_)];
         if (index < 0) return;
-        animateTo(camera_.focusPose(localPosition(document_->points[static_cast<size_t>(index)]),
-                                    preserveZoom));
+        const QVector3D position = JobPreviewMath::coordinateDisplayTransform(
+            origin_, coordinateOrigin(), reverseCoordinates_)
+                                       .map(localPosition(document_->points[static_cast<size_t>(index)]));
+        animateTo(camera_.focusPose(position, preserveZoom));
     }
 
     static bool isMovementKey(int key) {
@@ -834,11 +855,9 @@ private:
             appendOutlinedText(lines, midpoint,
                                QStringLiteral("X %1").arg(formatDimension(guides.xDimension)), xColor);
             appendOutlinedText(lines, xStartScreen + QPointF(-26.0, 3.0),
-                               reverseCoordinates_ ? QStringLiteral("+X")
-                                                   : QStringLiteral("-X"), xColor);
+                               QStringLiteral("-X"), xColor);
             appendOutlinedText(lines, xEndScreen + QPointF(3.0, 3.0),
-                               reverseCoordinates_ ? QStringLiteral("-X")
-                                                   : QStringLiteral("+X"), xColor);
+                               QStringLiteral("+X"), xColor);
             appendOutlinedText(lines, originScreen + QPointF(3.0, -9.0),
                                QStringLiteral("0"), {1.0F, 0.85F, 0.15F});
             const QPointF diamond[] = {
@@ -853,11 +872,9 @@ private:
             appendOutlinedText(lines, midpoint,
                                QStringLiteral("Y %1").arg(formatDimension(guides.yDimension)), yColor);
             appendOutlinedText(lines, yStartScreen + QPointF(-26.0, 3.0),
-                               reverseCoordinates_ ? QStringLiteral("+Y")
-                                                   : QStringLiteral("-Y"), yColor);
+                               QStringLiteral("-Y"), yColor);
             appendOutlinedText(lines, yEndScreen + QPointF(3.0, 3.0),
-                               reverseCoordinates_ ? QStringLiteral("-Y")
-                                                   : QStringLiteral("+Y"), yColor);
+                               QStringLiteral("+Y"), yColor);
         }
     }
 
@@ -1037,6 +1054,7 @@ private:
     qint64 visibleStackPlacementCount_ = -1;
     bool pointBufferDirty_ = true;
     quint64 stackBufferRevision_ = 1;
+    bool stackBuffersPending_ = false;
     JobStackDisplayMode stackMode_ = JobStackDisplayMode::Solid;
     Qt::MouseButton pressedButton_ = Qt::NoButton;
     QPointF pressPosition_;
@@ -1406,6 +1424,11 @@ void JobVulkanRenderer::rebuildStackBuffers(int frame) {
         std::fill(stackFrameRevisions_.begin(), stackFrameRevisions_.end(), 0);
         uploadedDocumentGeneration_ = window_->documentGeneration_;
     }
+    // A wheel/drag frame only needs a new camera uniform. Rebuilding all visible
+    // processing instances here makes input wait behind playback GPU uploads.
+    if (window_->visibleStackPlacementCount() >= 0 && window_->interacting())
+        return;
+
     const quint64 revision = window_->stackBufferRevision();
     if (stackFrameRevisions_[frame] == revision) return;
     auto& frameBatches = stackFrames_[frame];
@@ -1723,13 +1746,16 @@ void JobVulkanRenderer::startNextFrame() {
     const double cpuMilliseconds = cpuFrameTimer.nsecsElapsed() / 1'000'000.0;
     const double measuredMilliseconds = std::max(cpuMilliseconds,
         recordedGpuTime ? gpuMilliseconds : 0.0);
-    const qint64 previousBudget = window_->frameBudget().triangleBudget();
-    const int previousQuality = window_->frameBudget().qualityOffset();
-    window_->frameBudget().recordFrame(measuredMilliseconds, window_->interacting());
-    if (!window_->interacting() &&
-        (previousBudget != window_->frameBudget().triangleBudget() ||
-         previousQuality != window_->frameBudget().qualityOffset()))
-        window_->markStackBuffersDirty();
+    const bool processingPlayback = window_->visibleStackPlacementCount() >= 0;
+    if (!processingPlayback) {
+        const qint64 previousBudget = window_->frameBudget().triangleBudget();
+        const int previousQuality = window_->frameBudget().qualityOffset();
+        window_->frameBudget().recordFrame(measuredMilliseconds, window_->interacting());
+        if (!window_->interacting() &&
+            (previousBudget != window_->frameBudget().triangleBudget() ||
+             previousQuality != window_->frameBudget().qualityOffset()))
+            window_->markStackBuffersDirty();
+    }
     if (window_->renderStatsCallback &&
         (!window_->statsTimer_.isValid() || window_->statsTimer_.elapsed() >= 250)) {
         window_->statsTimer_.restart();
@@ -1914,11 +1940,11 @@ JobPreviewWidget::JobPreviewWidget(QWidget* parent) : QWidget(parent) {
     guidesCheck_ = new QCheckBox(QStringLiteral("坐标轴与网格")); guidesCheck_->setObjectName(QStringLiteral("jobGuidesCheck")); guidesCheck_->setChecked(true);
     reverseCoordinatesCheck_ = new QCheckBox(QStringLiteral("X/Y 逆向"));
     reverseCoordinatesCheck_->setObjectName(QStringLiteral("jobReverseCoordinatesCheck"));
-    reverseCoordinatesCheck_->setToolTip(QStringLiteral("勾选后 X 正方向向左、Y 正方向向下"));
+    reverseCoordinatesCheck_->setToolTip(QStringLiteral("翻转坐标轴和预览内容；Job 原始坐标值不变"));
     reverseCoordinatesCheck_->setChecked(true);
     centerRelativeCheck_ = new QCheckBox(QStringLiteral("相对中心点偏移"));
     centerRelativeCheck_->setObjectName(QStringLiteral("jobCenterRelativeCheck"));
-    centerRelativeCheck_->setToolTip(QStringLiteral("以图片中心为物理坐标原点"));
+    centerRelativeCheck_->setToolTip(QStringLiteral("勾选时以图片中心为显示原点，取消时以 0 号点为显示原点；Job 原始坐标值不变"));
     centerRelativeCheck_->setChecked(true);
     statusLabel_ = new QLabel(QStringLiteral("未加载 Job")); statusLabel_->setObjectName(QStringLiteral("jobPreviewStatus"));
     coordinateLabel_ = new QLabel; coordinateLabel_->setObjectName(QStringLiteral("jobSelectedCoordinate"));
@@ -2043,20 +2069,7 @@ void JobPreviewWidget::setPreserveCoordinateValues(bool preserve) {
 }
 
 JobCoordinate JobPreviewWidget::displayCoordinate(const JobCoordinate& coordinate) const {
-    JobCoordinate center;
-    if (centerRelativeCoordinates() && document_) {
-        center = document_->hasImageCenter ? document_->imageCenter
-                                          : document_->bounds.center();
-        center.z = 0.0;
-    }
-    JobCoordinate result{coordinate.x - center.x, coordinate.y - center.y,
-                         coordinate.z - center.z};
-    if (!preserveCoordinateValues_) {
-        if (reverseCoordinates()) {
-            result.x = -result.x;
-            result.y = -result.y;
-        }
-    }
+    JobCoordinate result = coordinate;
     if (result.x == 0.0) result.x = 0.0;
     if (result.y == 0.0) result.y = 0.0;
     if (result.z == 0.0) result.z = 0.0;

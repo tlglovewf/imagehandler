@@ -19,6 +19,7 @@ private Q_SLOTS:
     void cellSelectionAndTraversalPath();
     void cellMultiSelectionAndSliceShortcut();
     void cellBoxSelectionWithW();
+    void batchSelectionReplaceAddAndPreview();
     void groupedCellsShowStableAdaptiveGroupNumbers();
     void gray16PixelProbePreservesRawValue();
     void fixedGrayPointsPreserveRawValuesAndCanBeDeleted();
@@ -250,6 +251,38 @@ void TestLargeImageView::cellBoxSelectionWithW() {
     QTest::mouseRelease(&view,Qt::LeftButton,Qt::NoModifier,QPoint(60,60));
     QTest::keyRelease(&view,Qt::Key_W);
     QCOMPARE(view.selectedCells(),QVector<QPoint>({QPoint(0,0)}));
+}
+
+void TestLargeImageView::batchSelectionReplaceAddAndPreview() {
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QImage source(500,300,QImage::Format_Grayscale8);source.fill(180);
+    const QString path=directory.filePath("batch-selection.bmp");QVERIFY(source.save(path,"BMP"));
+    QString error;const auto document=ImageLoader::load(path,116,&error);QVERIFY2(document,qPrintable(error));
+    LargeImageView view;view.resize(520,320);view.show();view.setDocument(document);
+    SegmentationResult grid;grid.settings={100,100,128,ForegroundPolarity::Dark};
+    grid.rows=3;grid.columns=5;view.setSegmentation(grid);view.setTraversalMode(TraversalMode::SnakeZ);
+    QSignalSpy selections(&view,&LargeImageView::segmentationCellsSelected);
+
+    view.setSelectedCells({QPoint(4,2),QPoint(3,2),QPoint(4,2),QPoint(9,9)});
+    QCOMPARE(view.selectedCells(),QVector<QPoint>({QPoint(3,2),QPoint(4,2)}));
+    QCOMPARE(view.selectedCell(),QPoint(3,2));
+    QCOMPARE(selections.count(),1);
+
+    view.setSelectedCells({QPoint(2,0),QPoint(3,0)},CellSelectionMode::Add);
+    QCOMPARE(view.selectedCells(),QVector<QPoint>({QPoint(2,0),QPoint(3,0),QPoint(3,2),QPoint(4,2)}));
+    QCOMPARE(view.selectedCell(),QPoint(2,0));
+    QCOMPARE(selections.count(),2);
+
+    const QVector<QPoint> beforePreview=view.selectedCells();
+    view.setSelectionPreview(QRect(2,0,3,2));
+    QCOMPARE(view.selectionPreview(),QRect(2,0,3,2));
+    QCOMPARE(view.selectedCells(),beforePreview);
+    view.clearSelectionPreview();
+    QVERIFY(view.selectionPreview().isEmpty());
+
+    view.setSelectedCells({});
+    QVERIFY(view.selectedCells().isEmpty());
+    QCOMPARE(view.selectedCell(),QPoint(-1,-1));
 }
 
 void TestLargeImageView::groupedCellsShowStableAdaptiveGroupNumbers() {

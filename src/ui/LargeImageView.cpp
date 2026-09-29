@@ -14,6 +14,7 @@
 #include <QtConcurrent/QtConcurrentRun>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <optional>
 #include <utility>
 
@@ -50,7 +51,7 @@ void LargeImageView::setDocument(const ImageDocumentPtr& document) {
     fixedGrayPoints_.clear(); selectedFixedGrayPointId_ = 0;
     if (hadFixedPoints) Q_EMIT fixedGrayPointCountChanged(0);
     Q_EMIT pixelValueChanged(-1, -1, 0, false);
-    showTraversalPath_ = false; clearSelectedCell();
+    showTraversalPath_ = false; selectionPreview_ = {}; clearSelectedCell();
     fitToWindow(); update();
 }
 
@@ -58,11 +59,12 @@ void LargeImageView::setSegmentation(const SegmentationResult& segmentation) {
     segmentation_ = segmentation; showGrid_ = segmentation.rows > 0 && segmentation.columns > 0;
     grouping_ = {};
     if (!showGrid_) showTraversalPath_ = false;
-    clearSelectedCell(); update();
+    selectionPreview_ = {}; clearSelectedCell(); update();
 }
 
 void LargeImageView::clearSegmentation() {
-    showGrid_ = false; showTraversalPath_ = false; grouping_ = {}; clearSelectedCell(); update();
+    showGrid_ = false; showTraversalPath_ = false; grouping_ = {}; selectionPreview_ = {};
+    clearSelectedCell(); update();
 }
 
 void LargeImageView::setElementGrouping(const ElementGroupingResult& grouping) {
@@ -96,6 +98,61 @@ void LargeImageView::setSelectedCell(int row, int column, bool centerOnSelection
     if (!region.isValid()) { clearSelectedCell(); update(); return; }
     setSingleSelectedCell({column, row}, false);
     if (centerOnSelection) centerOnCell(row, column);
+    update();
+}
+
+void LargeImageView::setSelectedCells(const QVector<QPoint>& cells, CellSelectionMode mode) {
+    if (!document_ || !showGrid_) {
+        if (mode == CellSelectionMode::Replace) clearSelectedCell();
+        update();
+        return;
+    }
+
+    QSet<QPoint> next = mode == CellSelectionMode::Add ? selectedCells_ : QSet<QPoint>{};
+    QPoint active(-1, -1);
+    qint64 activeIndex = std::numeric_limits<qint64>::max();
+    for (const QPoint& cell : cells) {
+        if (cell.x() < 0 || cell.y() < 0 ||
+            cell.x() >= segmentation_.columns || cell.y() >= segmentation_.rows) {
+            continue;
+        }
+        const ImageRegion region = segmentationCellRegion(
+            segmentation_, document_->metadata.width, document_->metadata.height,
+            cell.y(), cell.x());
+        if (!region.isValid()) continue;
+        next.insert(cell);
+        const qint64 index = SplitExporter::traversalIndex(
+            segmentation_.rows, segmentation_.columns, traversalMode_,
+            cell.y(), cell.x());
+        if (index >= 0 && index < activeIndex) {
+            activeIndex = index;
+            active = cell;
+        }
+    }
+
+    selectedCells_ = std::move(next);
+    if (active.x() >= 0) selectedCell_ = active;
+    else if (mode == CellSelectionMode::Replace || !selectedCells_.contains(selectedCell_)) {
+        const QVector<QPoint> ordered = selectedCells();
+        selectedCell_ = ordered.isEmpty() ? QPoint(-1, -1) : ordered.front();
+    }
+    emitSelectionChanged();
+    update();
+}
+
+void LargeImageView::setSelectionPreview(const QRect& cellBounds) {
+    if (!document_ || !showGrid_ || cellBounds.isEmpty()) {
+        clearSelectionPreview();
+        return;
+    }
+    selectionPreview_ = cellBounds.intersected(
+        QRect(0, 0, segmentation_.columns, segmentation_.rows));
+    update();
+}
+
+void LargeImageView::clearSelectionPreview() {
+    if (selectionPreview_.isEmpty()) return;
+    selectionPreview_ = {};
     update();
 }
 
@@ -319,6 +376,23 @@ void LargeImageView::paintEvent(QPaintEvent*) {
                 p.drawRoundedRect(badge,4.0,4.0);
                 p.setPen(Qt::white);
                 p.drawText(badge,Qt::AlignCenter,label);
+            }
+        }
+
+        if (!selectionPreview_.isEmpty()) {
+            const ImageRegion first = segmentationCellRegion(
+                segmentation_, document_->metadata.width, document_->metadata.height,
+                selectionPreview_.top(), selectionPreview_.left());
+            const ImageRegion last = segmentationCellRegion(
+                segmentation_, document_->metadata.width, document_->metadata.height,
+                selectionPreview_.bottom(), selectionPreview_.right());
+            if (first.isValid() && last.isValid()) {
+                const QRectF previewRect(baseX + first.x * zoom_, baseY + first.y * zoom_,
+                    (last.x + last.width - first.x) * zoom_,
+                    (last.y + last.height - first.y) * zoom_);
+                p.fillRect(previewRect, QColor(40, 150, 255, 55));
+                p.setPen(QPen(QColor(70, 175, 255, 230), 2.0, Qt::DashLine));
+                p.drawRect(previewRect);
             }
         }
 

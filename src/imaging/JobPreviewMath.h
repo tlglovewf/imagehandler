@@ -48,6 +48,12 @@ namespace JobPreviewMath {
 [[nodiscard]] JobGuideGeometry guideGeometry(const JobDocument& document,
                                              const JobCoordinate& floatingOrigin,
                                              const JobCoordinate& coordinateOrigin = {});
+[[nodiscard]] QMatrix4x4 coordinateDisplayTransform(
+    const JobCoordinate& floatingOrigin, const JobCoordinate& coordinateOrigin,
+    bool reverseCoordinates);
+[[nodiscard]] JobCoordinate remapCoordinateOrigin(
+    const JobCoordinate& coordinateOrigin, const JobCoordinate& sourceAnchor,
+    const JobCoordinate& targetAnchor);
 
 } // namespace JobPreviewMath
 

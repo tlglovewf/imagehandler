@@ -113,6 +113,24 @@ JobGuideGeometry JobPreviewMath::guideGeometry(const JobDocument& document,
     return geometry;
 }
 
+QMatrix4x4 JobPreviewMath::coordinateDisplayTransform(
+    const JobCoordinate& floatingOrigin, const JobCoordinate& coordinateOrigin,
+    bool reverseCoordinates) {
+    QMatrix4x4 transform;
+    if (reverseCoordinates) transform.scale(-1.0F, -1.0F, 1.0F);
+    transform.translate(static_cast<float>(floatingOrigin.x - coordinateOrigin.x),
+                        static_cast<float>(floatingOrigin.y - coordinateOrigin.y));
+    return transform;
+}
+
+JobCoordinate JobPreviewMath::remapCoordinateOrigin(
+    const JobCoordinate& coordinateOrigin, const JobCoordinate& sourceAnchor,
+    const JobCoordinate& targetAnchor) {
+    return {coordinateOrigin.x + targetAnchor.x - sourceAnchor.x,
+            coordinateOrigin.y + targetAnchor.y - sourceAnchor.y,
+            coordinateOrigin.z + targetAnchor.z - sourceAnchor.z};
+}
+
 void JobTerrainCamera::setSceneBounds(const QVector3D& minimum, const QVector3D& maximum) {
     sceneMinimum_ = minimum;
     sceneMaximum_ = maximum;
