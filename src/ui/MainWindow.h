@@ -122,6 +122,9 @@ private:
     MaskSliceWindow* jobStackWindow_ = nullptr;
     QPointer<ProcessingPreviewWindow> processingPreviewWindow_;
     QWidget* imagePreviewHost_ = nullptr;
+    QWidget* previewOptionsHost_ = nullptr;
+    QWidget* cloudControlsHost_ = nullptr;
+    QWidget* segmentationPanel_ = nullptr;
     QSplitter* previewSplitter_ = nullptr;
     QTabBar* previewTabs_ = nullptr;
     QListWidget* fileList_ = nullptr;

@@ -36,6 +36,7 @@
 #include <QEvent>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFrame>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -46,6 +47,7 @@
 #include <QKeySequence>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSizePolicy>
 #include <QSignalBlocker>
 #include <QSettings>
@@ -83,7 +85,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), tasks_(new TaskMa
 }
 
 void MainWindow::buildUi() {
-    auto* central=new QWidget(this); auto* root=new QVBoxLayout(central); root->setContentsMargins(6,6,6,6);
+    auto* central=new QWidget(this); auto* root=new QVBoxLayout(central); root->setContentsMargins(8,8,8,6);root->setSpacing(6);
     auto* tools=new QHBoxLayout;
     openButton_=new QPushButton(QStringLiteral("打开图片")); directoryButton_=new QPushButton(QStringLiteral("打开目录"));
     mergeButton_=new QPushButton(QStringLiteral("图像合并"));mergeButton_->setObjectName(QStringLiteral("mergeImageButton")); detectButton_=new QPushButton(QStringLiteral("分割预览")); exportButton_=new QPushButton(QStringLiteral("导出分割"));
@@ -99,29 +101,33 @@ void MainWindow::buildUi() {
     exportButton_->setObjectName(QStringLiteral("splitExportButton"));
     exportButton_->setShortcut(QKeySequence(Qt::Key_E));
     exportButton_->setToolTip(QStringLiteral("导出当前分割范围（快捷键 E）"));
-    for(auto* b:{openButton_,directoryButton_,mergeButton_,detectButton_,jobImportButton_,processingPreviewButton_,fit,actual}) tools->addWidget(b);
-    tools->addWidget(previewLayoutMode_);tools->addWidget(autoJumpCheck_);
-    tools->addStretch(); imageInfo_=new QLabel(QStringLiteral("未加载图像"));imageInfo_->setObjectName(QStringLiteral("imageInfo")); zoomInfo_=new QLabel; tools->addWidget(imageInfo_);tools->addWidget(zoomInfo_); root->addLayout(tools);
-    auto* cloudTools=new QHBoxLayout;cloudTools->addWidget(new QLabel(QStringLiteral("PointCloud 参数")));cloudTools->addWidget(cloudPixelScale_);cloudTools->addWidget(cloudMaximumHeight_);cloudTools->addWidget(cloudStartColorButton_);cloudTools->addWidget(cloudEndColorButton_);cloudTools->addWidget(generateCloudButton_);cloudTools->addStretch();root->addLayout(cloudTools);
+    for(auto* b:{openButton_,directoryButton_,mergeButton_}) tools->addWidget(b);
+    auto* fileSeparator=new QFrame;fileSeparator->setFrameShape(QFrame::VLine);fileSeparator->setFrameShadow(QFrame::Sunken);tools->addWidget(fileSeparator);
+    for(auto* b:{detectButton_,jobImportButton_,processingPreviewButton_}) tools->addWidget(b);
+    tools->addStretch();root->addLayout(tools);
 
     mainSplitter_=new QSplitter;mainSplitter_->setObjectName(QStringLiteral("mainSplitter"));
-    auto* listHost=new QWidget;listHost->setMinimumWidth(210);listHost->setMaximumWidth(340);auto* listLayout=new QVBoxLayout(listHost);listLayout->setContentsMargins(0,0,0,0);
-    listLayout->addWidget(new QLabel(QStringLiteral("目录图片（Ctrl/Shift 多选）")));
+    auto* listHost=new QWidget;listHost->setObjectName(QStringLiteral("resourcePanel"));listHost->setMinimumWidth(210);listHost->setMaximumWidth(340);auto* listLayout=new QVBoxLayout(listHost);listLayout->setContentsMargins(0,0,4,0);listLayout->setSpacing(5);
+    auto* sourceTitle=new QLabel(QStringLiteral("源图片  ·  Ctrl/Shift 多选"));sourceTitle->setStyleSheet(QStringLiteral("font-weight: 600;"));listLayout->addWidget(sourceTitle);
     fileList_=new QListWidget;fileList_->setSelectionMode(QAbstractItemView::ExtendedSelection);fileList_->setObjectName(QStringLiteral("directoryImageList"));listLayout->addWidget(fileList_,3);
-    listLayout->addWidget(new QLabel(QStringLiteral("合并结果")));
+    auto* mergedTitle=new QLabel(QStringLiteral("合并结果"));mergedTitle->setStyleSheet(QStringLiteral("font-weight: 600;"));listLayout->addWidget(mergedTitle);
     mergedList_=new QListWidget;mergedList_->setSelectionMode(QAbstractItemView::SingleSelection);mergedList_->setObjectName(QStringLiteral("mergedImageList"));listLayout->addWidget(mergedList_,2);
     mergedExportButton_=new QPushButton(QStringLiteral("导出选中合并图"));mergedExportButton_->setObjectName(QStringLiteral("mergedExportButton"));listLayout->addWidget(mergedExportButton_);mainSplitter_->addWidget(listHost);
-    auto* previewWorkspace=new QWidget;auto* previewLayout=new QVBoxLayout(previewWorkspace);previewLayout->setContentsMargins(0,0,0,0);previewLayout->setSpacing(2);
-    previewTabs_=new QTabBar;previewTabs_->setObjectName(QStringLiteral("previewTabs"));previewTabs_->addTab(QStringLiteral("图像预览"));previewTabs_->addTab(QStringLiteral("Job 预览"));previewTabs_->addTab(QStringLiteral("PointCloud"));previewTabs_->setExpanding(false);previewLayout->addWidget(previewTabs_);
+    auto* previewWorkspace=new QWidget;auto* previewLayout=new QVBoxLayout(previewWorkspace);previewLayout->setContentsMargins(0,0,0,0);previewLayout->setSpacing(4);
+    auto* previewHeader=new QHBoxLayout;previewHeader->setContentsMargins(0,0,0,0);
+    previewTabs_=new QTabBar;previewTabs_->setObjectName(QStringLiteral("previewTabs"));previewTabs_->addTab(QStringLiteral("图像预览"));previewTabs_->addTab(QStringLiteral("Job 预览"));previewTabs_->addTab(QStringLiteral("PointCloud"));previewTabs_->setExpanding(false);previewHeader->addWidget(previewTabs_);previewHeader->addStretch();
+    previewOptionsHost_=new QWidget;previewOptionsHost_->setObjectName(QStringLiteral("previewOptionsHost"));auto* previewOptions=new QHBoxLayout(previewOptionsHost_);previewOptions->setContentsMargins(0,0,0,0);previewOptions->setSpacing(6);previewOptions->addWidget(new QLabel(QStringLiteral("显示")));previewOptions->addWidget(previewLayoutMode_);previewOptions->addWidget(autoJumpCheck_);previewHeader->addWidget(previewOptionsHost_);previewLayout->addLayout(previewHeader);
+    cloudControlsHost_=new QWidget;cloudControlsHost_->setObjectName(QStringLiteral("cloudControlsHost"));auto* cloudTools=new QHBoxLayout(cloudControlsHost_);cloudTools->setContentsMargins(6,2,6,2);cloudTools->setSpacing(6);auto* cloudTitle=new QLabel(QStringLiteral("PointCloud 参数"));cloudTitle->setStyleSheet(QStringLiteral("font-weight: 600;"));cloudTools->addWidget(cloudTitle);cloudTools->addWidget(cloudPixelScale_);cloudTools->addWidget(cloudMaximumHeight_);cloudTools->addWidget(cloudStartColorButton_);cloudTools->addWidget(cloudEndColorButton_);cloudTools->addWidget(generateCloudButton_);cloudTools->addStretch();previewLayout->addWidget(cloudControlsHost_);
     previewSplitter_=new QSplitter(Qt::Horizontal);previewSplitter_->setObjectName(QStringLiteral("previewSplitter"));previewLayout->addWidget(previewSplitter_,1);
-    imagePreviewHost_=new QWidget;auto* imagePageLayout=new QVBoxLayout(imagePreviewHost_);imagePageLayout->setContentsMargins(0,0,0,0);imagePageLayout->setSpacing(2);auto* probeRow=new QWidget;probeRow->setStyleSheet(QStringLiteral("QWidget { background: #25282b; }"));auto* probeLayout=new QHBoxLayout(probeRow);probeLayout->setContentsMargins(0,0,4,0);probeLayout->setSpacing(4);pixelProbeLabel_=new QLabel(QStringLiteral("X: --  Y: --  灰度: --"));pixelProbeLabel_->setObjectName(QStringLiteral("pixelProbeLabel"));pixelProbeLabel_->setStyleSheet(QStringLiteral("QLabel { color: #d7e8ff; padding: 4px 8px; }"));clearFixedGrayPointsButton_=new QPushButton(QStringLiteral("清空标记"));clearFixedGrayPointsButton_->setObjectName(QStringLiteral("clearFixedGrayPointsButton"));clearFixedGrayPointsButton_->setEnabled(false);probeLayout->addWidget(pixelProbeLabel_);probeLayout->addStretch();probeLayout->addWidget(clearFixedGrayPointsButton_);imagePageLayout->addWidget(probeRow);auto* viewerRow=new QWidget;auto* viewerLayout=new QHBoxLayout(viewerRow);viewerLayout->setContentsMargins(0,0,0,0);
+    imagePreviewHost_=new QWidget;auto* imagePageLayout=new QVBoxLayout(imagePreviewHost_);imagePageLayout->setContentsMargins(0,0,0,0);imagePageLayout->setSpacing(2);auto* probeRow=new QWidget;probeRow->setStyleSheet(QStringLiteral("QWidget { background: #25282b; }"));auto* probeLayout=new QHBoxLayout(probeRow);probeLayout->setContentsMargins(0,0,4,0);probeLayout->setSpacing(4);pixelProbeLabel_=new QLabel(QStringLiteral("X: --  Y: --  灰度: --"));pixelProbeLabel_->setObjectName(QStringLiteral("pixelProbeLabel"));pixelProbeLabel_->setStyleSheet(QStringLiteral("QLabel { color: #d7e8ff; padding: 4px 8px; }"));clearFixedGrayPointsButton_=new QPushButton(QStringLiteral("清空标记"));clearFixedGrayPointsButton_->setObjectName(QStringLiteral("clearFixedGrayPointsButton"));clearFixedGrayPointsButton_->setEnabled(false);imageInfo_=new QLabel(QStringLiteral("未加载图像"));imageInfo_->setObjectName(QStringLiteral("imageInfo"));imageInfo_->setStyleSheet(QStringLiteral("QLabel { color: #d7e8ff; padding: 4px 8px; }"));zoomInfo_=new QLabel;zoomInfo_->setMinimumWidth(54);zoomInfo_->setAlignment(Qt::AlignCenter);zoomInfo_->setStyleSheet(QStringLiteral("QLabel { color: #d7e8ff; }"));probeLayout->addWidget(pixelProbeLabel_);probeLayout->addStretch();probeLayout->addWidget(imageInfo_);probeLayout->addWidget(zoomInfo_);probeLayout->addWidget(fit);probeLayout->addWidget(actual);probeLayout->addWidget(clearFixedGrayPointsButton_);imagePageLayout->addWidget(probeRow);auto* viewerRow=new QWidget;auto* viewerLayout=new QHBoxLayout(viewerRow);viewerLayout->setContentsMargins(0,0,0,0);
     previousButton_=new QPushButton(QStringLiteral("<")); previousButton_->setFixedWidth(36); nextButton_=new QPushButton(QStringLiteral(">"));nextButton_->setFixedWidth(36);
     view_=new LargeImageView;
     selectedCellLabel_=new QLabel(QStringLiteral("未选择"),view_);selectedCellLabel_->setObjectName(QStringLiteral("selectedSegmentationCell"));selectedCellLabel_->setAlignment(Qt::AlignCenter);selectedCellLabel_->setAttribute(Qt::WA_TransparentForMouseEvents);selectedCellLabel_->setStyleSheet(QStringLiteral("QLabel { color: white; background: rgba(0, 0, 0, 150); border-radius: 4px; padding: 5px 12px; }"));
     auto* selectedCellOverlay=new QVBoxLayout(view_);selectedCellOverlay->setContentsMargins(12,12,12,18);selectedCellOverlay->addStretch();selectedCellOverlay->addWidget(selectedCellLabel_,0,Qt::AlignHCenter|Qt::AlignBottom);
     viewerLayout->addWidget(previousButton_);viewerLayout->addWidget(view_,1);viewerLayout->addWidget(nextButton_);imagePageLayout->addWidget(viewerRow,1);previewSplitter_->addWidget(imagePreviewHost_);
     jobView_=new JobPreviewWidget;previewSplitter_->addWidget(jobView_);pointCloudView_=new PointCloudWidget;previewSplitter_->addWidget(pointCloudView_);previewSplitter_->setStretchFactor(0,1);previewSplitter_->setStretchFactor(1,1);previewSplitter_->setStretchFactor(2,1);mainSplitter_->addWidget(previewWorkspace);
-    auto* panel=new QWidget; panel->setMinimumWidth(230); panel->setMaximumWidth(300); auto* panelLayout=new QVBoxLayout(panel);
+    auto* panelScroll=new QScrollArea;panelScroll->setObjectName(QStringLiteral("segmentationPanel"));panelScroll->setWidgetResizable(true);panelScroll->setFrameShape(QFrame::NoFrame);panelScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);panelScroll->setMinimumWidth(240);panelScroll->setMaximumWidth(320);segmentationPanel_=panelScroll;
+    auto* panel=new QWidget;auto* panelLayout=new QVBoxLayout(panel);panelLayout->setContentsMargins(8,0,4,0);panelLayout->setSpacing(7);panelScroll->setWidget(panel);
     auto* form=new QFormLayout;
     cellWidth_=new QSpinBox;cellWidth_->setObjectName(QStringLiteral("segmentationCellWidth"));cellWidth_->setRange(1,INT_MAX);cellWidth_->setValue(220);cellHeight_=new QSpinBox;cellHeight_->setObjectName(QStringLiteral("segmentationCellHeight"));cellHeight_->setRange(1,INT_MAX);cellHeight_->setValue(220);
     threshold_=new QSpinBox;threshold_->setObjectName(QStringLiteral("segmentationThreshold"));threshold_->setRange(0,255);threshold_->setValue(128);
@@ -142,9 +148,9 @@ void MainWindow::buildUi() {
     resetParametersButton_=new QPushButton(QStringLiteral("恢复默认参数"));resetParametersButton_->setObjectName(QStringLiteral("resetParametersButton"));
     selectedBlocksExportButton_=new QPushButton(this);selectedBlocksExportButton_->setObjectName(QStringLiteral("selectedBlocksExportButton"));selectedBlocksExportButton_->hide();
     auto* quadrantSelector=new QuadrantSelectionWidget;quadrantSelector->setSource({},{});
-    panelLayout->addWidget(new QLabel(QStringLiteral("分割参数")));panelLayout->addLayout(form);panelLayout->addWidget(manualPreviewButton_);
-    panelLayout->addWidget(new QLabel(QStringLiteral("四象限快速选择")));panelLayout->addWidget(quadrantSelector);
-    panelLayout->addWidget(groupElementsButton_);panelLayout->addWidget(exportButton_);panelLayout->addWidget(resetParametersButton_);panelLayout->addStretch();mainSplitter_->addWidget(panel);mainSplitter_->setStretchFactor(1,1);root->addWidget(mainSplitter_,1);
+    auto* parametersTitle=new QLabel(QStringLiteral("分割参数"));parametersTitle->setStyleSheet(QStringLiteral("font-weight: 600;"));panelLayout->addWidget(parametersTitle);panelLayout->addLayout(form);panelLayout->addWidget(manualPreviewButton_);
+    auto* selectionTitle=new QLabel(QStringLiteral("范围选择"));selectionTitle->setStyleSheet(QStringLiteral("font-weight: 600; margin-top: 4px;"));panelLayout->addWidget(selectionTitle);panelLayout->addWidget(quadrantSelector);
+    auto* outputTitle=new QLabel(QStringLiteral("处理与输出"));outputTitle->setStyleSheet(QStringLiteral("font-weight: 600; margin-top: 4px;"));panelLayout->addWidget(outputTitle);panelLayout->addWidget(groupElementsButton_);panelLayout->addWidget(exportButton_);panelLayout->addWidget(resetParametersButton_);panelLayout->addStretch();mainSplitter_->addWidget(panelScroll);mainSplitter_->setStretchFactor(1,1);mainSplitter_->setCollapsible(1,false);mainSplitter_->setSizes({240,920,280});root->addWidget(mainSplitter_,1);
 
     auto* taskBar=new QHBoxLayout;taskBar->setContentsMargins(4,2,4,2);taskBar->setSpacing(10);
     taskTitle_=new QLabel;taskTitle_->setObjectName(QStringLiteral("taskTitle"));taskTitle_->setMinimumWidth(120);taskTitle_->setMaximumWidth(240);taskTitle_->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Fixed);taskTitle_->installEventFilter(this);
@@ -734,7 +740,34 @@ void MainWindow::showJobStack(qint64 placementId){
 
 void MainWindow::setPreviewLayoutMode(int mode){if(!previewSplitter_||!imagePreviewHost_||!jobView_||!pointCloudView_)return;if(previewTabs_&&previewTabs_->currentIndex()==2){imagePreviewHost_->hide();jobView_->hide();pointCloudView_->show();return;}pointCloudView_->hide();if(mode==1){imagePreviewHost_->show();jobView_->show();previewSplitter_->setSizes({1,1,0});}else showPreviewTab(previewTabs_?previewTabs_->currentIndex():0);}
 
-void MainWindow::showPreviewTab(int index){if(!previewTabs_||!imagePreviewHost_||!jobView_||!pointCloudView_)return;index=std::clamp(index,0,2);{const QSignalBlocker blocker(previewTabs_);previewTabs_->setCurrentIndex(index);}if(index==2){imagePreviewHost_->hide();jobView_->hide();pointCloudView_->show();return;}pointCloudView_->hide();if(previewLayoutMode_&&previewLayoutMode_->currentIndex()==1){imagePreviewHost_->show();jobView_->show();return;}imagePreviewHost_->setVisible(index==0);jobView_->setVisible(index==1);}
+void MainWindow::showPreviewTab(int index) {
+    if (!previewTabs_ || !imagePreviewHost_ || !jobView_ || !pointCloudView_) return;
+    index = std::clamp(index, 0, 2);
+    {
+        const QSignalBlocker blocker(previewTabs_);
+        previewTabs_->setCurrentIndex(index);
+    }
+
+    const bool cloudPage = index == 2;
+    if (cloudControlsHost_) cloudControlsHost_->setVisible(cloudPage);
+    if (previewOptionsHost_) previewOptionsHost_->setVisible(!cloudPage);
+    if (segmentationPanel_) segmentationPanel_->setVisible(!cloudPage);
+    if (cloudPage) {
+        imagePreviewHost_->hide();
+        jobView_->hide();
+        pointCloudView_->show();
+        return;
+    }
+
+    pointCloudView_->hide();
+    if (previewLayoutMode_ && previewLayoutMode_->currentIndex() == 1) {
+        imagePreviewHost_->show();
+        jobView_->show();
+        return;
+    }
+    imagePreviewHost_->setVisible(index == 0);
+    jobView_->setVisible(index == 1);
+}
 
 void MainWindow::selectJobFromImage(int row,int column){if(!jobDocument_||!jobDocument_->isLinked()){if(row<0||column<0)jobView_->clearSelection();return;}if(SplitExporter::traversalIndex(segmentation_.rows,segmentation_.columns,selectedTraversalMode(),row,column)<0){jobView_->clearSelection();return;}const auto& linked=jobDocument_->linkedCells;const auto found=std::find(linked.cbegin(),linked.cend(),QPoint(column,row));if(found==linked.cend()){jobView_->clearSelection();return;}const qint64 placementId=std::distance(linked.cbegin(),found);const bool jump=autoJumpCheck_->isChecked();jobView_->setSelectedPlaceId(placementId,jump,true);if(jump&&previewLayoutMode_->currentIndex()==0)showPreviewTab(1);}
 

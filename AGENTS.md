@@ -51,6 +51,26 @@ ctest --test-dir build/vs2022-x64 -C Release --output-on-failure
 - 不把本机绝对路径、临时目录或用户数据写入导出报告、测试基线或提交文件。
 - 更新功能行为后同步更新 `README.md` 中受影响的使用说明。
 
+## TSD 受保护文件恢复明文
+
+- 如果源文件以 `%TSD-Header-###%` 开头、包含大量 NUL 字节，或文本工具显示为二进制乱码，先停止编辑，不要将密文当作源码修补。
+- 恢复前运行 `git status --short`，记录工作区状态。若受影响文件在被 TSD 处理前存在未提交修改，不得直接用 `HEAD` 版本覆盖；先保留原文件并请用户确认恢复基线。
+- 在 `.codex-build/tsd-backup-<timestamp>/` 中按原相对路径逐文件备份受影响文件。备份完成前不得覆盖任何文件，也不得使用 `git reset --hard` 或 `git checkout -- <path>`。
+- 从当前提交生成独立的明文归档，不要直接解压到工作区：
+
+```powershell
+$recoveryId = git rev-parse --short HEAD
+$recoveryRoot = Join-Path ".codex-build" "plaintext-recovery-$recoveryId"
+$archivePath = Join-Path $recoveryRoot "Image_Handler-$recoveryId.zip"
+$treePath = Join-Path $recoveryRoot "tree"
+New-Item -ItemType Directory -Force -Path $recoveryRoot | Out-Null
+git archive --format=zip --output=$archivePath HEAD
+Expand-Archive -LiteralPath $archivePath -DestinationPath $treePath -Force
+```
+
+- 检查归档中的对应文件确实为可读明文，然后只把已确认受 TSD 影响的跟踪文件从 `tree/` 复制回原位置。禁止用归档整体覆盖仓库，以免丢失其他未提交修改。
+- 恢复后重新扫描 `%TSD-Header-###%` 和 NUL 字节，并运行 `git status --short`、`git diff --check` 及受影响目标的构建/测试。确认无误前保留 TSD 备份；`.codex-build/` 只作本地恢复用，不得提交。
+
 ## 完成检查
 
 - 检查 `git diff`，确认没有意外生成物或无关改动。
